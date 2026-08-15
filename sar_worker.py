@@ -253,6 +253,30 @@ _active_processes_lock = threading.Lock()
 _active_processes = set()
 
 
+def _low_priority_kwargs():
+    """Запускать детектор с ПОНИЖЕННЫМ приоритетом.
+
+    Смысл: инференс -- работа фоновая и терпит задержку, а человек, который в
+    это время листает кадры и смотрит видео, задержку замечает сразу. При
+    равном приоритете планировщик ОС делит процессор поровну, и веб-сервис
+    начинает подвисать ровно тогда, когда идёт обработка (поймано на реальной
+    работе команды из 6 человек).
+
+    Понижение приоритета не замедляет обработку, когда машина свободна: ядра
+    всё равно достаются детектору. Оно лишь определяет, КТО уступит, когда
+    ресурса не хватает на всех -- и уступать должен детектор.
+
+    Резерв ядер (см. _limit_cpu_threads в sar_video_review.py) решает другую
+    половину задачи: там ограничивается СКОЛЬКО ядер занимает инференс, здесь --
+    насколько охотно он их отдаёт."""
+    if os.name == "nt":
+        # BELOW_NORMAL_PRIORITY_CLASS -- мягче, чем IDLE: на простое машины
+        # детектор всё равно получает всё, но уступает интерактивной работе
+        return {"creationflags": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)}
+    # POSIX: nice(+10) в дочернем процессе до exec
+    return {"preexec_fn": lambda: os.nice(10)}
+
+
 def _register_process(proc):
     with _active_processes_lock:
         _active_processes.add(proc)
@@ -338,7 +362,8 @@ def run_one_report(report):
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, encoding="utf-8", errors="replace",
-                                 bufsize=1, cwd=SCRIPT_DIR, env=env)
+                                 bufsize=1, cwd=SCRIPT_DIR, env=env,
+                                 **_low_priority_kwargs())
         _register_process(proc)
         for line in proc.stdout:
             line = line.rstrip("\n")
