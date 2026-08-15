@@ -943,13 +943,30 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
    ширина и крупнее шрифт, иначе значок теряется в широкой кнопке */
 #sort-dir {{ width:38px; font-size:16px; line-height:1; text-align:center; padding:6px 0; }}
 .toolbar button:hover {{ border-color:#555; }}
-.item-row {{ display:flex; align-items:stretch; gap:8px; margin-bottom:6px; }}
-.item {{ flex:1; display:flex; align-items:center; gap:12px; background:#1b1b1b; border:1px solid #2a2a2a;
-         border-radius:8px; padding:8px 14px; cursor:pointer; text-decoration:none;
-         color:#eee; transition: border-color .1s; min-width:0; }}
-.item:hover {{ border-color:#555; }}
-.item.disabled {{ cursor:default; opacity:0.85; }}
-.fname {{ flex:1; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+/* СТРОГАЯ СЕТКА. Раньше строка выкладывалась флексом, и каждый элемент
+   вставал по своей естественной ширине -- полоса покрытия, статистика и
+   счётчики оказывались в разных местах на каждой строке, правый край
+   "плясал". Теперь ширины колонок заданы жёстко и одинаковы для всех строк,
+   поэтому цифры выстраиваются по вертикали и их можно сравнивать взглядом.
+   Колонки: превью | имя | покрытие | просмотры | находки | статус | кнопки */
+.item-row {{ display:grid;
+             grid-template-columns: 64px minmax(0, 1fr) 120px 130px 96px 110px auto;
+             align-items:center; gap:10px;
+             background:#1b1b1b; border:1px solid #2a2a2a; border-radius:8px;
+             padding:6px 12px; margin-bottom:6px; transition: border-color .1s; }}
+.item-row:hover {{ border-color:#555; }}
+/* шапка -- без рамки и фона, только подписи столбцов */
+.list-head {{ background:none; border-color:transparent; padding-top:0; padding-bottom:2px;
+              margin-bottom:2px; font-size:11px; color:#666; text-transform:uppercase;
+              letter-spacing:.05em; }}
+.list-head:hover {{ border-color:transparent; }}
+/* сама ссылка-строка больше не рисует фон/рамку -- это делает .item-row,
+   иначе получилась бы рамка внутри рамки */
+.item {{ display:contents; color:#eee; text-decoration:none; cursor:pointer; }}
+.item.disabled {{ cursor:default; }}
+.fname {{ font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }}
+/* колонки с числами -- моноширинные цифры, чтобы столбец не дёргался */
+.col-num {{ font-variant-numeric: tabular-nums; }}
 .badge {{ font-size:11px; padding:3px 8px; border-radius:5px; white-space:nowrap; }}
 .badge.idle {{ background:#2a2a2a; color:#999; border:1px solid #444; }}
 .badge.queued {{ background:#444; color:#ccc; }}
@@ -957,10 +974,17 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .badge.done {{ background:#22703a; color:#fff; }}
 .badge.error {{ background:#7a1f1f; color:#fff; }}
 .stat {{ font-size:12px; color:#999; white-space:nowrap; }}
-.progress-mini {{ width:80px; height:6px; background:#333; border-radius:3px; overflow:hidden; }}
+.progress-mini {{ width:100%; height:6px; background:#333; border-radius:3px; overflow:hidden; margin-bottom:3px; }}
 .progress-mini-bar {{ height:100%; background:#8a6d00; }}
-.covbar {{ display:flex; gap:1px; width:120px; height:6px; transition: height .15s; overflow:hidden; }}
-.item:hover .covbar {{ height:16px; }}
+.covbar {{ display:flex; gap:1px; width:100%; height:6px; transition: height .15s; overflow:hidden; }}
+.item-row:hover .covbar {{ height:16px; }}
+/* ячейки сетки: выравнивание внутри своей колонки */
+.cell-cov {{ min-width:0; }}
+.cell-stat {{ font-size:12px; color:#999; text-align:right; white-space:nowrap;
+              overflow:hidden; text-overflow:ellipsis; }}
+.cell-det {{ font-size:12px; color:#999; text-align:right; white-space:nowrap; }}
+.cell-status {{ display:flex; flex-direction:column; align-items:flex-end; gap:2px; min-width:0; }}
+.cell-actions {{ display:flex; gap:6px; justify-content:flex-end; }}
 .covseg {{ flex:1; background:#333; border-radius:1px; }}
 .covseg.on {{ background:#2f9e44; }}
 .kind-icon {{ width:20px; text-align:center; opacity:0.6; }}
@@ -1162,7 +1186,18 @@ function render(data) {{
       + '(подпапки не сканируются — см. README).</p>';
     return;
   }}
-  root.innerHTML = renderItems(sortItems(data.items));
+  // шапка колонок -- та же сетка, что и у строк, поэтому подписи стоят
+  // ровно над своими столбцами
+  const header = `<div class="item-row list-head">
+      <span></span>
+      <span>файл</span>
+      <span>просмотр</span>
+      <span class="cell-stat">кто смотрел</span>
+      <span class="cell-det">находки</span>
+      <span class="cell-status">статус</span>
+      <span></span>
+    </div>`;
+  root.innerHTML = header + renderItems(sortItems(data.items));
 }}
 
 function renderItems(items) {{
@@ -1245,17 +1280,22 @@ function renderItems(items) {{
     const runLink = (it.status === 'idle' || it.status === 'error')
       ? `<button class="runlink" onclick="enqueue('${{it.report_id}}', this)" title="Прогнать через модель">🤖</button>`
       : '';
+    // ВАЖНО для сетки: пустые ячейки нельзя пропускать -- иначе следующие
+    // элементы сдвинутся в чужие колонки и выравнивание развалится. Поэтому
+    // каждая колонка всегда выводится, пусть и пустым <span>.
+    // Столбцов ровно 7: превью | имя | покрытие | просмотры | находки |
+    // статус | кнопки. Статус и кнопки собраны каждый в ОДНУ ячейку, иначе
+    // строка "обрабатывается" (полоска + бейдж) заняла бы две колонки.
     return `<div class="item-row">
       ${{thumb}}
       <a class="${{cls}}" href="${{href}}">
         <span class="fname">${{it.name}}</span>
-        ${{cov}}
-        ${{stat}}
-        ${{detStat}}
-        ${{right}}
+        <span class="cell-cov">${{cov}}</span>
+        <span class="cell-stat col-num">${{stat}}</span>
+        <span class="cell-det col-num">${{detStat}}</span>
+        <span class="cell-status">${{right}}</span>
       </a>
-      ${{runLink}}
-      ${{playerLink}}
+      <span class="cell-actions">${{runLink}}${{playerLink}}</span>
     </div>`;
   }}).join('');
 }}
