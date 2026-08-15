@@ -1175,8 +1175,18 @@ function renderItems(items) {{
     // = null, пока отчёт не done (см. detectionTotal выше)
     const aiCountTxt = it.ai_count === null || it.ai_count === undefined ? '—' : it.ai_count;
     const detStat = `<span class="stat det-stat">🤖 ${{aiCountTxt}} · ✍️ ${{it.manual_count || 0}}</span>`;
-    const clickable = it.status === 'done' || it.status === 'processing' || it.status === 'error';
-    const href = clickable ? `/report/${{it.report_id}}/` : '#';
+    // Для ФОТО вся строка ведёт в просмотр снимка, в любом статусе: смотреть
+    // снимок глазами можно с первой секунды, не дожидаясь детектора, а из
+    // самого просмотра есть ссылка на отчёт, когда тот появится. Раньше
+    // строка фото в очереди была мёртвой (href='#'), и открыть снимок из
+    // таблицы было нельзя вообще.
+    // Для ВИДЕО поведение прежнее: строка -- в отчёт со сценами (он тяжёлый и
+    // осмысленен только после обработки), а ручной плеер -- отдельной кнопкой.
+    const clickable = it.kind === 'photo'
+      || it.status === 'done' || it.status === 'processing' || it.status === 'error';
+    const href = it.kind === 'photo'
+      ? mediaHref
+      : (clickable ? `/report/${{it.report_id}}/` : '#');
     const cls = clickable ? 'item' : 'item disabled';
     // ВАЖНО: playerLink -- ОТДЕЛЬНАЯ ссылка, не вложенная в основную <a class="item">.
     // Вложенные <a> внутри <a> -- невалидный HTML, браузер разбирает его
