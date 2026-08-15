@@ -1,0 +1,42 @@
+{
+  "model": "yolov8s-worldv2.pt",
+  "model_type": "yolo-world",
+  "classes": "person",
+  "conf": 0.15,
+  "tile": 640,
+  "overlap": 0.25,
+  "frame_skip": 2,
+  "color_anomaly": true,
+  "crop_margin": 60,
+  "full_frame_quality": 88,
+  "full_frame_save_mode": "all",
+  "srt_gps_tuple_order": "lat_lon",
+  "telemetry_dir": "telemetry",
+  "use_focal_len_fov": true,
+  "camera_sensor_width_mm": 6.4,
+  "camera_sensor_height_mm": 4.8,
+  "focal_len_scale": 0.1,
+  "camera_hfov_deg": 84.0,
+  "max_estimate_distance_m": 3000.0,
+  "detector_backend": "custom",
+  "grouping": {
+    "max_frame_gap": 360,
+    "distance_multiplier": 2.5
+  },
+  "server": {
+    "watch_dir": ".",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "shared_password": "change_me",
+    "poll_interval_sec": 15,
+    "workers": 1,
+    "player_ai_poll_interval_sec": 5
+  },
+  "telegram_bot": {
+    "bot_token": "",
+    "admin_chat_ids": [],
+    "service_url": "",
+    "guide_url": "",
+    "presentation_url": ""
+  }
+}
