@@ -960,13 +960,18 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .covseg {{ flex:1; background:#333; border-radius:1px; }}
 .covseg.on {{ background:#2f9e44; }}
 .kind-icon {{ width:20px; text-align:center; opacity:0.6; }}
+/* превью -- отдельная ссылка рядом с основной строкой (НЕ внутри неё:
+   вложенные <a> невалидны), поэтому у неё своя рамка и свой ховер */
 .thumb-wrap {{ width:64px; height:36px; flex-shrink:0; border-radius:5px; overflow:hidden;
-                background:#0d0d0d; display:flex; align-items:center; justify-content:center; }}
+                background:#0d0d0d; display:flex; align-items:center; justify-content:center;
+                border:1px solid #2a2a2a; align-self:center; text-decoration:none;
+                transition: border-color .1s; }}
+.thumb-wrap:hover {{ border-color:#3355aa; }}
 .thumb-wrap .kind-icon {{ width:auto; font-size:16px; }}
 .thumb-img {{ width:100%; height:100%; object-fit:cover; display:block; }}
-.playerlink {{ font-size:12px; padding:4px 10px; border-radius:5px; border:1px solid #3355aa;
+.playerlink {{ font-size:14px; padding:4px 12px; border-radius:5px; border:1px solid #3355aa;
                color:#8ecbff; text-decoration:none; white-space:nowrap; display:flex; align-items:center;
-               flex-shrink:0; }}
+               justify-content:center; flex-shrink:0; }}
 .playerlink:hover {{ background:#3355aa; color:#fff; }}
 .upload-box {{ display:flex; align-items:center; gap:10px; margin:14px 0; padding:12px 14px;
                 background:#1b1b1b; border:1px solid #3355aa; border-radius:8px; flex-wrap:wrap; }}
@@ -1135,13 +1140,19 @@ function renderItems(items) {{
     // превью -- только для видео (первый кадр, генерируется воркером, см.
     // watcher_loop в sar_worker.py); если ещё не готово (файл только что
     // добавлен) или не грузится -- откатываемся на эмодзи-иконку как раньше
-    const thumb = it.kind === 'video'
-      ? `<span class="thumb-wrap">
+    // Превью есть у обоих типов: первый кадр у видео, уменьшенная копия у
+    // фото. Клик по превью открывает сам материал (плеер / просмотр снимка),
+    // поэтому это ОТДЕЛЬНАЯ ссылка, ВНЕ основной <a class="item"> -- вложенные
+    // <a> внутри <a> невалидны, браузер разбирает их непредсказуемо и может
+    // оборвать родительскую ссылку (эти грабли в проекте уже были, см. CLAUDE.md).
+    const mediaHref = it.kind === 'video'
+      ? `/report/${{it.report_id}}/player/`
+      : `/report/${{it.report_id}}/viewer/`;
+    const thumb = `<a class="thumb-wrap" href="${{mediaHref}}" title="Открыть">
            <img class="thumb-img" src="/api/thumbnail/${{encodeURIComponent(it.name)}}" loading="lazy"
                 onerror="this.style.display='none'; this.nextElementSibling.style.display='';">
            <span class="kind-icon" style="display:none">${{icon}}</span>
-         </span>`
-      : `<span class="thumb-wrap"><span class="kind-icon">${{icon}}</span></span>`;
+         </a>`;
     let right = `<span class="badge ${{it.status}}">${{badgeLabel(it.status)}}</span>`;
     if (it.status === 'processing') {{
       right = `<div class="progress-mini"><div class="progress-mini-bar" style="width:${{it.progress_pct||0}}%"></div></div>` + right;
@@ -1181,12 +1192,13 @@ function renderItems(items) {{
     // Для фото -- своя ссылка на просмотр, тоже доступная в любом статусе.
     // Без неё снимок в очереди нельзя было открыть вообще ничем: строка не
     // кликабельна, пока нет отчёта, а отчёта нет, пока файл не обработан.
-    const playerLink = (it.kind === 'video')
-      ? `<a class="playerlink" href="/report/${{it.report_id}}/player/" title="Ручной просмотр с плеером">▶ плеер</a>`
-      : `<a class="playerlink" href="/report/${{it.report_id}}/viewer/" title="Посмотреть снимок">🖼 смотреть</a>`;
+    // кнопка выглядит одинаково для видео и фото -- просто знак "играть",
+    // ведёт в плеер или в просмотр снимка соответственно
+    const playerLink =
+      `<a class="playerlink" href="${{mediaHref}}" title="${{it.kind === 'video' ? 'Ручной просмотр с плеером' : 'Посмотреть снимок'}}">▶</a>`;
     return `<div class="item-row">
+      ${{thumb}}
       <a class="${{cls}}" href="${{href}}">
-        ${{thumb}}
         <span class="fname">${{it.name}}</span>
         ${{cov}}
         ${{stat}}
@@ -1303,7 +1315,9 @@ def api_thumbnail(filename):
     что и у report_asset() ниже)."""
     watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
     found = {name: kind for name, _abs_path, kind in sar_common.scan_watch_dir(watch_dir)}
-    if found.get(filename) != "video":
+    # превью есть и у видео (первый кадр), и у фото (уменьшенная копия) --
+    # см. _generate_thumbnail в sar_worker.py
+    if found.get(filename) not in ("video", "photo"):
         return "", 404
 
     thumb_path = sar_common.get_thumbnail_path(DATA_DIR, filename)

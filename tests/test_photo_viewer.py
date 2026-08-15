@@ -106,4 +106,25 @@ def test_viewer_rejects_video(tmp_path, monkeypatch):
 def test_file_list_offers_view_link_for_photos():
     html = sar_server.TREE_PAGE_HTML
     assert "/viewer/" in html
-    assert "🖼 смотреть" in html
+
+
+def test_file_list_uses_same_play_button_for_photo_and_video():
+    """Кнопка открытия материала выглядит одинаково у видео и фото -- просто
+    знак "играть", без разного текста рядом."""
+    html = sar_server.TREE_PAGE_HTML.replace("\n", " ")
+    assert "▶ плеер" not in html
+    assert "🖼 смотреть" not in html
+    assert 'class="playerlink"' in html and "▶</a>" in html
+
+
+def test_thumbnail_is_clickable_and_outside_the_row_anchor():
+    """Превью -- отдельная ссылка, а НЕ вложенная в <a class="item">:
+    вложенные <a> внутри <a> невалидны и разбираются браузером
+    непредсказуемо (документированные грабли проекта)."""
+    # .format() -- иначе в сыром шаблоне скобки удвоены (${{thumb}})
+    html = sar_server.TREE_PAGE_HTML.format(
+        viewer_name="tester", upload_section="").replace("\n", " ")
+    assert '<a class="thumb-wrap"' in html
+    # в разметке строки превью идёт ДО открывающего <a class="${cls}">
+    row = html[html.index('<div class="item-row">'):]
+    assert row.index("${thumb}") < row.index('<a class="${cls}"')

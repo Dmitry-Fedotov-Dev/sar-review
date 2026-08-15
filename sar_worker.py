@@ -71,21 +71,49 @@ def recover_stale_processing_reports():
     conn.close()
 
 
-def _generate_thumbnail(abs_path, thumb_path, max_width=320):
-    """Первый кадр видео как JPEG-превью для списка файлов на главной
-    странице. cv2 -- ЛЕНИВЫЙ импорт (не на уровне модуля): sar_worker.py
-    намеренно не тянет тяжёлые зависимости детектора при обычном старте
-    (тот же принцип, что и с sar_video_review.py -- см. main() ниже), импорт
-    происходит только когда реально нужно сгенерировать превью."""
+def _generate_thumbnail(abs_path, thumb_path, max_width=320, kind="video"):
+    """JPEG-превью для списка файлов на главной странице: первый кадр для
+    видео, уменьшенная копия для фото. cv2 -- ЛЕНИВЫЙ импорт (не на уровне
+    модуля): sar_worker.py намеренно не тянет тяжёлые зависимости детектора
+    при обычном старте (тот же принцип, что и с sar_video_review.py --
+    см. main() ниже), импорт происходит только когда реально нужно
+    сгенерировать превью."""
     try:
         import cv2
     except ImportError:
         return False
+    if kind == "photo":
+        # cv2.imread не понимает не-ASCII пути на Windows, поэтому читаем
+        # файл сами и декодируем из байт -- имена снимков с дрона обычно
+        # ASCII, но полагаться на это нельзя (папка операции может быть
+        # названа по-русски)
+        try:
+            import numpy as np
+            with open(abs_path, "rb") as f:
+                data = np.frombuffer(f.read(), dtype=np.uint8)
+            frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        except Exception:
+            return False
+        if frame is None:
+            return False
+        return _write_thumbnail(cv2, frame, thumb_path, max_width)
+
     cap = cv2.VideoCapture(abs_path)
     try:
         ok, frame = cap.read()
         if not ok or frame is None:
             return False
+        return _write_thumbnail(cv2, frame, thumb_path, max_width)
+    except Exception as e:
+        print(f"[thumbnail] не удалось создать превью для {abs_path}: {e}")
+        return False
+    finally:
+        cap.release()
+
+
+def _write_thumbnail(cv2, frame, thumb_path, max_width):
+    """Уменьшает кадр и атомарно пишет JPEG. Общий хвост для видео и фото."""
+    try:
         h, w = frame.shape[:2]
         if w > max_width:
             scale = max_width / w
@@ -105,26 +133,24 @@ def _generate_thumbnail(abs_path, thumb_path, max_width=320):
         os.replace(tmp_path, thumb_path)
         return True
     except Exception as e:
-        print(f"[thumbnail] не удалось создать превью для {abs_path}: {e}")
+        print(f"[thumbnail] не удалось записать превью {thumb_path}: {e}")
         return False
-    finally:
-        cap.release()
 
 
-def _ensure_thumbnail(name, abs_path):
+def _ensure_thumbnail(name, abs_path, kind="video"):
     """Проверка дешёвая (пара os.path вызовов) -- вызывается на каждом
-    скане для каждого видео, реальная генерация (cv2) происходит только
-    один раз на файл, и заново -- если видео на диске новее уже
+    скане для каждого файла, реальная генерация (cv2) происходит только
+    один раз на файл, и заново -- если исходник на диске новее уже
     закэшированного превью (файл был перезаписан/переснят под тем же
     именем -- тот же класс ситуации, что и с "уехавшим" ctime выше)."""
     thumb_path = sar_common.get_thumbnail_path(DATA_DIR, name)
     try:
-        video_mtime = os.path.getmtime(abs_path)
-        needs_thumb = not os.path.exists(thumb_path) or os.path.getmtime(thumb_path) < video_mtime
+        src_mtime = os.path.getmtime(abs_path)
+        needs_thumb = not os.path.exists(thumb_path) or os.path.getmtime(thumb_path) < src_mtime
     except OSError:
         needs_thumb = False
     if needs_thumb:
-        _generate_thumbnail(abs_path, thumb_path)
+        _generate_thumbnail(abs_path, thumb_path, kind=kind)
 
 
 def _read_video_duration(abs_path):
@@ -198,8 +224,11 @@ def watcher_loop():
                     report_id = row["report_id"]
                 conn.close()
 
+                # превью нужно и видео, и фото -- список файлов показывает
+                # его одинаково для обоих; длительность, разумеется, только
+                # у видео
+                _ensure_thumbnail(name, abs_path, kind=kind)
                 if kind == "video":
-                    _ensure_thumbnail(name, abs_path)
                     _ensure_duration(report_id, abs_path,
                                       row["duration_sec"] if row is not None else None)
         except Exception as e:
