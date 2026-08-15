@@ -78,6 +78,36 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sar_common
 
+
+def _limit_cpu_threads(reserve_cores=2):
+    """Оставляет часть ядер веб-сервису. Без этого torch/ultralytics и OpenCV
+    забирают ВСЕ ядра под инференс (это отмечено в CLAUDE.md как известная
+    особенность), и на той же машине веб-интерфейс начинает ощутимо
+    подвисать у всех, кто в это время смотрит видео -- поймано на реальной
+    работе команды из 6 человек.
+
+    Вызывать нужно ДО импорта torch/ultralytics: переменные окружения
+    OMP/MKL читаются один раз при их инициализации."""
+    try:
+        total = os.cpu_count() or 1
+    except Exception:
+        total = 1
+    threads = max(1, total - max(0, reserve_cores))
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, str(threads))
+    try:
+        cv2.setNumThreads(threads)
+    except Exception:
+        pass
+    return threads
+
+
+# reserve_cores можно переопределить в sar_config.json (detector_reserve_cores),
+# но конфиг читается позже -- поэтому базовое ограничение ставим сразу, а
+# точное значение применяется в main() (см. ниже).
+_limit_cpu_threads()
+
 # ---------------------------------------------------------------------------
 # 0. КОНФИГ — дефолтные значения всех флагов. Если рядом со скриптом лежит
 #    sar_config.json — он подхватывается автоматически (можно и явно указать
@@ -105,6 +135,15 @@ DEFAULT_CONFIG = {
     #             тому, что было раньше).
     "detector_backend": "custom",
     "color_anomaly": True,
+    # потолок на число цветовых пятен, оставляемых на ОДНОМ кадре (самые
+    # уверенные). На горном материале детектор без потолка вырождался в шум:
+    # ~167 срабатываний на кадр по "синему" (небо и тени в снегу), 503 499
+    # штук на одно видео против 12 611 у модели -- отчёт становился на 296 МБ
+    # и не открывался. Настоящая находка почти всегда среди самых ярких пятен.
+    "color_max_per_frame": 12,
+    # сколько ядер CPU оставить веб-сервису, чтобы интерфейс не подвисал у
+    # людей, пока на той же машине идёт инференс (см. _limit_cpu_threads)
+    "detector_reserve_cores": 2,
     "crop_margin": 60,
     "full_frame_quality": 88,
     # "all"            -> как раньше: полный кадр сохраняется для каждого
@@ -248,9 +287,18 @@ COLOR_RANGES = {
 }
 
 
-def detect_color_anomalies(frame_bgr, min_area_px=25, max_area_frac=0.02):
+def detect_color_anomalies(frame_bgr, min_area_px=25, max_area_frac=0.02, max_per_frame=12):
     """Возвращает [(x1,y1,x2,y2,score,label), ...] для пятен нетипичного цвета.
-    score — эвристическая "уверенность" на основе насыщенности и компактности пятна."""
+    score — эвристическая "уверенность" на основе насыщенности и компактности пятна.
+
+    max_per_frame -- ЖЁСТКИЙ потолок на кадр, оставляются самые уверенные.
+    Без него на горном материале детектор вырождался в шум: на реальном
+    видео он выдал 503 499 срабатываний на "синий/голубой" (небо и синеватые
+    тени в снегу) против 12 611 у модели -- ~167 ложных пятен на КАЖДЫЙ кадр.
+    Это не только бесполезно для поиска, но и ломало сервис: report.html
+    разрастался до 296 МБ, и страница сцен переставала открываться.
+    Настоящая находка почти всегда среди самых ярких/компактных пятен, а
+    хвост из сотен слабых -- это фон."""
     h, w = frame_bgr.shape[:2]
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     max_area = max_area_frac * h * w
@@ -276,6 +324,10 @@ def detect_color_anomalies(frame_bgr, min_area_px=25, max_area_frac=0.02):
             compactness = area / (bw * bh + 1e-6)
             score = float(min(1.0, 0.5 * region_sat + 0.5 * compactness))
             results.append((x, y, x + bw, y + bh, score, f"цвет: {label}"))
+
+    if max_per_frame and len(results) > max_per_frame:
+        results.sort(key=lambda r: r[4], reverse=True)
+        results = results[:max_per_frame]
     return results
 
 
@@ -739,7 +791,7 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
                    tracking_report_id=None, tracking_api_base=None, srt_gps_tuple_order="lat_lon",
                    camera_hfov_deg=84.0, detector_backend="custom",
                    max_estimate_distance_m=sar_common.DEFAULT_MAX_ESTIMATE_DISTANCE_M,
-                   fov_cfg=None):
+                   fov_cfg=None, color_max_per_frame=12):
     os.makedirs(out_dir, exist_ok=True)
     crops_dir = os.path.join(out_dir, "crops")
     frames_dir = os.path.join(out_dir, "frames")
@@ -803,7 +855,7 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
             # источник 2: цветовые аномалии (снаряжение/одежда/палатки), без модели
             if use_color_anomaly:
                 dets += [(x1, y1, x2, y2, s, cls, "color") for (x1, y1, x2, y2, s, cls)
-                         in detect_color_anomalies(frame)]
+                         in detect_color_anomalies(frame, max_per_frame=color_max_per_frame)]
 
             if dets:
                 # полный кадр сохраняем ЧИСТЫМ, без выжженных рамок — рамки
@@ -905,6 +957,33 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
     return hits
 
 
+MAX_HITS_PER_SCENE_IN_REPORT = 80
+
+
+def _limit_scene_hits(g_hits, limit=MAX_HITS_PER_SCENE_IN_REPORT):
+    """Сколько кадров сцены встраивать в report.html.
+
+    Страховка от неоткрываемого отчёта: на реальном горном видео цветовой
+    детектор дал 516 110 детекций, и report.html вырос до 296 МБ -- браузер
+    такую страницу фактически не открывал. Сами детекции при этом полностью
+    сохраняются в detections.json/csv, урезается ТОЛЬКО то, что встраивается
+    в HTML для листания кадров сцены.
+
+    Берём равномерно по всей сцене (а не первые N), чтобы сохранить обзор
+    от начала до конца, и обязательно оставляем пиковый по уверенности кадр --
+    именно он показан на карточке сцены."""
+    if len(g_hits) <= limit:
+        return g_hits
+    peak = max(g_hits, key=lambda h: h.confidence)
+    step = len(g_hits) / float(limit)
+    picked = [g_hits[int(i * step)] for i in range(limit)]
+    if peak not in picked:
+        picked[len(picked) // 2] = peak
+    # порядок по кадрам -- как и в исходном списке
+    picked.sort(key=lambda h: h.frame_idx)
+    return picked
+
+
 def save_outputs(hits, groups, out_dir, video_path, tracking_report_id=None, tracking_api_base=None):
     # JSON + CSV — сырые данные для интеграции/дедупликации между видео,
     # с полем group_id — какой сцене принадлежит каждая детекция
@@ -934,6 +1013,11 @@ def save_outputs(hits, groups, out_dir, video_path, tracking_report_id=None, tra
     # поверх ЧИСТОГО полного кадра в браузере (см. openFull). Один и тот же
     # full_image_path может встречаться у нескольких hits — например, если
     # на одном кадре видео нашли и человека, и палатку.
+    # Потолок на число рамок, рисуемых поверх ОДНОГО кадра. Та же страховка,
+    # что и с _limit_scene_hits: при вырождении цветового детектора на кадр
+    # приходилось под две сотни рамок -- это и нечитаемо глазом, и раздувало
+    # report.html (62 МБ только на эту структуру в реальном случае).
+    MAX_BOXES_PER_FRAME = 40
     frame_boxes = {}
     for h in hits:
         if not h.full_image_path:
@@ -943,6 +1027,10 @@ def save_outputs(hits, groups, out_dir, video_path, tracking_report_id=None, tra
                  "source": h.source, "confidence": h.confidence}
         if entry not in frame_boxes[h.full_image_path]:
             frame_boxes[h.full_image_path].append(entry)
+    for path, boxes in frame_boxes.items():
+        if len(boxes) > MAX_BOXES_PER_FRAME:
+            boxes.sort(key=lambda b: b["confidence"], reverse=True)
+            frame_boxes[path] = boxes[:MAX_BOXES_PER_FRAME]
 
     # --- сборка данных по сценам для отчёта ---
     # аватар сцены = кадр с максимальной уверенностью в группе
@@ -999,7 +1087,7 @@ def save_outputs(hits, groups, out_dir, video_path, tracking_report_id=None, tra
                     "focal_len": h.focal_len,
                     "raw_telemetry": h.raw_telemetry,
                 }
-                for h in g_hits
+                for h in _limit_scene_hits(g_hits)
             ],
         }
 
@@ -1575,6 +1663,13 @@ def main():
             config_path = candidate
             print(f"Использую конфиг: {config_path}")
     cfg = load_config(config_path)
+    # точное число зарезервированных под веб-сервис ядер -- из конфига
+    # (базовое ограничение уже стоит с момента импорта, см. _limit_cpu_threads)
+    try:
+        import torch
+        torch.set_num_threads(_limit_cpu_threads(cfg.get("detector_reserve_cores", 2)))
+    except Exception:
+        pass
 
     def pick(cli_val, cfg_key):
         return cli_val if cli_val is not None else cfg[cfg_key]
@@ -1645,6 +1740,7 @@ def main():
         detector_backend=pick(args.detector_backend, "detector_backend"),
         max_estimate_distance_m=pick(args.max_estimate_distance_m, "max_estimate_distance_m"),
         fov_cfg=cfg,
+        color_max_per_frame=cfg.get("color_max_per_frame", 12),
     )
 
 

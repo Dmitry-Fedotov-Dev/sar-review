@@ -2820,9 +2820,17 @@ def main():
 
     try:
         from waitress import serve
-        print(f"Запускаю через waitress (production WSGI) на "
+        # ПОТОКОВ НУЖНО МНОГО, и вот почему: отдача видео (/report/<id>/video)
+        # держит поток занятым ВСЁ ВРЕМЯ просмотра, а не доли секунды как
+        # обычный запрос. При threads=8 шесть человек, одновременно смотрящих
+        # видео, занимали 6 потоков из 8 -- на опросы списка файлов, плеера и
+        # heartbeat оставалось два, и интерфейс у всех начинал заметно
+        # подвисать (поймано на реальной работе команды из 6 человек).
+        # Потоки тут почти бесплатны: они ждут сеть и диск, а не считают.
+        threads = SERVER_CFG.get("server_threads", 32)
+        print(f"Запускаю через waitress (production WSGI, потоков: {threads}) на "
               f"http://{SERVER_CFG['host']}:{SERVER_CFG['port']}")
-        serve(app, host=SERVER_CFG["host"], port=SERVER_CFG["port"], threads=8)
+        serve(app, host=SERVER_CFG["host"], port=SERVER_CFG["port"], threads=threads)
     except ImportError:
         print("ВНИМАНИЕ: waitress не установлен (pip install waitress) -- "
               "запускаю через встроенный dev-сервер Flask. Он НЕ предназначен "
