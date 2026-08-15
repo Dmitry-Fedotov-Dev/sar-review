@@ -94,6 +94,24 @@ def set_status(chat_id, status, decided_by):
         conn.close()
 
 
+def auto_approve_active(now=None):
+    """Действует ли сейчас окно автовыдачи доступа (см. auto_approve_until).
+
+    Любая проблема со значением -- считаем, что окно ВЫКЛЮЧЕНО: пустая
+    строка, мусор вместо даты, прошедшее время. Ошибаться безопаснее в
+    сторону закрытого доступа, а не открытого."""
+    raw = (CFG.get("auto_approve_until") or "").strip()
+    if not raw:
+        return False
+    try:
+        until = datetime.fromisoformat(raw)
+    except ValueError:
+        log.warning("auto_approve_until = %r -- не разобрал дату, автовыдача выключена", raw)
+        return False
+    now = now or datetime.now(until.tzinfo) if until.tzinfo else (now or datetime.now())
+    return now < until
+
+
 def access_message():
     return (
         "✅ Доступ одобрен!\n\n"
@@ -137,6 +155,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if row["status"] == "denied":
         await update.message.reply_text(DECLINE_MESSAGE)
+        return
+
+    # окно автовыдачи (например, на ночь, когда координатор спит):
+    # доступ выдаётся сразу, но координатор всё равно получает уведомление,
+    # чтобы утром видеть, кто зашёл
+    if auto_approve_active():
+        set_status(chat_id, "approved", 0)
+        await update.message.reply_text(access_message())
+        text = (f"Доступ выдан АВТОМАТИЧЕСКИ (включено окно автовыдачи):\n"
+                f"{requester_label(row)}")
+        for admin_id in CFG["admin_chat_ids"]:
+            try:
+                await context.bot.send_message(admin_id, text)
+            except Exception:
+                log.exception("не удалось уведомить админа %s", admin_id)
         return
 
     if is_new:
