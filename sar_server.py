@@ -939,6 +939,9 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .toolbar select {{ background:#1b1b1b; color:#eee; border:1px solid #333; border-radius:6px; padding:6px 10px; }}
 .toolbar button {{ background:#1b1b1b; color:#eee; border:1px solid #333; border-radius:6px;
                     padding:6px 10px; cursor:pointer; }}
+/* кнопка направления сортировки -- только значок ⇅, поэтому фиксированная
+   ширина и крупнее шрифт, иначе значок теряется в широкой кнопке */
+#sort-dir {{ width:38px; font-size:16px; line-height:1; text-align:center; padding:6px 0; }}
 .toolbar button:hover {{ border-color:#555; }}
 .item-row {{ display:flex; align-items:stretch; gap:8px; margin-bottom:6px; }}
 .item {{ flex:1; display:flex; align-items:center; gap:12px; background:#1b1b1b; border:1px solid #2a2a2a;
@@ -1002,7 +1005,7 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
     <option value="type">типу файла</option>
     <option value="detections">числу детекций</option>
   </select>
-  <button id="sort-dir" title="Изменить направление">↓ новые/поздние сверху</button>
+  <button id="sort-dir" title="Изменить направление">⇅</button>
 </div>
 {upload_section}
 <div id="tree">Загрузка...</div>
@@ -1026,14 +1029,19 @@ document.getElementById('sort-dir').addEventListener('click', () => {{
 }});
 
 function updateSortDirLabel() {{
+  // Кнопка -- только значок ⇅ (две стрелки в разные стороны). Раньше на ней
+  // был текст вроде "↓ фото→видео", который занимал место и читался хуже
+  // самой сортировки. Смысл текущего направления -- во всплывающей подсказке.
   const btn = document.getElementById('sort-dir');
-  const labels = {{
-    date: sortDesc ? '↓ новые сверху' : '↑ старые сверху',
-    name: sortDesc ? '↓ Я→А' : '↑ А→Я',
-    type: sortDesc ? '↓ фото→видео' : '↑ видео→фото',
-    detections: sortDesc ? '↓ больше детекций сверху' : '↑ меньше детекций сверху',
+  const hints = {{
+    date: sortDesc ? 'сначала новые' : 'сначала старые',
+    name: sortDesc ? 'по имени: Я→А' : 'по имени: А→Я',
+    type: sortDesc ? 'сначала фото' : 'сначала видео',
+    detections: sortDesc ? 'сначала с большим числом детекций'
+                          : 'сначала с меньшим числом детекций',
   }};
-  btn.textContent = labels[sortKey];
+  btn.textContent = '⇅';
+  btn.title = (hints[sortKey] || 'изменить направление') + ' — нажмите, чтобы перевернуть';
 }}
 
 let lastData = {{ items: [] }};
@@ -1189,10 +1197,14 @@ function renderItems(items) {{
     }}
     // статистика просмотра -- для видео в любом статусе (см. полосу выше):
     // человек может смотреть файл вручную, пока тот ещё стоит в очереди
+    // Ничего не показываем, пока смотреть нечего: строка "0 чел. · —
+    // просмотрено" выглядела как поломка, хотя означала просто "ещё никто
+    // не открывал". Тот же принцип, что и с прочерком у счётчика модели.
     let stat = '';
-    if (it.kind === 'video' || it.status === 'done') {{
-      const pct = it.percent !== null && it.percent !== undefined ? it.percent + '%' : '—';
-      stat = `<span class="stat">${{it.viewer_count}} чел. · ${{pct}} просмотрено</span>`;
+    if ((it.kind === 'video' || it.status === 'done') && it.viewer_count) {{
+      const pct = (it.percent !== null && it.percent !== undefined)
+        ? ` · просмотрено ${{it.percent}}%` : '';
+      stat = `<span class="stat">${{it.viewer_count}} чел.${{pct}}</span>`;
     }}
     // счётчики детекций -- модель и ручные отдельно, как и просили; ai_count
     // = null, пока отчёт не done (см. detectionTotal выше)
@@ -2610,9 +2622,15 @@ async function loadCoverage() {{
   const bar = document.getElementById('covbar');
   const buckets = data.buckets || [];
   bar.innerHTML = buckets.map(b => `<div class="covseg ${{b > 0 ? 'on' : ''}}"></div>`).join('');
-  const pct = data.percent !== null && data.percent !== undefined ? data.percent + '%' : '—';
-  document.getElementById('cov-stat').textContent =
-    `Просмотрено (людьми): ${{pct}} · зрителей: ${{data.viewer_count}}`;
+  // без прочерков: пока никто не смотрел -- так и пишем, а не "— · зрителей: 0"
+  const el = document.getElementById('cov-stat');
+  if (!data.viewer_count) {{
+    el.textContent = 'Это видео пока никто не просматривал';
+  }} else {{
+    const pct = (data.percent !== null && data.percent !== undefined)
+      ? `просмотрено ${{data.percent}}%` : 'длительность видео пока неизвестна';
+    el.textContent = `${{pct}} · зрителей: ${{data.viewer_count}}`;
+  }}
 }}
 
 // --- отправка реально просмотренных диапазонов (не диапазонов сцен, а самого видео) ---
