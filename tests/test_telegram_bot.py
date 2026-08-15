@@ -83,6 +83,15 @@ def test_access_message_contains_service_url_password_and_guide():
     assert "https://claude.ai/code/artifact/guide" in msg
 
 
+def test_access_message_recommends_desktop_over_phone():
+    # человека на снегу видно как несколько пикселей -- на телефоне находку
+    # реально пропустить, поэтому рекомендация должна быть в самом первом
+    # сообщении, а не только в гиде
+    msg = bot.access_message()
+    assert "ноутбука или компьютера" in msg
+    assert "не с телефона" in msg
+
+
 def test_access_message_no_longer_includes_presentation_link():
     # по просьбе пользователя -- презентацию из сообщения бота убрали,
     # остаётся только гид волонтёра
