@@ -10,7 +10,6 @@ import sqlite3
 
 import backfill_telemetry as bt
 import sar_common
-from sar_video_review import Hit
 
 
 def _write_detections(out_dir, hits_dicts):

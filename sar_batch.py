@@ -165,7 +165,6 @@ def main():
         print("Обрабатывать нечего — все видео уже готовы. Используйте --force, чтобы пересчитать заново.")
         return
 
-    log_rows = []
     log_exists = os.path.exists(log_path)
     log_file = open(log_path, "a", newline="", encoding="utf-8")
     log_writer = csv.writer(log_file)
