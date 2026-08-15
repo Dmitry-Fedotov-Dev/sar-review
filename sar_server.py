@@ -1178,8 +1178,12 @@ function renderItems(items) {{
     // в работу файл (или файл, на котором детектор упал с ошибкой) не
     // давал начать ручной разбор, хотя для этого не было technической причины.
     // Рамки модели (если появятся) подгружаются в самом плеере на лету.
+    // Для фото -- своя ссылка на просмотр, тоже доступная в любом статусе.
+    // Без неё снимок в очереди нельзя было открыть вообще ничем: строка не
+    // кликабельна, пока нет отчёта, а отчёта нет, пока файл не обработан.
     const playerLink = (it.kind === 'video')
-      ? `<a class="playerlink" href="/report/${{it.report_id}}/player/" title="Ручной просмотр с плеером">▶ плеер</a>` : '';
+      ? `<a class="playerlink" href="/report/${{it.report_id}}/player/" title="Ручной просмотр с плеером">▶ плеер</a>`
+      : `<a class="playerlink" href="/report/${{it.report_id}}/viewer/" title="Посмотреть снимок">🖼 смотреть</a>`;
     return `<div class="item-row">
       <a class="${{cls}}" href="${{href}}">
         ${{thumb}}
@@ -1577,6 +1581,142 @@ def report_video(report_id):
     # conditional=True -> Flask/Werkzeug сам обрабатывает Range-заголовки,
     # это и даёт перемотку в <video> без ручной реализации потоковой отдачи
     return send_file(report["abs_path"], conditional=True)
+
+
+@app.route("/report/<report_id>/photo")
+def report_photo(report_id):
+    """Оригинал снимка. Аналог /report/<id>/video для фото -- без него снимок
+    до обработки детектором нельзя было посмотреть через сервис ВООБЩЕ:
+    строка в списке не кликабельна, пока нет готового отчёта, а отчёта нет,
+    пока файл стоит в очереди (а очередь на CPU бывает на сутки)."""
+    report = get_report_row(report_id)
+    if report is None:
+        return "Отчёт не найден", 404
+    if report["kind"] != "photo":
+        return "Это не фото", 400
+    if not os.path.exists(report["abs_path"]):
+        return "Исходный файл больше не найден на диске", 404
+    return send_file(report["abs_path"], conditional=True)
+
+
+PHOTO_VIEWER_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Снимок — {name}</title>
+<style>
+body {{ font-family: -apple-system, Arial, sans-serif; background:#111; color:#eee; margin:0; padding:20px; }}
+a {{ color:#8ecbff; }}
+h1 {{ font-size:16px; margin:12px 0; }}
+.banner {{ background:#3a2f00; border:1px solid #8a6d00; color:#ffcc66; padding:10px 14px;
+           border-radius:8px; margin-bottom:14px; font-size:13px; }}
+.banner.done {{ background:#14301c; border-color:#22703a; color:#9fe8b5; }}
+.toolbar {{ display:flex; align-items:center; gap:14px; margin:10px 0; flex-wrap:wrap; font-size:13px; }}
+.zoom-controls button {{ width:30px; height:30px; border-radius:5px; border:1px solid #444;
+                          background:#252525; color:#eee; cursor:pointer; font-size:16px; }}
+.zoom-controls button:hover {{ background:#333; }}
+.hint {{ color:#777; font-size:12px; }}
+.viewport {{ position:relative; width:100%; height:78vh; overflow:hidden; border-radius:6px;
+             background:#000; cursor:grab; touch-action:none; border:1px solid #333; }}
+.viewport.dragging {{ cursor:grabbing; }}
+.stage {{ position:absolute; top:50%; left:50%; transform-origin:50% 50%; will-change:transform; }}
+.stage img {{ display:block; max-width:none; user-select:none; -webkit-user-drag:none; }}
+</style></head>
+<body>
+<p><a href="/">&larr; к списку файлов</a>{report_link}</p>
+<h1>Снимок — {name}</h1>
+{banner}
+<div class="toolbar">
+  <span class="zoom-controls">
+    <button onclick="zoomBy(1.3)" title="Приблизить">+</button>
+    <button onclick="zoomBy(1/1.3)" title="Отдалить">&minus;</button>
+    <button onclick="resetZoom()" title="Вписать в экран">⤾</button>
+  </span>
+  <span class="hint">колесо мыши — зум, зажать и тянуть — панорама, двойной клик — сброс</span>
+</div>
+<div class="viewport" id="viewport">
+  <div class="stage" id="stage"><img id="img" src="/report/{report_id}/photo"></div>
+</div>
+<script>
+let st = {{ scale: 1, tx: 0, ty: 0, dragging: false, lastX: 0, lastY: 0 }};
+const img = document.getElementById('img');
+const viewport = document.getElementById('viewport');
+const stage = document.getElementById('stage');
+
+function apply() {{
+  stage.style.transform = `translate(${{st.tx}}px, ${{st.ty}}px) scale(${{st.scale}})`;
+  stage.style.marginLeft = (-img.naturalWidth / 2) + 'px';
+  stage.style.marginTop = (-img.naturalHeight / 2) + 'px';
+}}
+function fit() {{
+  const s = Math.min(viewport.clientWidth / img.naturalWidth,
+                     viewport.clientHeight / img.naturalHeight, 1);
+  st = {{ scale: s || 1, tx: 0, ty: 0, dragging: false, lastX: 0, lastY: 0 }};
+  apply();
+}}
+function zoomBy(f, cx, cy) {{
+  const r = viewport.getBoundingClientRect();
+  const px = cx ?? r.width / 2, py = cy ?? r.height / 2;
+  const ns = Math.min(20, Math.max(0.05, st.scale * f));
+  const af = ns / st.scale;
+  const dx = px - r.width / 2, dy = py - r.height / 2;
+  st.tx = (st.tx - dx) * af + dx;
+  st.ty = (st.ty - dy) * af + dy;
+  st.scale = ns;
+  apply();
+}}
+function resetZoom() {{ fit(); }}
+
+img.onload = fit;
+if (img.complete && img.naturalWidth) fit();
+
+viewport.addEventListener('wheel', e => {{
+  e.preventDefault();
+  const r = viewport.getBoundingClientRect();
+  zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top);
+}}, {{ passive: false }});
+viewport.addEventListener('mousedown', e => {{
+  st.dragging = true; st.lastX = e.clientX; st.lastY = e.clientY;
+  viewport.classList.add('dragging');
+}});
+window.addEventListener('mousemove', e => {{
+  if (!st.dragging) return;
+  st.tx += e.clientX - st.lastX; st.ty += e.clientY - st.lastY;
+  st.lastX = e.clientX; st.lastY = e.clientY; apply();
+}});
+window.addEventListener('mouseup', () => {{ st.dragging = false; viewport.classList.remove('dragging'); }});
+viewport.addEventListener('dblclick', resetZoom);
+</script>
+</body></html>"""
+
+
+@app.route("/report/<report_id>/viewer/")
+def photo_viewer_page(report_id):
+    """Просмотр снимка с зумом, доступен в ЛЮБОМ статусе -- по той же логике,
+    что и ручной плеер для видео (см. player_page): файл лежит на диске с
+    момента появления в очереди, и смотреть его глазами можно, не дожидаясь
+    детектора."""
+    report = get_report_row(report_id)
+    if report is None:
+        return "Отчёт не найден", 404
+    if report["kind"] != "photo":
+        return "Просмотр снимка доступен только для фото", 400
+    if not os.path.exists(report["abs_path"]):
+        return "Исходный файл больше не найден на диске", 404
+
+    if report["status"] == "done":
+        banner = ('<div class="banner done">✅ Снимок обработан — в отчёте есть найденные '
+                  'моделью кандидаты с координатами.</div>')
+        report_link = f' &nbsp;·&nbsp; <a href="/report/{report_id}/">к отчёту с детекциями</a>'
+    elif report["status"] == "error":
+        banner = ('<div class="banner" style="background:#3a1414;border-color:#7a1f1f;color:#ff9999;">'
+                  '⚠ Автоматическая обработка завершилась с ошибкой — рамок модели не будет, '
+                  'но сам снимок доступен для просмотра.</div>')
+        report_link = ""
+    else:
+        banner = ('<div class="banner">⚙️ Снимок ещё не обработан моделью — его можно '
+                  'смотреть уже сейчас, кандидаты появятся в отчёте позже.</div>')
+        report_link = ""
+
+    return PHOTO_VIEWER_HTML.format(report_id=report_id, name=report["rel_path"],
+                                     banner=banner, report_link=report_link)
 
 
 @app.route("/api/report/<report_id>/coverage")
