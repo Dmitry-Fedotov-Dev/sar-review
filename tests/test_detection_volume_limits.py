@@ -16,19 +16,21 @@ import numpy as np
 import sar_video_review as svr
 
 
-def _noisy_blue_frame(w=640, h=480, blobs=200):
-    """Кадр с множеством синих пятен -- имитация неба/теней в снегу."""
+def _noisy_frame(w=640, h=480, blobs=200):
+    """Кадр с множеством ярких цветных пятен -- имитация вырождения детектора.
+    Цвет намеренно оранжево-красный: синий из COLOR_RANGES убран (на снегу он
+    ловил небо и тени), поэтому шум им уже не сымитировать."""
     frame = np.full((h, w, 3), 200, dtype=np.uint8)  # светлый фон
     rng = np.random.default_rng(42)
     for _ in range(blobs):
         x = int(rng.integers(0, w - 12))
         y = int(rng.integers(0, h - 12))
-        frame[y:y + 10, x:x + 10] = (200, 60, 20)  # BGR -- насыщенный синий
+        frame[y:y + 10, x:x + 10] = (20, 60, 230)  # BGR -- насыщенный оранжево-красный
     return frame
 
 
 def test_color_detector_caps_detections_per_frame():
-    frame = _noisy_blue_frame()
+    frame = _noisy_frame()
     unlimited = svr.detect_color_anomalies(frame, max_per_frame=0)
     limited = svr.detect_color_anomalies(frame, max_per_frame=12)
     assert len(unlimited) > 12, "тест бессмысленен, если пятен и так мало"
@@ -36,7 +38,7 @@ def test_color_detector_caps_detections_per_frame():
 
 
 def test_color_detector_keeps_the_most_confident():
-    frame = _noisy_blue_frame()
+    frame = _noisy_frame()
     unlimited = svr.detect_color_anomalies(frame, max_per_frame=0)
     limited = svr.detect_color_anomalies(frame, max_per_frame=5)
     best = sorted((r[4] for r in unlimited), reverse=True)[:5]
@@ -44,7 +46,7 @@ def test_color_detector_keeps_the_most_confident():
 
 
 def test_color_detector_unlimited_when_cap_is_zero():
-    frame = _noisy_blue_frame(blobs=50)
+    frame = _noisy_frame(blobs=50)
     assert len(svr.detect_color_anomalies(frame, max_per_frame=0)) > 12
 
 
