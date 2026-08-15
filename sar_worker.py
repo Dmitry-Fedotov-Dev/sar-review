@@ -127,6 +127,44 @@ def _ensure_thumbnail(name, abs_path):
         _generate_thumbnail(abs_path, thumb_path)
 
 
+def _read_video_duration(abs_path):
+    """Длительность видео из МЕТАДАННЫХ контейнера (кадры не декодируются),
+    либо None. Нужна, чтобы полоса покрытия ручного просмотра работала ДО
+    обработки детектором: сам детектор пишет duration_sec только когда
+    доходит до файла, а это могут быть часы ожидания в очереди -- при этом
+    ручной плеер доступен сразу, и человек уже смотрит видео."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cap = cv2.VideoCapture(abs_path)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        if fps > 0 and frames > 0:
+            return frames / fps
+    except Exception:
+        pass
+    finally:
+        cap.release()
+    return None
+
+
+def _ensure_duration(report_id, abs_path, current_duration):
+    """Заполняет duration_sec один раз, если он ещё не известен. Дешёвый
+    no-op на последующих сканах -- чтения метаданных не будет вовсе."""
+    if current_duration:
+        return
+    duration = _read_video_duration(abs_path)
+    if not duration:
+        return
+    conn = get_db()
+    conn.execute("UPDATE reports SET duration_sec=? WHERE report_id=? AND duration_sec IS NULL",
+                 (duration, report_id))
+    conn.commit()
+    conn.close()
+
+
 def watcher_loop():
     while True:
         try:
@@ -143,7 +181,7 @@ def watcher_loop():
                 # запись становится осиротевшей и невидимой в /api/tree (см.
                 # тот же фикс там). Поймано на реальных файлах в проде: видео
                 # на 948 МБ и видео, изначально скопированное как 0 байт.
-                row = conn.execute("SELECT report_id FROM reports WHERE rel_path=?",
+                row = conn.execute("SELECT report_id, duration_sec FROM reports WHERE rel_path=?",
                                     (name,)).fetchone()
                 if row is None:
                     report_id = sar_common.make_report_id(name, abs_path)
@@ -156,10 +194,14 @@ def watcher_loop():
                         (report_id, name, abs_path, kind, "queued", out_dir, file_ctime, now, now))
                     conn.commit()
                     print(f"[watcher] новый файл в очереди: {name} -> {report_id}")
+                else:
+                    report_id = row["report_id"]
                 conn.close()
 
                 if kind == "video":
                     _ensure_thumbnail(name, abs_path)
+                    _ensure_duration(report_id, abs_path,
+                                      row["duration_sec"] if row is not None else None)
         except Exception as e:
             print(f"[watcher] ошибка сканирования: {e}")
         time.sleep(CFG["poll_interval_sec"])

@@ -1147,13 +1147,18 @@ function renderItems(items) {{
       right = `<div class="progress-mini"><div class="progress-mini-bar" style="width:${{it.progress_pct||0}}%"></div></div>` + right;
     }}
     let cov = '';
-    if (it.kind === 'video' && it.status === 'done' && it.buckets) {{
+    // полоса покрытия -- для видео в любом статусе, а не только 'done':
+    // ручной просмотр доступен сразу, и видеть отсмотренные куски важнее
+    // всего именно пока детектор до файла ещё не дошёл
+    if (it.kind === 'video' && it.buckets) {{
       cov = '<div class="covbar">' + it.buckets.map(b => `<div class="covseg ${{b>0?'on':''}}"></div>`).join('') + '</div>';
     }}
+    // статистика просмотра -- для видео в любом статусе (см. полосу выше):
+    // человек может смотреть файл вручную, пока тот ещё стоит в очереди
     let stat = '';
-    if (it.status === 'done') {{
-      const pct = it.percent !== null ? it.percent + '%' : '—';
-      stat = `<span class="stat">${{it.viewer_count}} чел. · ${{pct}} сцен просмотрено</span>`;
+    if (it.kind === 'video' || it.status === 'done') {{
+      const pct = it.percent !== null && it.percent !== undefined ? it.percent + '%' : '—';
+      stat = `<span class="stat">${{it.viewer_count}} чел. · ${{pct}} просмотрено</span>`;
     }}
     // счётчики детекций -- модель и ручные отдельно, как и просили; ai_count
     // = null, пока отчёт не done (см. detectionTotal выше)
@@ -1263,7 +1268,15 @@ def api_tree():
                      # /api/tree была бы слишком дорогой для ещё обрабатывающихся
                      # видео; для "processing"/"queued" фронт покажет "—"
                      "ai_count": len(_get_ai_scenes_for_report(r)) if r["status"] == "done" else None}
-            if r["status"] == "done" and kind == "video":
+            # Покрытие ручного просмотра считается для видео в ЛЮБОМ статусе,
+            # не только 'done'. Ручной плеер доступен с момента появления
+            # файла в очереди (см. player_page), то есть люди смотрят видео
+            # ЗАДОЛГО до того, как до него дойдёт детектор -- на CPU очередь
+            # может быть на сутки вперёд. Показывать при этом пустое место
+            # вместо полосы просмотра означало бы, что команда не видит,
+            # какие куски уже отсмотрены, именно тогда, когда это нужнее
+            # всего -- пока автоматических подсказок ещё нет вообще.
+            if kind == "video":
                 stats = get_report_stats(conn, report_id, r["duration_sec"])
                 item.update(stats)
             elif r["status"] == "done" and kind == "photo":
