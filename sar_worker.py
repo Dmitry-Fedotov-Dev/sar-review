@@ -214,12 +214,18 @@ def watcher_loop():
                     now = datetime.now().isoformat()
                     out_dir = os.path.join(REPORTS_DIR, report_id)
                     file_ctime = sar_common.get_file_ctime(abs_path)
+                    # при выключенной авто-обработке файл всё равно
+                    # регистрируется и сразу доступен для РУЧНОГО просмотра,
+                    # но модель по нему не запускается, пока человек не
+                    # нажмёт "обработать" (см. auto_process в конфиге)
+                    initial_status = "queued" if CFG.get("auto_process", True) else "idle"
                     conn.execute(
                         "INSERT INTO reports (report_id, rel_path, abs_path, kind, status, "
                         "out_dir, file_ctime, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (report_id, name, abs_path, kind, "queued", out_dir, file_ctime, now, now))
+                        (report_id, name, abs_path, kind, initial_status, out_dir, file_ctime, now, now))
                     conn.commit()
-                    print(f"[watcher] новый файл в очереди: {name} -> {report_id}")
+                    where = "в очереди" if initial_status == "queued" else "без авто-обработки"
+                    print(f"[watcher] новый файл ({where}): {name} -> {report_id}")
                 else:
                     report_id = row["report_id"]
                 conn.close()

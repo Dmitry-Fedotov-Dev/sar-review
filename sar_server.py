@@ -948,6 +948,7 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .item.disabled {{ cursor:default; opacity:0.85; }}
 .fname {{ flex:1; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
 .badge {{ font-size:11px; padding:3px 8px; border-radius:5px; white-space:nowrap; }}
+.badge.idle {{ background:#2a2a2a; color:#999; border:1px solid #444; }}
 .badge.queued {{ background:#444; color:#ccc; }}
 .badge.processing {{ background:#8a6d00; color:#fff; }}
 .badge.done {{ background:#22703a; color:#fff; }}
@@ -973,6 +974,10 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
                color:#8ecbff; text-decoration:none; white-space:nowrap; display:flex; align-items:center;
                justify-content:center; flex-shrink:0; }}
 .playerlink:hover {{ background:#3355aa; color:#fff; }}
+.runlink {{ font-size:14px; padding:4px 10px; border-radius:5px; border:1px solid #5533aa;
+            background:transparent; color:#c3b3ff; cursor:pointer; flex-shrink:0; }}
+.runlink:hover {{ background:#5533aa; color:#fff; }}
+.runlink:disabled {{ opacity:0.5; cursor:default; }}
 .upload-box {{ display:flex; align-items:center; gap:10px; margin:14px 0; padding:12px 14px;
                 background:#1b1b1b; border:1px solid #3355aa; border-radius:8px; flex-wrap:wrap; }}
 .upload-box input[type=file] {{ color:#ccc; font-size:13px; }}
@@ -1101,7 +1106,25 @@ if (uploadTelemetryBtn) {{
 }}
 
 function badgeLabel(status) {{
-  return {{queued:'в очереди', processing:'обрабатывается', done:'готово', error:'ошибка'}}[status] || status;
+  return {{idle:'без анализа', queued:'в очереди', processing:'обрабатывается',
+           done:'готово', error:'ошибка'}}[status] || status;
+}}
+
+// Отправить файл в очередь на анализ моделью вручную (когда авто-обработка
+// выключена). Кнопка есть у файлов, которые модель ещё не смотрела.
+async function enqueue(reportId, btn) {{
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '...';
+  try {{
+    const res = await fetch(`/api/report/${{reportId}}/enqueue`, {{ method: 'POST' }});
+    const data = await res.json();
+    if (!data.ok) {{ btn.textContent = 'ошибка'; btn.disabled = false; return; }}
+    loadTree();
+  }} catch (e) {{
+    btn.textContent = old;
+    btn.disabled = false;
+  }}
 }}
 
 function detectionTotal(it) {{
@@ -1206,6 +1229,10 @@ function renderItems(items) {{
     // ведёт в плеер или в просмотр снимка соответственно
     const playerLink =
       `<a class="playerlink" href="${{mediaHref}}" title="${{it.kind === 'video' ? 'Ручной просмотр с плеером' : 'Посмотреть снимок'}}">▶</a>`;
+    // кнопка ручного запуска модели -- для файлов, которые она ещё не смотрела
+    const runLink = (it.status === 'idle' || it.status === 'error')
+      ? `<button class="runlink" onclick="enqueue('${{it.report_id}}', this)" title="Прогнать через модель">🤖</button>`
+      : '';
     return `<div class="item-row">
       ${{thumb}}
       <a class="${{cls}}" href="${{href}}">
@@ -1215,6 +1242,7 @@ function renderItems(items) {{
         ${{detStat}}
         ${{right}}
       </a>
+      ${{runLink}}
       ${{playerLink}}
     </div>`;
   }}).join('');
@@ -2011,6 +2039,30 @@ def api_delete_observation(report_id, obs_id):
     conn.execute("DELETE FROM manual_observations WHERE id=? AND report_id=?", (obs_id, report_id))
     conn.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/report/<report_id>/enqueue", methods=["POST"])
+def api_enqueue(report_id):
+    """Поставить файл в очередь на анализ моделью вручную.
+
+    Нужно, когда авто-обработка выключена (auto_process=false): файлы
+    появляются в списке со статусом 'idle' и доступны для ручного просмотра,
+    а через модель прогоняются только те, что человек выбрал сам. На CPU
+    минута видео считается ~30 минут, поэтому выбирать осмысленно."""
+    conn = get_db()
+    row = conn.execute("SELECT status FROM reports WHERE report_id=?", (report_id,)).fetchone()
+    if row is None:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    if row["status"] in ("queued", "processing"):
+        return jsonify({"ok": True, "status": row["status"], "note": "уже в работе"})
+
+    # 'done'/'error' тоже можно отправить заново -- это осознанный повтор
+    # (сменили модель/настройки детектора и хотят пересчитать)
+    conn.execute(
+        "UPDATE reports SET status='queued', progress_pct=0, phase=NULL, error=NULL, updated_at=? "
+        "WHERE report_id=?", (datetime.now().isoformat(), report_id))
+    conn.commit()
+    return jsonify({"ok": True, "status": "queued"})
 
 
 @app.route("/api/report/<report_id>/priorities", methods=["GET", "POST"])
