@@ -251,6 +251,20 @@ def init_db(db_path):
         UNIQUE(report_id, kind, ref_key)
     );
     CREATE INDEX IF NOT EXISTS idx_priorities_report ON detection_priorities(report_id);
+    CREATE TABLE IF NOT EXISTS detection_comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_id TEXT NOT NULL,
+        kind TEXT NOT NULL,        -- 'ai_scene' | 'manual', как в detection_priorities
+        ref_key TEXT NOT NULL,     -- тот же ключ, что и у статуса находки:
+                                    -- ai_scene -- отпечаток содержимого сцены
+                                    -- (см. ai_scene_ref_key), manual -- id
+                                    -- наблюдения. Благодаря этому обсуждение
+                                    -- не теряется при переобработке видео
+        author TEXT NOT NULL,      -- viewer_name из сессии
+        text TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_comments_report ON detection_comments(report_id, kind, ref_key);
     CREATE TABLE IF NOT EXISTS telegram_access_requests (
         chat_id INTEGER PRIMARY KEY,
         username TEXT,

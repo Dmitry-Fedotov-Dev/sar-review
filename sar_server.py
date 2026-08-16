@@ -2155,6 +2155,67 @@ def api_enqueue(report_id):
     return jsonify({"ok": True, "status": "queued"})
 
 
+MAX_COMMENT_LEN = 2000
+
+
+@app.route("/api/report/<report_id>/comments", methods=["GET", "POST"])
+def api_comments(report_id):
+    """Обсуждение конкретной находки (сцены модели или ручной отметки).
+
+    Читается ЦЕЛИКОМ за один запрос на отчёт, а не по запросу на карточку:
+    карточек на видео бывают сотни, и запрос на каждую превратил бы открытие
+    плеера в сотни обращений к серверу.
+
+    Привязка -- та же пара (kind, ref_key), что и у статусов находок, поэтому
+    обсуждение переживает переобработку видео (см. ai_scene_ref_key)."""
+    conn = get_db()
+
+    if request.method == "GET":
+        rows = conn.execute(
+            "SELECT id, kind, ref_key, author, text, created_at FROM detection_comments "
+            "WHERE report_id=? ORDER BY id", (report_id,)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    data = request.get_json(force=True, silent=True) or {}
+    kind = data.get("kind")
+    ref_key = data.get("ref_key")
+    text = (data.get("text") or "").strip()[:MAX_COMMENT_LEN]
+    if kind not in ("ai_scene", "manual") or not ref_key:
+        return jsonify({"ok": False, "error": "missing kind or ref_key"}), 400
+    if not text:
+        return jsonify({"ok": False, "error": "пустой комментарий"}), 400
+
+    author = session.get("viewer_name", "аноним")
+    now = datetime.now().isoformat()
+    cur = conn.execute(
+        "INSERT INTO detection_comments (report_id, kind, ref_key, author, text, created_at) "
+        "VALUES (?,?,?,?,?,?)", (report_id, kind, ref_key, author, text, now))
+    conn.commit()
+    return jsonify({"ok": True, "id": cur.lastrowid, "author": author,
+                    "text": text, "created_at": now})
+
+
+@app.route("/api/report/<report_id>/comments/<int:comment_id>", methods=["DELETE"])
+def api_delete_comment(report_id, comment_id):
+    """Удалить можно только СВОЙ комментарий -- сверяется по имени из сессии.
+
+    Это НЕ настоящая защита: в системе нет аккаунтов, имя человек вводит сам
+    при входе и может ввести чужое (см. UPLOADER_NAME выше -- та же природа).
+    Проверка нужна, чтобы случайно не стереть чужую мысль, а не чтобы
+    остановить того, кто захочет это сделать намеренно."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT author FROM detection_comments WHERE id=? AND report_id=?",
+        (comment_id, report_id)).fetchone()
+    if row is None:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    if row["author"] != session.get("viewer_name", "аноним"):
+        return jsonify({"ok": False, "error": "это не ваш комментарий"}), 403
+    conn.execute("DELETE FROM detection_comments WHERE id=?", (comment_id,))
+    conn.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/report/<report_id>/priorities", methods=["GET", "POST"])
 def api_priorities(report_id):
     """Ранжирование детекций (ручных и модели) -- см. detection_priorities в
@@ -2273,6 +2334,28 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .priority-control select {{ font-size:12px; padding:4px 6px; border-radius:5px; border:1px solid #444;
                              background:#0d0d0d; color:#eee; }}
 .priority-who {{ font-size:11px; color:#888; }}
+/* обсуждение находки */
+.discussion {{ margin-top:8px; border-top:1px solid #2a2a2a; padding-top:6px; }}
+.discussion summary {{ cursor:pointer; color:#8ecbff; font-size:12px; user-select:none; }}
+.discussion summary:hover {{ color:#b3d9ff; }}
+.cmt-list {{ margin:8px 0 6px; display:flex; flex-direction:column; gap:6px; }}
+.cmt {{ background:#141414; border:1px solid #2a2a2a; border-radius:6px; padding:6px 8px; }}
+.cmt-head {{ display:flex; align-items:center; gap:8px; margin-bottom:2px; }}
+.cmt-author {{ font-size:11px; font-weight:bold; color:#9fe8b5; }}
+.cmt-time {{ font-size:10px; color:#777; }}
+.cmt-del {{ margin-left:auto; background:none; border:none; color:#777; cursor:pointer;
+            font-size:15px; line-height:1; padding:0 2px; }}
+.cmt-del:hover {{ color:#ff6666; }}
+.cmt-text {{ font-size:12.5px; color:#ddd; white-space:pre-wrap; word-break:break-word; }}
+.cmt-form {{ display:flex; gap:6px; align-items:flex-start; }}
+.cmt-form textarea {{ flex:1; background:#0d0d0d; color:#eee; border:1px solid #333;
+                       border-radius:5px; padding:6px; font-family:inherit; font-size:12.5px;
+                       resize:vertical; min-height:34px; }}
+.cmt-form textarea:focus {{ outline:none; border-color:#3355aa; }}
+.cmt-form button {{ font-size:12px; padding:6px 10px; border-radius:5px; border:1px solid #3355aa;
+                     background:#252525; color:#8ecbff; cursor:pointer; white-space:nowrap; }}
+.cmt-form button:hover {{ background:#3355aa; color:#fff; }}
+.cmt-form button:disabled {{ opacity:0.5; cursor:default; }}
 .empty {{ color:#777; font-size:13px; }}
 .ai-scene-badge {{ font-size:10px; padding:2px 6px; border-radius:4px; color:#fff; white-space:nowrap; }}
 .ai-scene-badge.model {{ background:#5533aa; }}
@@ -2325,6 +2408,9 @@ h1 {{ font-size:16px; margin:12px 0; }}
 
 <script>
 const reportId = "{report_id}";
+// имя текущего зрителя -- чтобы показать кнопку удаления только у СВОИХ
+// сообщений (это удобство, а не защита: аккаунтов в системе нет)
+const VIEWER_NAME = {viewer_name_js};
 let isProcessing = {is_processing_js};
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
@@ -2575,6 +2661,7 @@ async function loadObservations() {{
         ${{estGps}}
         ${{renderRawTelemetryDropdown(o.raw_telemetry)}}
         ${{renderPriorityControl('manual', o.id)}}
+        ${{renderComments('manual', o.id)}}
         <div class="obs-actions">
           <button onclick="deleteObservation(${{o.id}})">🗑 удалить</button>
         </div>
@@ -2620,6 +2707,7 @@ async function loadAiScenes() {{
       ${{estLine}}
       ${{renderRawTelemetryDropdown(s.raw_telemetry)}}
       ${{renderPriorityControl('ai_scene', s.ref_key)}}
+      ${{renderComments('ai_scene', s.ref_key)}}
     </div>`;
   }}).join('');
 }}
@@ -2664,6 +2752,84 @@ function renderPriorityControl(kind, refKey) {{
       <select onchange="setPriority('${{kind}}', '${{refKey}}', this.value)">${{options}}</select>
       ${{who}}
     </div>`;
+}}
+
+// --- обсуждение находки ---
+// Все комментарии отчёта грузятся ОДНИМ запросом и раскладываются по
+// карточкам здесь: карточек бывают сотни, и запрос на каждую превратил бы
+// открытие плеера в сотни обращений к серверу.
+let commentsMap = {{}};
+
+async function loadComments() {{
+  try {{
+    const res = await fetch(`/api/report/${{reportId}}/comments`);
+    const rows = await res.json();
+    commentsMap = {{}};
+    rows.forEach(r => {{
+      const key = r.kind + '|' + r.ref_key;
+      (commentsMap[key] = commentsMap[key] || []).push(r);
+    }});
+  }} catch (e) {{}}
+}}
+
+function fmtCommentTime(iso) {{
+  try {{
+    const d = new Date(iso);
+    return d.toLocaleString('ru-RU', {{ day:'2-digit', month:'2-digit',
+                                        hour:'2-digit', minute:'2-digit' }});
+  }} catch (e) {{ return ''; }}
+}}
+
+function renderComments(kind, refKey) {{
+  const list = commentsMap[kind + '|' + refKey] || [];
+  const items = list.map(c => `
+    <div class="cmt">
+      <div class="cmt-head">
+        <span class="cmt-author">${{escapeHtml(c.author)}}</span>
+        <span class="cmt-time">${{fmtCommentTime(c.created_at)}}</span>
+        ${{c.author === VIEWER_NAME
+            ? `<button class="cmt-del" onclick="deleteComment(${{c.id}})" title="Удалить">×</button>` : ''}}
+      </div>
+      <div class="cmt-text">${{escapeHtml(c.text)}}</div>
+    </div>`).join('');
+  // id завязан на пару (kind, ref_key) -- на странице одновременно живут
+  // десятки карточек, и поле ввода каждой должно быть своим
+  const inputId = `cmt-input-${{kind}}-${{refKey}}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `
+    <details class="discussion" ${{list.length ? 'open' : ''}}>
+      <summary>💬 обсуждение${{list.length ? ` (${{list.length}})` : ''}}</summary>
+      <div class="cmt-list">${{items}}</div>
+      <div class="cmt-form">
+        <textarea id="${{inputId}}" rows="2" placeholder="Написать сообщение…"></textarea>
+        <button onclick="addComment('${{kind}}', '${{refKey}}', '${{inputId}}', this)">Отправить</button>
+      </div>
+    </details>`;
+}}
+
+async function addComment(kind, refKey, inputId, btn) {{
+  const ta = document.getElementById(inputId);
+  const text = (ta.value || '').trim();
+  if (!text) return;
+  btn.disabled = true;
+  try {{
+    await fetch(`/api/report/${{reportId}}/comments`, {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{ kind, ref_key: refKey, text }}),
+    }});
+    ta.value = '';
+    await loadComments();
+    loadObservations();
+    loadAiScenes();
+  }} catch (e) {{}}
+  btn.disabled = false;
+}}
+
+async function deleteComment(id) {{
+  if (!confirm('Удалить это сообщение?')) return;
+  await fetch(`/api/report/${{reportId}}/comments/${{id}}`, {{ method: 'DELETE' }});
+  await loadComments();
+  loadObservations();
+  loadAiScenes();
 }}
 
 async function setPriority(kind, refKey, priority) {{
@@ -2762,7 +2928,9 @@ applyAiVisibility();
 // приоритеты грузим ПЕРЕД первым рендером обоих списков -- иначе выпадающие
 // списки на долю секунды отрисуются как "не размечено" и тут же перерисуются
 async function initPlayerData() {{
-  await loadPriorities();
+  // приоритеты и комментарии -- ДО первой отрисовки карточек, иначе они
+  // отрисуются пустыми и тут же перерисуются заново
+  await Promise.all([loadPriorities(), loadComments()]);
   loadObservations();
   loadCoverage();
   loadAiDetections();
@@ -2773,6 +2941,9 @@ setInterval(loadObservations, 15000);
 setInterval(loadCoverage, 15000);
 setInterval(loadAiScenes, 15000);
 setInterval(loadPriorities, 15000);
+// комментарии подтягиваются так же, как остальное -- чтобы сообщение
+// коллеги появилось без перезагрузки страницы
+setInterval(loadComments, 15000);
 
 // пока видео ещё обрабатывается -- рамки модели в detections.json
 // пополняются на лету (см. flush_partial_detections в sar_video_review.py),
@@ -2846,6 +3017,9 @@ def player_page(report_id):
         report_id=report_id, name=report["rel_path"],
         processing_banner=processing_banner,
         is_processing_js="true" if is_processing else "false",
+        # json.dumps -- корректно экранирует кавычки/юникод в имени, которое
+        # человек вводит сам при входе
+        viewer_name_js=json.dumps(session.get("viewer_name", "аноним")),
         ai_poll_interval_ms=ai_poll_interval_ms)
 
 
