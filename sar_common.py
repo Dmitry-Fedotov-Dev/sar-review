@@ -42,6 +42,78 @@ PRIORITY_LABELS = {
 }
 VALID_PRIORITIES = set(PRIORITY_LABELS)
 
+# ---------------------------------------------------------------------------
+# РОЛИ И ОПОЗНАНИЕ ЧЕЛОВЕКА
+#
+# В системе нет отдельных "учёток": личность даёт Telegram-бот. Он и так знает
+# про каждого chat_id и @username и сам решает, кто получает доступ -- раньше
+# эта личность просто терялась, потому что бот выдавал ОБЩИЙ пароль.
+#
+# Теперь одобренному человеку бот выдаёт ПЕРСОНАЛЬНУЮ ссылку с ключом:
+#     https://.../login?key=<access_token>
+# Сервер по ключу находит запись в telegram_access_requests и сажает человека
+# в сессию уже опознанным, со своей ролью. Никакой синхронизации двух списков
+# пользователей не нужно -- связь возникает в момент выдачи ключа.
+#
+# Вход по общему паролю остаётся (это важно для работы в поле с чужого
+# ноутбука), но такой человек АНОНИМЕН: смотреть и размечать находки может,
+# участвовать в обсуждении -- нет. Иначе модерация не имела бы смысла:
+# заблокированный просто зашёл бы по общему паролю и продолжил.
+#
+# Ключ -- предъявительский: переслал ссылку -- отдал доступ. Это всё равно
+# строго лучше общего пароля (у каждого свой, отзывается одной командой,
+# видно кто что сделал). Полностью от пересылки защищает только вход через
+# сам Telegram (Login Widget), но он требует настоящего домена с HTTPS.
+ROLE_VIEWER = "viewer"        # смотреть, размечать находки, комментировать
+ROLE_MODERATOR = "moderator"  # + удалять ЛЮБЫЕ комментарии
+ROLE_ADMIN = "admin"          # + загрузка файлов и запуск обработки
+ROLE_MUTED = "muted"          # смотреть и размечать, но не комментировать
+VALID_ROLES = {ROLE_VIEWER, ROLE_MODERATOR, ROLE_ADMIN, ROLE_MUTED}
+DEFAULT_ROLE = ROLE_VIEWER
+
+ROLE_LABELS = {
+    ROLE_VIEWER: "участник",
+    ROLE_MODERATOR: "модератор обсуждений",
+    ROLE_ADMIN: "администратор (полные права)",
+    ROLE_MUTED: "без права комментировать",
+}
+
+# Роли, которым можно то же, что и модератору. Админ -- надмножество: держим
+# это одним списком, чтобы при добавлении новой возможности не забыть его
+# в одной из проверок.
+ROLES_CAN_MODERATE = {ROLE_MODERATOR, ROLE_ADMIN}
+ROLES_CAN_COMMENT = {ROLE_VIEWER, ROLE_MODERATOR, ROLE_ADMIN}
+ROLES_CAN_UPLOAD = {ROLE_ADMIN}
+
+
+def generate_access_token():
+    """Персональный ключ входа. secrets -- криптостойкий источник, длины
+    32 символов достаточно, чтобы ключ нельзя было подобрать перебором."""
+    import secrets
+    return secrets.token_urlsafe(24)
+
+
+def find_person_by_token(conn, token):
+    """Запись человека по персональному ключу, либо None.
+
+    Отклонённые (status='denied') не опознаются намеренно: отзыв доступа
+    должен работать сразу, даже если ссылка у человека осталась."""
+    if not token:
+        return None
+    row = conn.execute(
+        "SELECT chat_id, username, first_name, status, role FROM telegram_access_requests "
+        "WHERE access_token=?", (token,)).fetchone()
+    if row is None or row["status"] != "approved":
+        return None
+    return row
+
+
+def display_name_for(row):
+    """Как показывать человека в интерфейсе: @username, иначе имя из Telegram."""
+    if row["username"]:
+        return f"@{row['username']}"
+    return row["first_name"] or f"id{row['chat_id']}"
+
 
 def ai_scene_ref_key(object_class, source, first_frame_idx, first_bbox):
     """Стабильный отпечаток AI-сцены для detection_priorities -- НЕ
@@ -283,7 +355,10 @@ def init_db(db_path):
                        "ALTER TABLE manual_observations ADD COLUMN est_lat REAL",
                        "ALTER TABLE manual_observations ADD COLUMN est_lon REAL",
                        "ALTER TABLE manual_observations ADD COLUMN est_distance_m REAL",
-                       "ALTER TABLE manual_observations ADD COLUMN raw_telemetry TEXT"):
+                       "ALTER TABLE manual_observations ADD COLUMN raw_telemetry TEXT",
+                       # персональный ключ входа и роль -- см. ROLE_* ниже
+                       "ALTER TABLE telegram_access_requests ADD COLUMN access_token TEXT",
+                       "ALTER TABLE telegram_access_requests ADD COLUMN role TEXT"):
         try:
             conn.execute(alter_sql)
             conn.commit()

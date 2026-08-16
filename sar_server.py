@@ -172,20 +172,84 @@ button {{ width:100%; padding:10px; border-radius:6px; border:none; background:#
 </body></html>"""
 
 
+def _login_response(name, next_url=None):
+    resp = make_response(redirect(next_url or url_for("index")))
+    resp.set_cookie("sar_viewer_name", urllib.parse.quote(name), httponly=False, samesite="Lax")
+    return resp
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     error_html = ""
+
+    # 1) Персональная ссылка из Telegram-бота: /login?key=<токен>.
+    # Человек попадает внутрь уже ОПОЗНАННЫМ -- имя не вводится руками, роль
+    # берётся из записи бота (см. sar_common: ROLE_*). Именно это делает
+    # модерацию осмысленной: аноним не может выдать себя за другого.
+    key = (request.args.get("key") or "").strip()
+    if key:
+        person = sar_common.find_person_by_token(get_db(), key)
+        if person is not None:
+            session["authed"] = True
+            session["verified"] = True
+            session["tg_chat_id"] = person["chat_id"]
+            session["role"] = person["role"] or sar_common.DEFAULT_ROLE
+            name = sar_common.display_name_for(person)
+            session["viewer_name"] = name
+            return _login_response(name, request.args.get("next"))
+        error_html = ('<div class="err">Ссылка недействительна или доступ отозван.<br>'
+                      'Запросите новую командой /help у бота.</div>')
+
+    # 2) Общий пароль -- вход остаётся для работы в поле с чужого устройства,
+    # но такой человек АНОНИМЕН: смотреть и размечать может, комментировать нет
     if request.method == "POST":
         name = (request.form.get("name") or "").strip()[:60]
         password = request.form.get("password") or ""
         if password == SERVER_CFG["shared_password"] and name:
             session["authed"] = True
+            session["verified"] = False
+            session["role"] = sar_common.DEFAULT_ROLE
+            session.pop("tg_chat_id", None)
             session["viewer_name"] = name
-            resp = make_response(redirect(request.args.get("next") or url_for("index")))
-            resp.set_cookie("sar_viewer_name", urllib.parse.quote(name), httponly=False, samesite="Lax")
-            return resp
+            return _login_response(name, request.args.get("next"))
         error_html = '<div class="err">Неверный пароль или не указано имя</div>'
     return LOGIN_HTML.format(error_html=error_html)
+
+
+def current_role():
+    """Роль текущего посетителя. Аноним (вход по общему паролю) роли не имеет
+    -- ему доступно только чтение и разметка находок."""
+    if not session.get("verified"):
+        return None
+    return session.get("role") or sar_common.DEFAULT_ROLE
+
+
+def can_comment():
+    return current_role() in sar_common.ROLES_CAN_COMMENT
+
+
+def is_moderator():
+    """Модератор ИЛИ администратор -- админ по определению может всё, что
+    может модератор (см. ROLES_CAN_MODERATE)."""
+    return current_role() in sar_common.ROLES_CAN_MODERATE
+
+
+def is_admin():
+    return current_role() == sar_common.ROLE_ADMIN
+
+
+def can_upload():
+    """Загрузка файлов: роль администратора ИЛИ старый вход под именем
+    'uploader'.
+
+    Имя 'uploader' сохранено намеренно, как переходный вариант: по нему
+    заходят с общего пароля в поле, где личной ссылки может не быть под
+    рукой. Но это по-прежнему не настоящая проверка -- любой, кто знает
+    общий пароль, может так назваться (см. UPLOADER_NAME). Роль admin --
+    честная замена: её нельзя присвоить себе, её выдаёт координатор."""
+    if is_admin():
+        return True
+    return session.get("viewer_name") == UPLOADER_NAME
 
 
 # --- гид волонтёра и презентация -- статические страницы, открыты БЕЗ входа
@@ -1368,7 +1432,7 @@ UPLOAD_SECTION_HTML = """<div class="upload-box">
 
 @app.route("/")
 def index():
-    upload_section = UPLOAD_SECTION_HTML if session.get("viewer_name") == UPLOADER_NAME else ""
+    upload_section = UPLOAD_SECTION_HTML if can_upload() else ""
     return TREE_PAGE_HTML.format(viewer_name=session.get("viewer_name", ""), upload_section=upload_section)
 
 
@@ -1491,8 +1555,9 @@ def api_upload():
     UPLOADER_NAME. Это НЕ настоящая авторизация -- любой, кто знает общий
     пароль, может ввести это же имя и получить доступ к загрузке. Осознанный
     временный компромисс до нормальной ролевой модели, а не забытая дыра."""
-    if session.get("viewer_name") != UPLOADER_NAME:
-        return jsonify({"ok": False, "error": f"загрузка видео доступна только пользователю '{UPLOADER_NAME}'"}), 403
+    if not can_upload():
+        return jsonify({"ok": False, "error": "загрузка доступна администратору "
+                        f"или пользователю '{UPLOADER_NAME}'"}), 403
 
     file = request.files.get("video")
     if file is None or not file.filename:
@@ -1536,8 +1601,9 @@ def api_upload_telemetry():
     В отличие от видео, поддерживает МНОЖЕСТВЕННУЮ загрузку за один раз --
     реальная телеметрия обычно приходит целой пачкой файлов с одного дня
     полётов (см. sar_common.build_telemetry_index), а не по одному файлу."""
-    if session.get("viewer_name") != UPLOADER_NAME:
-        return jsonify({"ok": False, "error": f"загрузка доступна только пользователю '{UPLOADER_NAME}'"}), 403
+    if not can_upload():
+        return jsonify({"ok": False, "error": "загрузка доступна администратору "
+                        f"или пользователю '{UPLOADER_NAME}'"}), 403
 
     files = request.files.getlist("telemetry")
     if not files or all(not f.filename for f in files):
@@ -2176,6 +2242,18 @@ def api_comments(report_id):
             "WHERE report_id=? ORDER BY id", (report_id,)).fetchall()
         return jsonify([dict(r) for r in rows])
 
+    # Писать могут только опознанные (вошедшие по персональной ссылке из
+    # бота) и не лишённые слова. Аноним по общему паролю смотрит и размечает
+    # находки, но в обсуждении не участвует -- иначе заблокированный просто
+    # зашёл бы по общему паролю и продолжил, и модерация ничего не значила бы.
+    if not can_comment():
+        if current_role() == sar_common.ROLE_MUTED:
+            return jsonify({"ok": False, "error": "muted",
+                            "message": "Координатор ограничил вам участие в обсуждениях."}), 403
+        return jsonify({"ok": False, "error": "not_verified",
+                        "message": "Чтобы писать в обсуждении, войдите по персональной "
+                                   "ссылке из бота (команда /help)."}), 403
+
     data = request.get_json(force=True, silent=True) or {}
     kind = data.get("kind")
     ref_key = data.get("ref_key")
@@ -2197,19 +2275,19 @@ def api_comments(report_id):
 
 @app.route("/api/report/<report_id>/comments/<int:comment_id>", methods=["DELETE"])
 def api_delete_comment(report_id, comment_id):
-    """Удалить можно только СВОЙ комментарий -- сверяется по имени из сессии.
+    """Своё сообщение может удалить автор, любое -- модератор.
 
-    Это НЕ настоящая защита: в системе нет аккаунтов, имя человек вводит сам
-    при входе и может ввести чужое (см. UPLOADER_NAME выше -- та же природа).
-    Проверка нужна, чтобы случайно не стереть чужую мысль, а не чтобы
-    остановить того, кто захочет это сделать намеренно."""
+    Для опознанных (вход по персональной ссылке) это настоящее правило:
+    имя берётся из записи бота и подделать его нельзя. Для анонимов по
+    общему паролю сверка по имени остаётся тем, чем была -- вежливостью,
+    а не защитой."""
     conn = get_db()
     row = conn.execute(
         "SELECT author FROM detection_comments WHERE id=? AND report_id=?",
         (comment_id, report_id)).fetchone()
     if row is None:
         return jsonify({"ok": False, "error": "not found"}), 404
-    if row["author"] != session.get("viewer_name", "аноним"):
+    if row["author"] != session.get("viewer_name", "аноним") and not is_moderator():
         return jsonify({"ok": False, "error": "это не ваш комментарий"}), 403
     conn.execute("DELETE FROM detection_comments WHERE id=?", (comment_id,))
     conn.commit()
@@ -2356,6 +2434,8 @@ h1 {{ font-size:16px; margin:12px 0; }}
                      background:#252525; color:#8ecbff; cursor:pointer; white-space:nowrap; }}
 .cmt-form button:hover {{ background:#3355aa; color:#fff; }}
 .cmt-form button:disabled {{ opacity:0.5; cursor:default; }}
+.cmt-locked {{ font-size:11.5px; color:#888; background:#141414; border:1px dashed #333;
+                border-radius:6px; padding:7px 9px; line-height:1.5; }}
 .empty {{ color:#777; font-size:13px; }}
 .ai-scene-badge {{ font-size:10px; padding:2px 6px; border-radius:4px; color:#fff; white-space:nowrap; }}
 .ai-scene-badge.model {{ background:#5533aa; }}
@@ -2411,6 +2491,10 @@ const reportId = "{report_id}";
 // имя текущего зрителя -- чтобы показать кнопку удаления только у СВОИХ
 // сообщений (это удобство, а не защита: аккаунтов в системе нет)
 const VIEWER_NAME = {viewer_name_js};
+// может ли этот посетитель писать в обсуждениях (и почему нет, если нет)
+const CAN_COMMENT = {can_comment_js};
+const COMMENT_LOCK_REASON = {comment_lock_js};
+const IS_MODERATOR = {is_moderator_js};
 let isProcessing = {is_processing_js};
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
@@ -2787,8 +2871,9 @@ function renderComments(kind, refKey) {{
       <div class="cmt-head">
         <span class="cmt-author">${{escapeHtml(c.author)}}</span>
         <span class="cmt-time">${{fmtCommentTime(c.created_at)}}</span>
-        ${{c.author === VIEWER_NAME
-            ? `<button class="cmt-del" onclick="deleteComment(${{c.id}})" title="Удалить">×</button>` : ''}}
+        ${{(c.author === VIEWER_NAME || IS_MODERATOR)
+            ? `<button class="cmt-del" onclick="deleteComment(${{c.id}})" title="${{
+                 c.author === VIEWER_NAME ? 'Удалить' : 'Удалить как модератор'}}">×</button>` : ''}}
       </div>
       <div class="cmt-text">${{escapeHtml(c.text)}}</div>
     </div>`).join('');
@@ -2799,10 +2884,11 @@ function renderComments(kind, refKey) {{
     <details class="discussion" ${{list.length ? 'open' : ''}}>
       <summary>💬 обсуждение${{list.length ? ` (${{list.length}})` : ''}}</summary>
       <div class="cmt-list">${{items}}</div>
+      ${{CAN_COMMENT ? `
       <div class="cmt-form">
         <textarea id="${{inputId}}" rows="2" placeholder="Написать сообщение…"></textarea>
         <button onclick="addComment('${{kind}}', '${{refKey}}', '${{inputId}}', this)">Отправить</button>
-      </div>
+      </div>` : `<div class="cmt-locked">${{COMMENT_LOCK_REASON}}</div>`}}
     </details>`;
 }}
 
@@ -3020,6 +3106,14 @@ def player_page(report_id):
         # json.dumps -- корректно экранирует кавычки/юникод в имени, которое
         # человек вводит сам при входе
         viewer_name_js=json.dumps(session.get("viewer_name", "аноним")),
+        can_comment_js="true" if can_comment() else "false",
+        is_moderator_js="true" if is_moderator() else "false",
+        comment_lock_js=json.dumps(
+            "Координатор ограничил вам участие в обсуждениях."
+            if current_role() == sar_common.ROLE_MUTED else
+            "Чтобы писать в обсуждении, войдите по личной ссылке из бота "
+            "(команда /help). Сейчас вы вошли по общему паролю — система не "
+            "знает, кто вы, поэтому сообщения были бы без автора."),
         ai_poll_interval_ms=ai_poll_interval_ms)
 
 

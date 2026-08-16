@@ -112,21 +112,92 @@ def auto_approve_active(now=None):
     return now < until
 
 
-def access_message():
+def ensure_token(chat_id):
+    """Персональный ключ входа. Создаётся один раз и переиспользуется, чтобы
+    старая ссылка у человека не переставала работать при каждом /help.
+
+    Координаторам из admin_chat_ids роль администратора проставляется здесь
+    же: они и так управляют доступом через бота, странно было бы заставлять
+    их выдавать права самим себе отдельной командой."""
+    conn = _db()
+    try:
+        if chat_id in CFG.get("admin_chat_ids", []):
+            conn.execute("UPDATE telegram_access_requests SET role=? WHERE chat_id=? "
+                         "AND (role IS NULL OR role != ?)",
+                         (sar_common.ROLE_ADMIN, chat_id, sar_common.ROLE_ADMIN))
+            conn.commit()
+        row = conn.execute("SELECT access_token FROM telegram_access_requests WHERE chat_id=?",
+                           (chat_id,)).fetchone()
+        if row is not None and row["access_token"]:
+            return row["access_token"]
+        token = sar_common.generate_access_token()
+        conn.execute("UPDATE telegram_access_requests SET access_token=? WHERE chat_id=?",
+                     (token, chat_id))
+        conn.commit()
+        return token
+    finally:
+        conn.close()
+
+
+def personal_link(chat_id):
+    base = (CFG.get("service_url") or "").rstrip("/")
+    return f"{base}/login?key={ensure_token(chat_id)}"
+
+
+def find_by_username(username):
+    """Запись по @username (регистр не важен -- в Telegram он не значим)."""
+    uname = username.lstrip("@").strip().lower()
+    conn = _db()
+    try:
+        return conn.execute(
+            "SELECT * FROM telegram_access_requests WHERE lower(username)=?", (uname,)).fetchone()
+    finally:
+        conn.close()
+
+
+def set_role(chat_id, role):
+    conn = _db()
+    try:
+        conn.execute("UPDATE telegram_access_requests SET role=? WHERE chat_id=?", (role, chat_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def revoke_token(chat_id):
+    """Сбрасывает ключ: старая ссылка сразу перестаёт пускать."""
+    conn = _db()
+    try:
+        conn.execute("UPDATE telegram_access_requests SET access_token=NULL WHERE chat_id=?",
+                     (chat_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def access_message(chat_id=None):
+    # Персональная ссылка -- основной способ входа: человек попадает внутрь
+    # уже опознанным, имя вводить не нужно, и он может участвовать в
+    # обсуждениях. Общий пароль оставлен запасным вариантом для работы в поле
+    # с чужого устройства, но по нему вход анонимный (без обсуждений).
+    personal = f"\U0001F517 Ваша личная ссылка (никому не передавайте):\n{personal_link(chat_id)}\n\n" \
+        if chat_id is not None else ""
     return (
         "✅ Доступ одобрен!\n\n"
-        f"\U0001F517 Сервис: {CFG['service_url']}\n"
-        f"\U0001F511 Пароль: {CFG['service_password']}\n\n"
+        + personal +
         f"\U0001F4D6 Как пользоваться: {CFG['guide_url']}\n\n"
         "Коротко:\n"
         "— \U0001F4BB смотрите с ноутбука или компьютера, не с телефона: нужно "
         "разглядеть человека размером в несколько пикселей на фоне снега и скал, "
         "на маленьком экране находку легко пропустить. Плюс удобнее зум, "
         "перемотка и разметка находок мышью\n"
-        "— при входе укажите своё настоящее имя или ник (не «тест1») — по имени "
-        "система отслеживает, кто что уже посмотрел\n"
+        "— по личной ссылке вы входите под своим именем — так видно, кто что "
+        "посмотрел, и работают обсуждения находок\n"
         "— лучше заходить на Wi-Fi, видео тяжёлые для мобильного интернета\n"
-        "— ссылка тестовая и может временно смениться — если не открывается, напишите сюда же"
+        "— ссылка тестовая и может временно смениться — если не открывается, напишите сюда же\n\n"
+        f"Запасной вход (если личная ссылка не работает): {CFG['service_url']}\n"
+        f"\U0001F511 общий пароль: {CFG['service_password']} — по нему вход "
+        f"анонимный, обсуждения будут недоступны"
     )
 
 
@@ -151,7 +222,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row, is_new = upsert_request(chat_id, user.username, user.first_name)
 
     if row["status"] == "approved":
-        await update.message.reply_text(access_message())
+        await update.message.reply_text(access_message(chat_id))
         return
     if row["status"] == "denied":
         await update.message.reply_text(DECLINE_MESSAGE)
@@ -162,7 +233,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # чтобы утром видеть, кто зашёл
     if auto_approve_active():
         set_status(chat_id, "approved", 0)
-        await update.message.reply_text(access_message())
+        await update.message.reply_text(access_message(chat_id))
         text = (f"Доступ выдан АВТОМАТИЧЕСКИ (включено окно автовыдачи):\n"
                 f"{requester_label(row)}")
         for admin_id in CFG["admin_chat_ids"]:
@@ -189,7 +260,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = get_request(update.effective_chat.id)
     if row is not None and row["status"] == "approved":
-        await update.message.reply_text(access_message())
+        await update.message.reply_text(access_message(update.effective_chat.id))
     else:
         await update.message.reply_text("Сначала нужно одобрение координатора — отправьте /start.")
 
@@ -203,6 +274,98 @@ async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     for row in rows:
         await update.message.reply_text(requester_label(row), reply_markup=decision_keyboard(row["chat_id"]))
+
+
+ROLE_HELP = (
+    "Управление правами:\n"
+    "  /role @username admin — полные права (модерация + загрузка файлов)\n"
+    "  /role @username moderator — модератор обсуждений (может удалять любые сообщения)\n"
+    "  /role @username muted — запретить писать в обсуждениях\n"
+    "  /role @username viewer — обычный участник\n"
+    "  /revoke @username — отозвать личную ссылку (доступ придётся выдать заново)\n"
+    "  /people — список выданных доступов и ролей"
+)
+
+
+async def role_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CFG["admin_chat_ids"]:
+        return
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(ROLE_HELP)
+        return
+    username, role = args[0], args[1].strip().lower()
+    if role not in sar_common.VALID_ROLES:
+        await update.message.reply_text(
+            f"Неизвестная роль «{role}».\n\n{ROLE_HELP}")
+        return
+    row = find_by_username(username)
+    if row is None:
+        await update.message.reply_text(
+            f"{username} не найден. Человек должен хотя бы раз написать боту /start "
+            f"(и иметь @username в Telegram).")
+        return
+
+    set_role(row["chat_id"], role)
+    await update.message.reply_text(
+        f"{requester_label(row)}\n→ роль: {sar_common.ROLE_LABELS[role]}")
+    # человека предупреждаем -- иначе он не поймёт, почему перестал писать
+    try:
+        if role == sar_common.ROLE_MUTED:
+            await context.bot.send_message(
+                row["chat_id"], "Координатор ограничил вам участие в обсуждениях. "
+                                "Просмотр и разметка находок работают как обычно.")
+        elif role == sar_common.ROLE_MODERATOR:
+            await context.bot.send_message(
+                row["chat_id"], "Вам выданы права модератора обсуждений: можете удалять "
+                                "любые сообщения в обсуждениях находок.")
+        elif role == sar_common.ROLE_ADMIN:
+            await context.bot.send_message(
+                row["chat_id"], "Вам выданы права администратора: модерация обсуждений "
+                                "плюс загрузка видео и телеметрии через браузер.")
+        else:
+            await context.bot.send_message(
+                row["chat_id"], "Ваши права в обсуждениях восстановлены.")
+    except Exception:
+        log.exception("не удалось уведомить %s о смене роли", row["chat_id"])
+
+
+async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CFG["admin_chat_ids"]:
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(ROLE_HELP)
+        return
+    row = find_by_username(args[0])
+    if row is None:
+        await update.message.reply_text(f"{args[0]} не найден.")
+        return
+    set_status(row["chat_id"], "denied", update.effective_chat.id)
+    revoke_token(row["chat_id"])
+    await update.message.reply_text(f"Доступ отозван: {requester_label(row)}")
+
+
+async def people_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CFG["admin_chat_ids"]:
+        return
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM telegram_access_requests WHERE status='approved' "
+            "ORDER BY requested_at").fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        await update.message.reply_text("Доступ пока никому не выдан.")
+        return
+    lines = []
+    for r in rows:
+        role = r["role"] or sar_common.DEFAULT_ROLE
+        mark = "🔑" if r["access_token"] else "—"
+        lines.append(f"{mark} {requester_label(r)} · {sar_common.ROLE_LABELS[role]}")
+    await update.message.reply_text(
+        "Выданные доступы:\n" + "\n".join(lines) + f"\n\n{ROLE_HELP}")
 
 
 async def on_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,7 +385,7 @@ async def on_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"{query.message.text}\n\n— {outcome}")
 
     try:
-        await context.bot.send_message(chat_id, access_message() if status == "approved" else DECLINE_MESSAGE)
+        await context.bot.send_message(chat_id, access_message(chat_id) if status == "approved" else DECLINE_MESSAGE)
     except Exception:
         log.exception("не удалось отправить решение пользователю %s", chat_id)
 
@@ -244,6 +407,9 @@ def build_application():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("pending", pending_cmd))
+    app.add_handler(CommandHandler("role", role_cmd))
+    app.add_handler(CommandHandler("revoke", revoke_cmd))
+    app.add_handler(CommandHandler("people", people_cmd))
     app.add_handler(CallbackQueryHandler(on_decision))
     return app
 

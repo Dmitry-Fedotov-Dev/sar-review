@@ -26,7 +26,11 @@ def _setup(tmp_path):
     return db_path
 
 
-def _client(db_path, monkeypatch, viewer="tester"):
+def _client(db_path, monkeypatch, viewer="tester", verified=True,
+            role=sar_common.ROLE_VIEWER):
+    """verified=True -- человек вошёл по персональной ссылке из бота и опознан.
+    Писать в обсуждениях могут только такие (см. test_roles_and_identity.py):
+    анонимный вход по общему паролю даёт только чтение и разметку находок."""
     monkeypatch.setattr(sar_server, "DB_PATH", db_path, raising=False)
     sar_server.app.secret_key = "test-secret"
     sar_server.app.testing = True
@@ -34,6 +38,8 @@ def _client(db_path, monkeypatch, viewer="tester"):
     with client.session_transaction() as s:
         s["authed"] = True
         s["viewer_name"] = viewer
+        s["verified"] = verified
+        s["role"] = role
     return client
 
 

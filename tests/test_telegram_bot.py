@@ -174,7 +174,8 @@ def test_on_decision_approve_sets_status_and_sends_access_to_requester():
     _run(bot.on_decision(update, context))
 
     assert bot.get_request(USER)["status"] == "approved"
-    context.bot.send_message.assert_awaited_once_with(USER, bot.access_message())
+    # с chat_id -- в сообщении есть ПЕРСОНАЛЬНАЯ ссылка этого человека
+    context.bot.send_message.assert_awaited_once_with(USER, bot.access_message(USER))
     update.callback_query.edit_message_text.assert_awaited_once()
 
 
