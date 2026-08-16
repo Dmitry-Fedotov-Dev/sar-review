@@ -942,6 +942,10 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 /* кнопка направления сортировки -- только значок ⇅, поэтому фиксированная
    ширина и крупнее шрифт, иначе значок теряется в широкой кнопке */
 #sort-dir {{ width:38px; font-size:16px; line-height:1; text-align:center; padding:6px 0; }}
+#search {{ flex:1; min-width:180px; max-width:340px; background:#0d0d0d; color:#eee;
+           border:1px solid #333; border-radius:6px; padding:7px 10px; font-size:13px; }}
+#search:focus {{ outline:none; border-color:#3355aa; }}
+.search-count {{ font-size:12px; color:#888; white-space:nowrap; }}
 .toolbar button:hover {{ border-color:#555; }}
 /* СТРОГАЯ СЕТКА. Раньше строка выкладывалась флексом, и каждый элемент
    вставал по своей естественной ширине -- полоса покрытия, статистика и
@@ -1030,6 +1034,8 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
     <option value="detections">числу детекций</option>
   </select>
   <button id="sort-dir" title="Изменить направление">⇅</button>
+  <input id="search" type="search" placeholder="Поиск по имени файла…" autocomplete="off">
+  <span id="search-count" class="search-count"></span>
 </div>
 {upload_section}
 <div id="tree">Загрузка...</div>
@@ -1159,6 +1165,25 @@ async function enqueue(reportId, btn) {{
   }}
 }}
 
+// --- поиск по имени файла ---
+// Список сам обновляется каждые 5 секунд, поэтому фильтр применяется при
+// КАЖДОЙ отрисовке, а не разово к текущим строкам -- иначе набранный запрос
+// сбрасывался бы при первом же автообновлении.
+let searchQuery = '';
+
+function matchesSearch(it) {{
+  if (!searchQuery) return true;
+  // ищем по всем словам запроса независимо от их порядка: "0003 mp4"
+  // найдёт DJI_20260812140054_0003_Z.MP4
+  const name = it.name.toLowerCase();
+  return searchQuery.split(/\\s+/).every(part => name.includes(part));
+}}
+
+document.getElementById('search').addEventListener('input', e => {{
+  searchQuery = e.target.value.trim().toLowerCase();
+  render(lastData);
+}});
+
 function detectionTotal(it) {{
   // ai_count -- null, пока видео ещё не done (см. /api/tree в sar_server.py:
   // группировка на лету слишком дорогая, чтобы гонять её при каждом опросе
@@ -1197,7 +1222,20 @@ function render(data) {{
       <span class="cell-status">статус</span>
       <span></span>
     </div>`;
-  root.innerHTML = header + renderItems(sortItems(data.items));
+  const shown = sortItems(data.items).filter(matchesSearch);
+  const counter = document.getElementById('search-count');
+  counter.textContent = searchQuery
+    ? `найдено: ${{shown.length}} из ${{data.items.length}}` : '';
+
+  if (!shown.length) {{
+    root.innerHTML = `<p style="color:#888">По запросу «${{escapeHtmlTree(searchQuery)}}» ничего не найдено.</p>`;
+    return;
+  }}
+  root.innerHTML = header + renderItems(shown);
+}}
+
+function escapeHtmlTree(s) {{
+  return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
 }}
 
 function renderItems(items) {{
@@ -2262,9 +2300,10 @@ h1 {{ font-size:16px; margin:12px 0; }}
     </div>
     <div class="toolbar">
       <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
-        <input type="checkbox" id="ai-toggle"> показывать рамки модели (<span id="ai-count">0</span>)
+        <input type="checkbox" id="ai-toggle"> показывать находки модели (<span id="ai-count">0</span>)
       </label>
-      <span class="hint" style="color:#7a5cff;">— фиолетовым/жёлтым, пунктиром, чтобы отличать от ручных отметок</span>
+      <span class="hint" style="color:#7a5cff;">— рамки на видео и список сцен справа. Снимите галку,
+        чтобы смотреть своими глазами, без подсказок модели</span>
     </div>
 
     <div id="draw-form-slot"></div>
@@ -2274,9 +2313,11 @@ h1 {{ font-size:16px; margin:12px 0; }}
   </div>
 
   <div class="obs-col">
-    <h1 style="font-size:14px; margin-top:0;">Сцены (модель) (<span id="ai-scenes-count">0</span>)</h1>
-    <div id="ai-scenes-list"><div class="empty">Загрузка...</div></div>
-    <hr class="section-sep">
+    <div id="ai-scenes-block">
+      <h1 style="font-size:14px; margin-top:0;">Сцены (модель) (<span id="ai-scenes-count">0</span>)</h1>
+      <div id="ai-scenes-list"><div class="empty">Загрузка...</div></div>
+      <hr class="section-sep">
+    </div>
     <h1 style="font-size:14px;">Наблюдения (<span id="obs-count">0</span>)</h1>
     <div id="obs-list"><div class="empty">Загрузка...</div></div>
   </div>
@@ -2598,6 +2639,7 @@ const PRIORITY_LABELS = {{
   'likely_person': '👤 предположительно человек',
   'confirmed_object': '🎒 предмет',
   'likely_object': '🎒 предположительно предмет',
+  'anomaly': '❓ аномалия (непонятно, но подозрительно)',
   'rejected': '❌ отклонено',
 }};
 let priorityMap = {{}};
@@ -2700,11 +2742,22 @@ async function heartbeat() {{
 heartbeat();
 setInterval(heartbeat, 15000);
 
+// Одна галка прячет ВСЁ, что подсказала модель: и рамки поверх видео, и
+// список сцен справа. Нужно, чтобы можно было пройти видео своими глазами,
+// не глядя на подсказки -- иначе внимание невольно идёт туда, куда показала
+// модель, и непомеченные ею места просматриваются хуже.
+function applyAiVisibility() {{
+  const block = document.getElementById('ai-scenes-block');
+  if (block) block.style.display = showAiBoxes ? '' : 'none';
+}}
+
 document.getElementById('ai-toggle').addEventListener('change', e => {{
   showAiBoxes = e.target.checked;
   if (showAiBoxes && aiDetections.length === 0) loadAiDetections();
+  applyAiVisibility();
   renderVisibleObservations();
 }});
+applyAiVisibility();
 
 // приоритеты грузим ПЕРЕД первым рендером обоих списков -- иначе выпадающие
 // списки на долю секунды отрисуются как "не размечено" и тут же перерисуются
