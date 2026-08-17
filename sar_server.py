@@ -942,6 +942,15 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 /* кнопка направления сортировки -- только значок ⇅, поэтому фиксированная
    ширина и крупнее шрифт, иначе значок теряется в широкой кнопке */
 #sort-dir {{ width:38px; font-size:16px; line-height:1; text-align:center; padding:6px 0; }}
+/* вкладки разделов */
+.tabs {{ display:flex; gap:4px; margin:0 0 16px; border-bottom:1px solid #2a2a2a; }}
+.tab {{ padding:8px 16px; font-size:14px; color:#999; text-decoration:none;
+        border:1px solid transparent; border-bottom:none; border-radius:8px 8px 0 0;
+        display:flex; align-items:center; gap:6px; }}
+.tab:hover {{ color:#eee; background:#1b1b1b; }}
+.tab.active {{ color:#eee; background:#1b1b1b; border-color:#2a2a2a; }}
+.live-badge {{ background:#c0392b; color:#fff; font-size:10px; font-weight:bold;
+               padding:1px 6px; border-radius:8px; }}
 #search {{ flex:1; min-width:180px; max-width:340px; background:#0d0d0d; color:#eee;
            border:1px solid #333; border-radius:6px; padding:7px 10px; font-size:13px; }}
 #search:focus {{ outline:none; border-color:#3355aa; }}
@@ -1019,12 +1028,16 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .upload-status {{ font-size:12px; color:#999; }}
 </style></head>
 <body>
-<h1>SAR Review — файлы
+<h1>SAR Review
   <span class="header-right">
     <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>
     <span class="whoami">{viewer_name} · <a href="/login" style="color:#999">сменить</a></span>
   </span>
 </h1>
+<nav class="tabs">
+  <a class="tab active" href="/">📁 Записи</a>
+  <a class="tab" href="/streams">📡 Стримы<span id="live-badge" class="live-badge" style="display:none"></span></a>
+</nav>
 <div class="toolbar">
   Сортировать по:
   <select id="sort-key">
@@ -2155,6 +2168,167 @@ def api_enqueue(report_id):
     return jsonify({"ok": True, "status": "queued"})
 
 
+# ---------------------------------------------------------------------------
+# ЖИВЫЕ ПОТОКИ С ДРОНА
+#
+# Платформа НЕ принимает и НЕ перекодирует видео сама -- этим занимается
+# медиасервер (mediamtx и подобные), а сюда приходит только регистрация
+# потока и heartbeat от вещающего клиента. Причина простая: перекодирование
+# нескольких потоков на том же процессоре, где идёт разбор записей, положило
+# бы и то, и другое (см. историю с 8 потоками waitress и загрузкой CPU).
+#
+# Зрителю отдаётся ссылка на медиасервер -- он и раздаёт поток скольким
+# угодно людям одновременно, это его работа.
+# ---------------------------------------------------------------------------
+
+def can_manage_streams():
+    """Кто может объявлять и останавливать трансляции.
+
+    Пока используется тот же механизм, что и у загрузки файлов (имя
+    UPLOADER_NAME) -- это по-прежнему не настоящая проверка, а барьер от
+    случайности. Когда появится ролевая модель с опознанием через бота,
+    здесь должна остаться одна строка: проверка роли администратора.
+    Вынесено в отдельную функцию именно ради этого -- чтобы менять в одном
+    месте, а не в четырёх эндпоинтах."""
+    return session.get("viewer_name") == UPLOADER_NAME
+
+
+def _stream_playback_url(stream_key, viewer_hint=None):
+    if viewer_hint:
+        return viewer_hint
+    server = (SERVER_CFG.get("stream_server_url") or "").rstrip("/")
+    if not server:
+        return None
+    template = SERVER_CFG.get("stream_playback_template", "{server}/{key}/index.m3u8")
+    return template.format(server=server, key=stream_key)
+
+
+def _stream_is_live(row, now=None):
+    """Поток считается живым, пока приходит heartbeat. Без этого оборвавшаяся
+    трансляция вечно висела бы как 'в эфире', и люди ждали бы картинку,
+    которой уже нет."""
+    if row["status"] != "live" or not row["last_seen"]:
+        return False
+    limit = SERVER_CFG.get("stream_offline_after_sec", 30)
+    try:
+        seen = datetime.fromisoformat(row["last_seen"])
+    except (TypeError, ValueError):
+        return False
+    return ((now or datetime.now()) - seen).total_seconds() <= limit
+
+
+@app.route("/api/streams", methods=["GET"])
+def api_streams():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM streams ORDER BY status DESC, title").fetchall()
+    out = []
+    for r in rows:
+        live = _stream_is_live(r)
+        out.append({
+            "stream_key": r["stream_key"], "title": r["title"], "source": r["source"],
+            "status": "live" if live else "offline",
+            "started_at": r["started_at"], "last_seen": r["last_seen"],
+            "playback_url": _stream_playback_url(r["stream_key"], r["viewer_hint"]),
+        })
+    return jsonify({"items": out, "configured": bool(SERVER_CFG.get("stream_server_url"))})
+
+
+@app.route("/api/streams/<stream_key>/announce", methods=["POST"])
+def api_stream_announce(stream_key):
+    """Вещающий клиент сообщает, что поток пошёл, и дальше шлёт heartbeat.
+
+    Требует прав администратора: объявить поток -- значит показать его всей
+    команде как источник, которому можно доверять."""
+    if not can_manage_streams():
+        return jsonify({"ok": False, "error": "нужны права на управление трансляциями"}), 403
+
+    data = request.get_json(force=True, silent=True) or {}
+    title = (data.get("title") or stream_key).strip()[:120]
+    source = (data.get("source") or "").strip()[:120]
+    viewer_hint = (data.get("playback_url") or "").strip()[:500] or None
+    now = datetime.now().isoformat()
+
+    conn = get_db()
+    row = conn.execute("SELECT stream_key, started_at FROM streams WHERE stream_key=?",
+                       (stream_key,)).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO streams (stream_key, title, source, status, started_at, last_seen, "
+            "viewer_hint, created_at) VALUES (?,?,?,'live',?,?,?,?)",
+            (stream_key, title, source, now, now, viewer_hint, now))
+    else:
+        conn.execute(
+            "UPDATE streams SET title=?, source=?, status='live', last_seen=?, viewer_hint=?, "
+            "started_at=COALESCE(started_at, ?) WHERE stream_key=?",
+            (title, source, now, viewer_hint, now, stream_key))
+    conn.commit()
+    return jsonify({"ok": True, "playback_url": _stream_playback_url(stream_key, viewer_hint)})
+
+
+@app.route("/api/streams/<stream_key>/heartbeat", methods=["POST"])
+def api_stream_heartbeat(stream_key):
+    if not can_manage_streams():
+        return jsonify({"ok": False, "error": "нужны права на управление трансляциями"}), 403
+    conn = get_db()
+    updated = conn.execute(
+        "UPDATE streams SET last_seen=?, status='live' WHERE stream_key=?",
+        (datetime.now().isoformat(), stream_key)).rowcount
+    conn.commit()
+    if not updated:
+        return jsonify({"ok": False, "error": "поток не зарегистрирован"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/streams/<stream_key>/stop", methods=["POST"])
+def api_stream_stop(stream_key):
+    if not can_manage_streams():
+        return jsonify({"ok": False, "error": "нужны права на управление трансляциями"}), 403
+    conn = get_db()
+    conn.execute("UPDATE streams SET status='offline' WHERE stream_key=?", (stream_key,))
+    conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/streams/<stream_key>/detections", methods=["GET", "POST"])
+def api_stream_detections(stream_key):
+    """Детекции по живому потоку.
+
+    Считает их НЕ этот сервер: детектор работает либо на edge-клиенте в поле,
+    либо отдельным процессом, и присылает результат сюда. Сервер остаётся
+    тем, чем был -- слоем чтения и раздачи (см. разделение процессов в
+    CLAUDE.md), иначе инференс на потоке съел бы процессор у веб-интерфейса."""
+    conn = get_db()
+
+    if request.method == "GET":
+        # только свежие -- зрителю нужно то, что видно на экране сейчас,
+        # а не вся история потока
+        since_id = request.args.get("since_id", type=int) or 0
+        rows = conn.execute(
+            "SELECT * FROM stream_detections WHERE stream_key=? AND id>? "
+            "ORDER BY id DESC LIMIT 200", (stream_key, since_id)).fetchall()
+        return jsonify([
+            dict(r) | {"bbox": json.loads(r["bbox"]) if r["bbox"] else None}
+            for r in rows])
+
+    if not can_manage_streams():
+        return jsonify({"ok": False, "error": "нужны права на управление трансляциями"}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    dets = data.get("detections") or []
+    now = datetime.now().isoformat()
+    saved = 0
+    for d in dets[:200]:
+        bbox = d.get("bbox")
+        conn.execute(
+            "INSERT INTO stream_detections (stream_key, ts, object_class, confidence, bbox, "
+            "lat, lon, est_lat, est_lon, raw_telemetry) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (stream_key, now, d.get("object_class"), d.get("confidence"),
+             json.dumps(bbox) if bbox else None, d.get("lat"), d.get("lon"),
+             d.get("est_lat"), d.get("est_lon"), d.get("raw_telemetry")))
+        saved += 1
+    conn.commit()
+    return jsonify({"ok": True, "saved": saved})
+
+
 MAX_COMMENT_LEN = 2000
 
 
@@ -2260,6 +2434,226 @@ def api_priorities(report_id):
         (report_id, kind, ref_key, priority, viewer_name, now))
     conn.commit()
     return jsonify({"ok": True, "priority": priority, "set_by": viewer_name, "set_at": now})
+
+
+STREAMS_PAGE_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>SAR Review — стримы</title>
+<style>
+body {{ font-family: -apple-system, Arial, sans-serif; background:#111; color:#eee; margin:0; padding:20px; }}
+a {{ color:#8ecbff; }}
+h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:center; }}
+.header-right {{ display:flex; align-items:center; gap:16px; font-size:13px; font-weight:normal; }}
+.online-indicator {{ display:flex; align-items:center; gap:6px; color:#ccc; }}
+.online-dot {{ width:6px; height:6px; border-radius:50%; background:#2f9e44; }}
+.whoami {{ color:#888; }}
+.tabs {{ display:flex; gap:4px; margin:0 0 16px; border-bottom:1px solid #2a2a2a; }}
+.tab {{ padding:8px 16px; font-size:14px; color:#999; text-decoration:none;
+        border:1px solid transparent; border-bottom:none; border-radius:8px 8px 0 0;
+        display:flex; align-items:center; gap:6px; }}
+.tab:hover {{ color:#eee; background:#1b1b1b; }}
+.tab.active {{ color:#eee; background:#1b1b1b; border-color:#2a2a2a; }}
+.live-badge {{ background:#c0392b; color:#fff; font-size:10px; font-weight:bold;
+               padding:1px 6px; border-radius:8px; }}
+
+.grid {{ display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:16px; }}
+.card {{ background:#1b1b1b; border:1px solid #2a2a2a; border-radius:10px; overflow:hidden; }}
+.card-head {{ display:flex; align-items:center; gap:10px; padding:10px 14px; }}
+.dot {{ width:9px; height:9px; border-radius:50%; flex-shrink:0; }}
+.dot.live {{ background:#e74c3c; box-shadow:0 0 0 0 rgba(231,76,60,.7); animation:pulse 2s infinite; }}
+.dot.offline {{ background:#555; }}
+@keyframes pulse {{
+  0% {{ box-shadow:0 0 0 0 rgba(231,76,60,.6); }}
+  70% {{ box-shadow:0 0 0 8px rgba(231,76,60,0); }}
+  100% {{ box-shadow:0 0 0 0 rgba(231,76,60,0); }}
+}}
+.card-title {{ flex:1; font-size:15px; font-weight:bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.card-src {{ font-size:12px; color:#888; }}
+.video-wrap {{ position:relative; background:#000; aspect-ratio:16/9; }}
+.video-wrap video {{ width:100%; height:100%; display:block; object-fit:contain; }}
+.video-wrap svg {{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }}
+.det-box {{ fill:none; stroke:#ff3b3b; stroke-width:2; }}
+.det-label {{ fill:#ff3b3b; font-size:13px; font-weight:bold; paint-order:stroke;
+              stroke:#000; stroke-width:3px; }}
+.card-foot {{ padding:8px 14px; font-size:12px; color:#888; display:flex; gap:14px; flex-wrap:wrap; }}
+.placeholder {{ display:flex; align-items:center; justify-content:center; height:100%;
+                color:#666; font-size:13px; text-align:center; padding:20px; }}
+.setup {{ background:#1b1b1b; border:1px solid #333; border-radius:10px; padding:20px 24px;
+          max-width:760px; line-height:1.7; }}
+.setup h2 {{ font-size:16px; margin-top:0; }}
+.setup code {{ background:#0d0d0d; border:1px solid #2a2a2a; border-radius:4px;
+               padding:1px 6px; font-size:12.5px; }}
+.setup pre {{ background:#0d0d0d; border:1px solid #2a2a2a; border-radius:6px;
+              padding:10px 12px; overflow-x:auto; font-size:12.5px; }}
+.empty {{ color:#777; font-size:14px; }}
+</style></head>
+<body>
+<h1>SAR Review
+  <span class="header-right">
+    <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>
+    <span class="whoami">{viewer_name} · <a href="/login" style="color:#999">сменить</a></span>
+  </span>
+</h1>
+<nav class="tabs">
+  <a class="tab" href="/">📁 Записи</a>
+  <a class="tab active" href="/streams">📡 Стримы</a>
+</nav>
+
+<div id="root"><p class="empty">Загрузка…</p></div>
+
+<!-- hls.js лежит локально (static/), а НЕ подключается с CDN: сервис должен
+     работать в сети операции без интернета -- это его заявленное свойство,
+     и внешняя зависимость сломала бы просмотр именно в поле -->
+<script src="/static/hls.min.js"></script>
+<script>
+// Платформа сама видео не раздаёт -- она отдаёт ссылку на медиасервер, а он
+// уже вещает скольким угодно зрителям. Поэтому здесь только плеер и оверлей.
+const SETUP_HTML = `
+  <div class="setup">
+    <h2>Живые трансляции ещё не настроены</h2>
+    <p>Платформа не принимает видео сама — этим занимается медиасервер, а она
+    показывает список потоков и отдаёт зрителям ссылку. Так десяток человек
+    могут смотреть один поток, не нагружая машину с разбором записей.</p>
+    <p><b>Что нужно сделать:</b></p>
+    <ol>
+      <li>Поднять медиасервер (например, <code>mediamtx</code> — принимает RTMP/SRT
+          с дрона или ноутбука в поле, раздаёт HLS браузерам).</li>
+      <li>Прописать его адрес в <code>sar_config.json</code>:
+        <pre>"server": {{
+  "stream_server_url": "http://адрес-медиасервера:8888"
+}}</pre></li>
+      <li>Вещающий клиент объявляет поток запросом
+          <code>POST /api/streams/&lt;ключ&gt;/announce</code> и дальше шлёт
+          <code>/heartbeat</code>. Нужны права администратора.</li>
+    </ol>
+    <p style="color:#888">Детекция на потоке считается не здесь, а на стороне
+    вещающего клиента: инференс на этой машине занял бы процессор у разбора
+    записей. Результаты присылаются в
+    <code>POST /api/streams/&lt;ключ&gt;/detections</code> и рисуются поверх видео.</p>
+  </div>`;
+
+const players = {{}};   // stream_key -> Hls
+const lastDetId = {{}}; // stream_key -> последний показанный id детекции
+
+function esc(s) {{
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+}}
+
+function fmtSince(iso) {{
+  if (!iso) return '';
+  const d = new Date(iso), mins = Math.floor((Date.now() - d) / 60000);
+  if (mins < 1) return 'только что';
+  if (mins < 60) return `${{mins}} мин в эфире`;
+  return `${{Math.floor(mins / 60)}} ч ${{mins % 60}} мин в эфире`;
+}}
+
+function cardHtml(s) {{
+  const live = s.status === 'live';
+  const body = (live && s.playback_url)
+    ? `<video id="v-${{s.stream_key}}" muted playsinline controls></video>
+       <svg id="ov-${{s.stream_key}}" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>`
+    : `<div class="placeholder">${{live
+          ? 'Поток в эфире, но адрес воспроизведения не настроен'
+          : 'Не в эфире'}}</div>`;
+  return `
+    <div class="card">
+      <div class="card-head">
+        <span class="dot ${{live ? 'live' : 'offline'}}"></span>
+        <span class="card-title">${{esc(s.title)}}</span>
+        ${{s.source ? `<span class="card-src">${{esc(s.source)}}</span>` : ''}}
+      </div>
+      <div class="video-wrap">${{body}}</div>
+      <div class="card-foot">
+        <span>${{live ? fmtSince(s.started_at) : 'офлайн'}}</span>
+        <span id="det-${{s.stream_key}}"></span>
+      </div>
+    </div>`;
+}}
+
+function attachPlayer(s) {{
+  const video = document.getElementById('v-' + s.stream_key);
+  if (!video || players[s.stream_key]) return;
+  const url = s.playback_url;
+  if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+    video.src = url;              // Safari умеет HLS сам
+  }} else if (window.Hls && Hls.isSupported()) {{
+    const hls = new Hls({{ lowLatencyMode: true, liveSyncDurationCount: 2 }});
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    players[s.stream_key] = hls;
+  }}
+  video.play().catch(() => {{}});  // автозапуск может быть заблокирован -- это нормально
+}}
+
+async function loadDetections(key) {{
+  try {{
+    const since = lastDetId[key] || 0;
+    const res = await fetch(`/api/streams/${{key}}/detections?since_id=${{since}}`);
+    const rows = await res.json();
+    if (!rows.length) return;
+    lastDetId[key] = Math.max(...rows.map(r => r.id));
+    const ov = document.getElementById('ov-' + key);
+    if (!ov) return;
+    // показываем только самую свежую пачку -- на живом потоке важно то,
+    // что в кадре сейчас, а не вся история
+    const fresh = rows.slice(0, 20).filter(r => r.bbox);
+    ov.innerHTML = fresh.map(r => {{
+      const [x1, y1, x2, y2] = r.bbox;   // нормализовано 0..1
+      return `<rect class="det-box" x="${{x1*100}}" y="${{y1*100}}"
+                width="${{(x2-x1)*100}}" height="${{(y2-y1)*100}}"
+                vector-effect="non-scaling-stroke"/>`;
+    }}).join('');
+    const el = document.getElementById('det-' + key);
+    if (el) el.textContent = fresh.length ? `🤖 в кадре: ${{fresh.length}}` : '';
+  }} catch (e) {{}}
+}}
+
+async function load() {{
+  const res = await fetch('/api/streams');
+  const data = await res.json();
+  const root = document.getElementById('root');
+
+  if (!data.configured) {{ root.innerHTML = SETUP_HTML; return; }}
+  if (!data.items.length) {{
+    root.innerHTML = '<p class="empty">Пока ни одного потока. Как только вещающий '
+      + 'клиент объявит трансляцию, она появится здесь.</p>';
+    return;
+  }}
+  // перерисовываем только при смене состава/статусов -- иначе плеер
+  // пересоздавался бы каждые несколько секунд и видео дёргалось
+  const sig = data.items.map(s => s.stream_key + ':' + s.status).join('|');
+  if (root.dataset.sig !== sig) {{
+    root.dataset.sig = sig;
+    root.innerHTML = '<div class="grid">' + data.items.map(cardHtml).join('') + '</div>';
+    Object.keys(players).forEach(k => {{
+      if (!data.items.some(s => s.stream_key === k && s.status === 'live')) {{
+        players[k].destroy?.(); delete players[k];
+      }}
+    }});
+    data.items.filter(s => s.status === 'live' && s.playback_url).forEach(attachPlayer);
+  }}
+  data.items.filter(s => s.status === 'live').forEach(s => loadDetections(s.stream_key));
+}}
+
+load();
+setInterval(load, 5000);
+
+async function heartbeat() {{
+  try {{
+    const res = await fetch('/api/heartbeat', {{ method: 'POST' }});
+    const d = await res.json();
+    if (d.count !== undefined) document.getElementById('online-count').textContent = d.count;
+  }} catch (e) {{}}
+}}
+heartbeat();
+setInterval(heartbeat, 15000);
+</script>
+</body></html>"""
+
+
+@app.route("/streams")
+def streams_page():
+    return STREAMS_PAGE_HTML.format(viewer_name=session.get("viewer_name", "аноним"))
 
 
 PLAYER_PAGE_HTML = """<!DOCTYPE html>

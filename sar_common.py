@@ -88,6 +88,22 @@ DEFAULT_SERVER_CONFIG = {
     # сервере (см. player_page() в sar_server.py) — конфиг не может
     # заставить одного клиента долбить сервер чаще этого, даже по ошибке.
     "player_ai_poll_interval_sec": 5,
+    # --- живые потоки с дрона (вкладка "Стримы") ---
+    # Базовый адрес медиасервера, который принимает поток от вещающего и
+    # раздаёт его зрителям. Платформа сама видео НЕ перекодирует и НЕ
+    # проксирует: она хранит список потоков и отдаёт зрителю ссылку. Это
+    # осознанно -- перекодирование десятка потоков на том же процессоре, где
+    # идёт разбор видео, положило бы и то, и другое.
+    #
+    # Пусто -- вкладка "Стримы" показывает инструкцию по настройке вместо
+    # списка, чтобы человек не думал, что сломалось.
+    "stream_server_url": "",
+    # шаблон ссылки воспроизведения; {key} подставляется из stream_key.
+    # HLS работает во всех браузерах без плагинов, но даёт задержку 5-15с;
+    # WebRTC (whep) почти без задержки, но требует поддержки у медиасервера.
+    "stream_playback_template": "{server}/{key}/index.m3u8",
+    # через сколько секунд без heartbeat считать поток оборвавшимся
+    "stream_offline_after_sec": 30,
 }
 
 
@@ -251,6 +267,28 @@ def init_db(db_path):
         UNIQUE(report_id, kind, ref_key)
     );
     CREATE INDEX IF NOT EXISTS idx_priorities_report ON detection_priorities(report_id);
+    CREATE TABLE IF NOT EXISTS streams (
+        stream_key TEXT PRIMARY KEY,   -- идентификатор потока у медиасервера
+        title TEXT NOT NULL,           -- как показывать людям ("Борт 2, южный склон")
+        source TEXT,                   -- откуда вещают: борт, позывной, ноутбук в поле
+        status TEXT NOT NULL DEFAULT 'offline',  -- live|offline
+        started_at TEXT,
+        last_seen TEXT,                -- heartbeat от вещающего клиента
+        viewer_hint TEXT,              -- URL воспроизведения, если отличается от общего правила
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS stream_detections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stream_key TEXT NOT NULL,
+        ts TEXT NOT NULL,              -- когда получено сервером
+        object_class TEXT,
+        confidence REAL,
+        bbox TEXT,                     -- JSON [x1,y1,x2,y2], нормализовано 0..1
+        lat REAL, lon REAL,            -- координаты дрона на этот момент, если есть
+        est_lat REAL, est_lon REAL,
+        raw_telemetry TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_stream_det ON stream_detections(stream_key, id);
     CREATE TABLE IF NOT EXISTS detection_comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         report_id TEXT NOT NULL,
