@@ -76,11 +76,14 @@ def test_list_pending_excludes_decided_requests():
     assert [r["chat_id"] for r in pending] == [1]
 
 
-def test_access_message_contains_service_url_password_and_guide():
+def test_access_message_has_guide_but_no_credentials():
+    """Ни пароля, ни ссылки входа в этом сообщении быть не должно: оно
+    остаётся в переписке навсегда, а доступы уходят отдельным
+    самоудаляющимся сообщением (см. link_message/send_access)."""
     msg = bot.access_message()
-    assert "https://example.trycloudflare.com" in msg
-    assert "s3cr3t-pw" in msg
     assert "https://claude.ai/code/artifact/guide" in msg
+    assert "s3cr3t-pw" not in msg
+    assert "/login?key" not in msg
 
 
 def test_access_message_recommends_desktop_over_phone():
@@ -136,9 +139,13 @@ def test_start_when_already_approved_sends_access_directly_without_notifying_adm
     update, context = _fake_start_update(USER)
     _run(bot.start(update, context))
 
-    context.bot.send_message.assert_not_awaited()
-    update.message.reply_text.assert_awaited_once()
-    assert "s3cr3t-pw" in update.message.reply_text.await_args[0][0]
+    # доступ уходит ДВУМЯ сообщениями пользователю (инструкция + ссылка),
+    # но координаторов при этом дёргать не надо -- он уже одобрен
+    sent_to = [c.args[0] for c in context.bot.send_message.await_args_list]
+    assert sent_to == [USER, USER]
+    assert ADMIN_A not in sent_to and ADMIN_B not in sent_to
+    texts = " ".join(c.args[1] for c in context.bot.send_message.await_args_list)
+    assert "/login?key" in texts
 
 
 def test_start_when_denied_sends_decline_message():
@@ -174,8 +181,10 @@ def test_on_decision_approve_sets_status_and_sends_access_to_requester():
     _run(bot.on_decision(update, context))
 
     assert bot.get_request(USER)["status"] == "approved"
-    # с chat_id -- в сообщении есть ПЕРСОНАЛЬНАЯ ссылка этого человека
-    context.bot.send_message.assert_awaited_once_with(USER, bot.access_message(USER))
+    # инструкция и персональная ссылка -- двумя отдельными сообщениями
+    calls = context.bot.send_message.await_args_list
+    assert [c.args[0] for c in calls] == [USER, USER]
+    assert "/login?key" in calls[1].args[1]
     update.callback_query.edit_message_text.assert_awaited_once()
 
 

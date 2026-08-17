@@ -38,6 +38,12 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def c_sent(context):
+    """Все вызовы bot.send_message -- доступ теперь уходит двумя
+    сообщениями, поэтому проверяем список, а не единственный вызов."""
+    return list(context.bot.send_message.await_args_list)
+
+
 def _upd(chat_id=USER):
     u = MagicMock()
     u.effective_user.username = "vol"
@@ -84,8 +90,11 @@ def test_start_grants_access_immediately_inside_window():
     _run(bot.start(u, c))
 
     assert bot.get_request(USER)["status"] == "approved"
-    sent = u.message.reply_text.await_args[0][0]
-    assert "pw" in sent, "должен прийти пароль сразу, без ожидания"
+    # доступ приходит сразу, без ожидания одобрения: инструкция + личная
+    # ссылка отдельным сообщением
+    to_user = [c for c in c_sent(c) if c.args[0] == USER]
+    assert len(to_user) == 2
+    assert "/login?key" in to_user[1].args[1]
 
 
 def test_admin_is_still_notified_on_auto_approval():
@@ -94,8 +103,9 @@ def test_admin_is_still_notified_on_auto_approval():
     u, c = _upd()
     _run(bot.start(u, c))
 
-    c.bot.send_message.assert_awaited_once()
-    text = c.bot.send_message.await_args[0][1]
+    to_admin = [x for x in c_sent(c) if x.args[0] == ADMIN]
+    assert len(to_admin) == 1
+    text = to_admin[0].args[1]
     assert "АВТОМАТИЧЕСКИ" in text
     assert "@vol" in text
 

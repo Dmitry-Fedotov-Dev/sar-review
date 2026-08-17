@@ -18,6 +18,7 @@ admin_chat_ids (кому приходят заявки на одобрение),
 presentation_url. Пароль отдельно не хранится -- берётся из
 server.shared_password (см. sar_common.load_telegram_bot_config).
 """
+import asyncio
 import logging
 import os
 import sqlite3
@@ -187,16 +188,63 @@ def revoke_token(chat_id):
         conn.close()
 
 
+def link_ttl():
+    try:
+        return int(CFG.get("personal_link_ttl_sec", 3))
+    except (TypeError, ValueError):
+        return 3
+
+
+def link_message(chat_id):
+    """Отдельное сообщение только со ссылкой -- его бот потом удалит.
+
+    Отдельным оно сделано именно ради удаления: стереть можно только всё
+    сообщение целиком, и если бы ссылка лежала внутри общей инструкции,
+    вместе с ней исчезло бы и всё остальное."""
+    ttl = link_ttl()
+    note = (f"\n\n⏳ Это сообщение исчезнет через {ttl} сек. "
+            f"Успейте нажать на ссылку или сохранить её.\n"
+            f"Пропало — просто напишите /help ещё раз." if ttl > 0 else "")
+    return (f"\U0001F517 Ваша личная ссылка (никому не передавайте):\n"
+            f"{personal_link(chat_id)}{note}")
+
+
+async def _delete_after(bot_obj, chat_id, message_id, delay):
+    """Удаляет сообщение со ссылкой через заданное время.
+
+    Молча проглатывает ошибки: человек мог сам удалить сообщение, могла
+    пропасть связь -- ни то, ни другое не повод роняться. Telegram позволяет
+    боту удалять свои сообщения не старше 48 часов, чего здесь заведомо
+    достаточно."""
+    try:
+        await asyncio.sleep(delay)
+        await bot_obj.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        log.debug("не удалось удалить сообщение со ссылкой у %s", chat_id, exc_info=True)
+
+
+async def send_access(bot_obj, chat_id):
+    """Инструкция и ссылка -- ДВУМЯ сообщениями: инструкция остаётся в
+    переписке, ссылка самоуничтожается."""
+    await bot_obj.send_message(chat_id, access_message())
+    if not (CFG.get("service_url") or ""):
+        return
+    msg = await bot_obj.send_message(chat_id, link_message(chat_id),
+                                     disable_web_page_preview=True)
+    ttl = link_ttl()
+    if ttl > 0:
+        # именно create_task: ждать удаления здесь означало бы держать
+        # обработчик команды занятым всё это время
+        asyncio.create_task(_delete_after(bot_obj, chat_id, msg.message_id, ttl))
+
+
 def access_message(chat_id=None):
-    # Персональная ссылка -- основной способ входа: человек попадает внутрь
-    # уже опознанным, имя вводить не нужно, и он может участвовать в
-    # обсуждениях. Общий пароль оставлен запасным вариантом для работы в поле
-    # с чужого устройства, но по нему вход анонимный (без обсуждений).
-    personal = f"\U0001F517 Ваша личная ссылка (никому не передавайте):\n{personal_link(chat_id)}\n\n" \
-        if chat_id is not None else ""
+    # Ссылка сюда НЕ входит -- она уходит отдельным сообщением (см.
+    # send_access), потому что удаляется по таймеру. Общий пароль оставлен
+    # запасным вариантом для работы в поле с чужого устройства, но по нему
+    # вход анонимный, без обсуждений.
     return (
         "✅ Доступ одобрен!\n\n"
-        + personal +
         f"\U0001F4D6 Как пользоваться: {CFG['guide_url']}\n\n"
         "Коротко:\n"
         "— \U0001F4BB смотрите с ноутбука или компьютера, не с телефона: нужно "
@@ -206,10 +254,10 @@ def access_message(chat_id=None):
         "— по личной ссылке вы входите под своим именем — так видно, кто что "
         "посмотрел, и работают обсуждения находок\n"
         "— лучше заходить на Wi-Fi, видео тяжёлые для мобильного интернета\n"
-        "— ссылка тестовая и может временно смениться — если не открывается, напишите сюда же\n\n"
-        f"Запасной вход (если личная ссылка не работает): {CFG['service_url']}\n"
-        f"\U0001F511 общий пароль: {CFG['service_password']} — по нему вход "
-        f"анонимный, обсуждения будут недоступны"
+        "— ссылка тестовая и может временно смениться — если не открывается, напишите /help\n\n"
+        "Общий пароль в переписке больше не присылается: он оставался в истории "
+        "чата и в резервных копиях Telegram. Нужен вход с чужого устройства — "
+        "спросите координатора напрямую."
     )
 
 
@@ -295,7 +343,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row, is_new = upsert_request(chat_id, user.username, user.first_name)
 
     if row["status"] == "approved":
-        await update.message.reply_text(access_message(chat_id))
+        await send_access(context.bot, chat_id)
         return
     if row["status"] == "denied":
         await update.message.reply_text(DECLINE_MESSAGE)
@@ -306,7 +354,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # чтобы утром видеть, кто зашёл
     if auto_approve_active():
         set_status(chat_id, "approved", 0)
-        await update.message.reply_text(access_message(chat_id))
+        await send_access(context.bot, chat_id)
         text = (f"Доступ выдан АВТОМАТИЧЕСКИ (включено окно автовыдачи):\n"
                 f"{requester_label(row)}")
         for admin_id in CFG["admin_chat_ids"]:
@@ -333,7 +381,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = get_request(update.effective_chat.id)
     if row is not None and row["status"] == "approved":
-        await update.message.reply_text(access_message(update.effective_chat.id))
+        await send_access(context.bot, update.effective_chat.id)
     else:
         await update.message.reply_text("Сначала нужно одобрение координатора — отправьте /start.")
 
@@ -471,7 +519,10 @@ async def on_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"{query.message.text}\n\n— {outcome}")
 
     try:
-        await context.bot.send_message(chat_id, access_message(chat_id) if status == "approved" else DECLINE_MESSAGE)
+        if status == "approved":
+            await send_access(context.bot, chat_id)
+        else:
+            await context.bot.send_message(chat_id, DECLINE_MESSAGE)
     except Exception:
         log.exception("не удалось отправить решение пользователю %s", chat_id)
 
