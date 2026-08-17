@@ -19,7 +19,7 @@ Self-hosted веб-сервис для поисково-спасательных
 
 ## Что умеет
 
-- **Мультикласс-детекция** (YOLO-World без дообучения или своя модель) с
+- **Мультикласс-детекция** (YOLOX без дообучения или своя ONNX-модель) с
   тайлингом кадра — плюс отдельный детектор цветовых аномалий для одежды и
   снаряжения, которое object detection на мелком масштабе часто пропускает.
 - **Группировка тысяч детекций в «сцены»** — иначе отчёт нерабочий на
@@ -40,12 +40,23 @@ Self-hosted веб-сервис для поисково-спасательных
 Python 3.10+, ~4 ГБ свободной памяти для инференса на CPU. GPU не обязателен,
 но заметно ускоряет обработку. Проверялось на Windows 11 и Python 3.13.
 
-Веса модели в репозиторий не входят — `ultralytics` скачает их при первом
-запуске, либо положите свой `.pt` рядом и укажите путь в конфиге.
+Инференс идёт через [ONNX Runtime](https://onnxruntime.ai/) (MIT). Веса в
+репозиторий не входят — скачайте YOLOX-s (Apache-2.0) и положите рядом:
+
+```
+https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx
+```
+
+Либо укажите путь к своей ONNX-модели в `sar_config.json` → `model`.
 
 ## Лицензия
 
 [MIT](LICENSE).
+
+Зависимости подобраны так, чтобы проект можно было передать кому угодно, в
+том числе в закрытом виде: ONNX Runtime — MIT, веса YOLOX — Apache-2.0.
+Пакет `ultralytics` (YOLOv8/YOLO-World) **намеренно не используется** — он
+под AGPL-3.0, а это обязывает открывать под AGPL всё, что с ним связано.
 
 ---
 
@@ -246,23 +257,29 @@ Train/val-сплит детерминирован по хэшу — одна и 
 отчёте (карточка сцены + полноэкранный просмотр кадра), и в ручном плеере
 (список "Сцены (модель)" справа).
 
-### Опциональный бэкенд тайлинга — SAHI
+### Нагрузочное тестирование — `sar_loadtest.py`
 
-По умолчанию используется собственная нарезка кадра на тайлы + NMS
-(`detect_frame_tiled`/`make_tiles`/`nms` в `sar_video_review.py`) — то, что
-проверено на боевых данных. Есть опциональный альтернативный бэкенд через
-библиотеку [SAHI](https://github.com/obss/sahi) (`detect_frame_sahi`),
-**выключенный по умолчанию** и никак не влияющий на поведение, если его не
-включать:
+Отвечает на вопрос «сколько человек платформа выдержит одновременно»
+измерением, а не на глаз. Запускает N виртуальных зрителей, каждый со своей
+сессией, и гоняет их по реальному сценарию: список файлов → отчёт со
+сценами → плеер → опрос рамок ИИ.
 
 ```
-pip install -r requirements-sahi.txt
+python sar_loadtest.py --users 6 --duration 60
+python sar_loadtest.py --users 20 --duration 120 --ramp 20 --json lt.json
 ```
-```json
-"detector_backend": "sahi"
-```
-в `sar_config.json` (или `--detector-backend sahi` в CLI). Это отдельная,
-пока не обкатанная на реальных полётах ветка — переключайте осознанно.
+
+Результат разбит **по эндпоинтам** и в **перцентилях**, а не одним средним:
+среднее скрывает провалы, а p95 — это то, что реально чувствует человек.
+В конце указывается узкое место — какой именно шаг тормозит.
+
+Модуль **только читает**: не ставит пометок, не комментирует, не шлёт
+heartbeat, — поэтому его можно гонять по работающей системе. По нелокальному
+адресу бить отказывается без явного `--allow-remote`: нагрузочный тест через
+публичный туннель положит его для тех, кто в этот момент ищет людей.
+
+Не измеряет: отдачу самого видео (упирается в сеть и диск), отрисовку в
+браузере и работу воркера — он отдельный процесс и через HTTP не нагружается.
 
 ### Что даёт разделение на два процесса
 
@@ -288,6 +305,7 @@ pip install -r requirements-sahi.txt
 | `sar_video_review.py` | Детектор для видео (тайлинг, группировка в сцены, отчёт) — использует sar_worker.py, и его можно запускать отдельно как CLI |
 | `sar_photo_review.py` | То же самое для одиночных фото |
 | `sar_batch.py` | Отдельный CLI-инструмент для очереди/пакетной обработки папки с видео БЕЗ веб-сервиса (если веб-сервис не нужен, а нужна просто очередь на одной машине) |
+| `sar_loadtest.py` | Нагрузочное тестирование веб-слоя: N одновременных зрителей, перцентили по каждому эндпоинту. Только чтение, базу не меняет |
 | `sar_config.example.json` | Шаблон настроек — скопируйте в `sar_config.json` один раз, дальше редактируйте только копию |
 | `requirements.txt` | Python-зависимости |
 
@@ -314,14 +332,14 @@ pip install -r requirements-sahi.txt
 ## CLI-режим без сервера (на будущее / для разовой обработки)
 
 ```
-python sar_video_review.py --video video.mp4 --model yolov8s-worldv2.pt \
-    --model-type yolo-world --classes "person,tent" --out ./review_video1
+python sar_video_review.py --video video.mp4 --model yolox_s.onnx \
+    --model-type yolox --classes "person,backpack" --out ./review_video1
 
-python sar_photo_review.py --photo photo1.jpg --model yolov8s-worldv2.pt \
-    --model-type yolo-world --classes "person,tent" --out ./review_photo1
+python sar_photo_review.py --photo photo1.jpg --model yolox_s.onnx \
+    --model-type yolox --classes "person,backpack" --out ./review_photo1
 
 python sar_batch.py --input-dir ./videos --out-root ./review_all \
-    --model yolov8s-worldv2.pt --model-type yolo-world --classes "person" --workers 1
+    --model yolox_s.onnx --model-type yolox --classes "person" --workers 1
 ```
 
 Все три режима (CLI, `sar_server.py`, `sar_worker.py`) используют один и тот
@@ -345,8 +363,8 @@ pytest
 (`tests/test_upload.py`), список "Сцены (модель)" в плеере
 (`tests/test_ai_scenes_endpoint.py`), геометрическая оценка координат
 объекта (`tests/test_geolocation.py`, `tests/test_process_video_geolocation.py`),
-`backfill_telemetry.py` (`tests/test_backfill_telemetry.py`), опциональный
-бэкенд SAHI (`tests/test_sahi_backend.py`), домашняя ссылка в отчёте
+`backfill_telemetry.py` (`tests/test_backfill_telemetry.py`),
+нагрузочное тестирование (`tests/test_loadtest.py`), домашняя ссылка в отчёте
 (`tests/test_report_home_link.py`), переходы "к таймкоду в плеере" из отчёта
 (`tests/test_player_deeplink.py`), Telegram-бот выдачи доступа
 (`tests/test_telegram_bot.py`), публичные страницы без входа
