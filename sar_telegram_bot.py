@@ -144,11 +144,23 @@ def personal_link(chat_id):
     return f"{base}/login?key={ensure_token(chat_id)}"
 
 
-def find_by_username(username):
-    """Запись по @username (регистр не важен -- в Telegram он не значим)."""
-    uname = username.lstrip("@").strip().lower()
+def find_person(identifier):
+    """Ищет человека по @username ИЛИ по chat_id.
+
+    По chat_id -- не роскошь: username в Telegram НЕОБЯЗАТЕЛЕН, и у части
+    волонтёров его просто нет. Без поиска по id таким людям нельзя было бы
+    выдать никакую роль вообще. chat_id виден в /people.
+
+    Регистр ника не важен -- в Telegram он не значим."""
+    ident = str(identifier).strip()
     conn = _db()
     try:
+        if ident.lstrip("-").isdigit():
+            row = conn.execute("SELECT * FROM telegram_access_requests WHERE chat_id=?",
+                               (int(ident),)).fetchone()
+            if row is not None:
+                return row
+        uname = ident.lstrip("@").lower()
         return conn.execute(
             "SELECT * FROM telegram_access_requests WHERE lower(username)=?", (uname,)).fetchone()
     finally:
@@ -278,12 +290,18 @@ async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ROLE_HELP = (
     "Управление правами:\n"
-    "  /role @username admin — полные права (модерация + загрузка файлов)\n"
-    "  /role @username moderator — модератор обсуждений (может удалять любые сообщения)\n"
-    "  /role @username muted — запретить писать в обсуждениях\n"
-    "  /role @username viewer — обычный участник\n"
-    "  /revoke @username — отозвать личную ссылку (доступ придётся выдать заново)\n"
-    "  /people — список выданных доступов и ролей"
+    "  /role КТО admin — полные права (модерация + загрузка файлов)\n"
+    "  /role КТО moderator — модератор обсуждений (удаляет любые сообщения)\n"
+    "  /role КТО muted — запретить писать в обсуждениях\n"
+    "  /role КТО viewer — обычный участник\n"
+    "  /revoke КТО — отозвать личную ссылку (доступ придётся выдать заново)\n"
+    "  /people — список выданных доступов и ролей\n\n"
+    "КТО — это @username или chat_id. По chat_id нужно потому, что username "
+    "в Telegram необязателен, и у части волонтёров его просто нет; id виден "
+    "в /people.\n"
+    "Примеры:\n"
+    "  /role @wild_high moderator\n"
+    "  /role 361029368 admin"
 )
 
 
@@ -294,16 +312,16 @@ async def role_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_text(ROLE_HELP)
         return
-    username, role = args[0], args[1].strip().lower()
+    target, role = args[0], args[1].strip().lower()
     if role not in sar_common.VALID_ROLES:
         await update.message.reply_text(
             f"Неизвестная роль «{role}».\n\n{ROLE_HELP}")
         return
-    row = find_by_username(username)
+    row = find_person(target)
     if row is None:
         await update.message.reply_text(
-            f"{username} не найден. Человек должен хотя бы раз написать боту /start "
-            f"(и иметь @username в Telegram).")
+            f"{target} не найден. Человек должен хотя бы раз написать боту /start.\n"
+            f"Если у него нет @username — укажите его chat_id, он виден в /people.")
         return
 
     set_role(row["chat_id"], role)
@@ -337,7 +355,7 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.message.reply_text(ROLE_HELP)
         return
-    row = find_by_username(args[0])
+    row = find_person(args[0])
     if row is None:
         await update.message.reply_text(f"{args[0]} не найден.")
         return
