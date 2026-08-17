@@ -124,15 +124,9 @@ DEFAULT_CONFIG = {
     "tile": 640,
     "overlap": 0.25,
     "frame_skip": 2,
-    # "custom" -- собственная нарезка кадра на тайлы + NMS (make_tiles/nms
-    #             в этом файле), то, что реально проверено на боевых данных.
-    # "sahi"   -- нарезка/слияние тайлов через библиотеку SAHI
-    #             (https://github.com/obss/sahi) вместо своей реализации.
-    #             ОПЦИОНАЛЬНО, ВЫКЛЮЧЕНО по умолчанию -- отдельная, пока не
-    #             обкатанная на реальных полётах ветка, требует
-    #             `pip install -r requirements-sahi.txt`. Не меняет ничего,
-    #             если оставить "custom" (поведение по умолчанию идентично
-    #             тому, что было раньше).
+    # Собственная нарезка кадра на тайлы + NMS (make_tiles/nms в этом файле).
+    # Раньше был ещё опциональный бэкенд через библиотеку SAHI, но он
+    # работал только поверх ultralytics -- вместе с ним и убран.
     "detector_backend": "custom",
     "color_anomaly": True,
     # потолок на число цветовых пятен, оставляемых на ОДНОМ кадре (самые
@@ -228,19 +222,132 @@ _MODEL = None
 _MODEL_TYPE = "custom"
 
 
+# Классы COCO в порядке индексов модели. Держим списком здесь, а не тянем
+# из пакета модели: это обычные данные, и они не тащат за собой лицензию.
+# YOLOX-s, обученная на COCO. Apache-2.0 -- в отличие от ultralytics/YOLOv8
+# (AGPL-3.0), это позволяет держать проект под MIT и передавать его кому
+# угодно, в том числе в закрытом виде.
+YOLOX_ONNX_URL = ("https://github.com/Megvii-BaseDetection/YOLOX/releases/"
+                  "download/0.1.1rc0/yolox_s.onnx")
+
+COCO_CLASSES = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+    "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+    "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
+    "toothbrush",
+)
+
+_MODEL_INPUT_SIZE = None   # (h, w), берётся из самой модели
+_MODEL_INPUT_NAME = None
+
+
 def load_model(weights_path: str, model_type: str, target_classes):
-    """Загрузка модели.
-    model_type == "custom"     -> ваша обученная модель, классы уже внутри неё.
-    model_type == "yolo-world" -> открытый словарь, классы задаются текстом
-                                   через model.set_classes(), без дообучения.
-    Замените на свою загрузку, если формат не ultralytics."""
-    global _MODEL, _MODEL_TYPE
-    from ultralytics import YOLO
-    _MODEL = YOLO(weights_path)
+    """Загрузка модели через ONNX Runtime.
+
+    Почему не ultralytics: их пакет и веса под AGPL-3.0, а это обязывает
+    открывать под AGPL всё, что с ними связано, и мешает передать проект
+    кому-либо в закрытом виде. ONNX Runtime -- MIT, веса YOLOX -- Apache-2.0,
+    поэтому проект остаётся честно MIT и его можно дарить без оговорок.
+
+    model_type сохранён для совместимости конфигов, но на загрузку больше не
+    влияет: классы берутся из модели, отбор нужных -- в run_inference_on_tile.
+    """
+    global _MODEL, _MODEL_TYPE, _MODEL_INPUT_SIZE, _MODEL_INPUT_NAME
+    import onnxruntime as ort
+
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(
+            f"Не найден файл модели: {weights_path}\n"
+            f"Скачайте YOLOX-s (Apache-2.0):\n"
+            f"  {YOLOX_ONNX_URL}\n"
+            f"и положите рядом с проектом либо укажите путь в sar_config.json -> model")
+
+    # число потоков ограничено осознанно -- см. _limit_cpu_threads: на той же
+    # машине работает веб-сервис, и инференс не должен забирать все ядра
+    opts = ort.SessionOptions()
+    threads = int(os.environ.get("OMP_NUM_THREADS", "0") or 0)
+    if threads > 0:
+        opts.intra_op_num_threads = threads
+    _MODEL = ort.InferenceSession(weights_path, sess_options=opts,
+                                   providers=["CPUExecutionProvider"])
     _MODEL_TYPE = model_type
-    if model_type == "yolo-world":
-        _MODEL.set_classes(target_classes)
+    inp = _MODEL.get_inputs()[0]
+    _MODEL_INPUT_NAME = inp.name
+    # форма обычно (1, 3, H, W); если размер динамический -- берём 640
+    shape = inp.shape
+    h = shape[2] if isinstance(shape[2], int) else 640
+    w = shape[3] if isinstance(shape[3], int) else 640
+    _MODEL_INPUT_SIZE = (h, w)
     return _MODEL
+
+
+def _preprocess_yolox(img_bgr, input_size):
+    """Готовит тайл для YOLOX: вписывает с сохранением пропорций, добивает
+    серым (114) до нужного размера, переставляет в CHW.
+
+    ВАЖНО: YOLOX ждёт BGR 0..255 без нормализации -- ни деления на 255, ни
+    перестановки каналов в RGB. Это отличается от большинства моделей, и
+    ошибка здесь не падает, а тихо роняет качество детекции."""
+    padded = np.ones((input_size[0], input_size[1], 3), dtype=np.uint8) * 114
+    r = min(input_size[0] / img_bgr.shape[0], input_size[1] / img_bgr.shape[1])
+    resized = cv2.resize(
+        img_bgr, (int(img_bgr.shape[1] * r), int(img_bgr.shape[0] * r)),
+        interpolation=cv2.INTER_LINEAR).astype(np.uint8)
+    padded[: resized.shape[0], : resized.shape[1]] = resized
+    chw = np.ascontiguousarray(padded.transpose(2, 0, 1), dtype=np.float32)
+    return chw, r
+
+
+def _decode_yolox(outputs, input_size):
+    """Разворачивает сырой выход YOLOX в боксы xyxy и уверенности.
+
+    Сеть предсказывает смещения относительно ячеек трёх сеток (шаги 8/16/32),
+    поэтому центр нужно сложить с координатой ячейки и умножить на шаг, а
+    ширину/высоту -- прогнать через exp. Без этого координаты будут в
+    единицах ячеек, а не пикселей."""
+    grids, strides = [], []
+    for stride in (8, 16, 32):
+        hsize, wsize = input_size[0] // stride, input_size[1] // stride
+        xv, yv = np.meshgrid(np.arange(wsize), np.arange(hsize))
+        grid = np.stack((xv, yv), 2).reshape(1, -1, 2)
+        grids.append(grid)
+        strides.append(np.full((1, grid.shape[1], 1), stride))
+    grids = np.concatenate(grids, 1)
+    strides = np.concatenate(strides, 1)
+
+    outputs = outputs.copy()
+    outputs[..., :2] = (outputs[..., :2] + grids) * strides
+    outputs[..., 2:4] = np.exp(outputs[..., 2:4]) * strides
+    return outputs
+
+
+def _nms(boxes, scores, iou_threshold=0.45):
+    """Обычный NMS. Свой, а не из torchvision -- чтобы не тянуть torch ради
+    десяти строк (установка проекта из-за него весила ~2 ГБ)."""
+    if len(boxes) == 0:
+        return []
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        inter = np.maximum(0.0, xx2 - xx1 + 1) * np.maximum(0.0, yy2 - yy1 + 1)
+        iou = inter / (areas[i] + areas[order[1:]] - inter)
+        order = order[1:][iou <= iou_threshold]
+    return keep
 
 
 def run_inference_on_tile(tile_bgr: np.ndarray, conf_threshold: float, target_classes):
@@ -250,25 +357,46 @@ def run_inference_on_tile(tile_bgr: np.ndarray, conf_threshold: float, target_cl
     координатах относительно самого тайла (привязка к полному кадру — снаружи).
 
     !!! Эта функция — единственное место для замены на ваш инференс !!!
-    Если пишете свою обёртку (ONNX/TensorRT/кастом) — верните список в
-    таком же формате, отфильтровав по target_classes самостоятельно.
+    Если пишете свою обёртку (TensorRT/кастом) — верните список в таком же
+    формате, отфильтровав по target_classes самостоятельно.
     """
-    results = _MODEL.predict(tile_bgr, conf=conf_threshold, verbose=False)
+    if _MODEL is None:
+        raise RuntimeError("Модель не загружена -- сначала load_model()")
+
+    blob, ratio = _preprocess_yolox(tile_bgr, _MODEL_INPUT_SIZE)
+    raw = _MODEL.run(None, {_MODEL_INPUT_NAME: blob[None, :, :, :]})[0]
+    preds = _decode_yolox(raw, _MODEL_INPUT_SIZE)[0]
+
+    # формат строки: [cx, cy, w, h, objectness, ...вероятности классов]
+    boxes_xywh = preds[:, :4]
+    obj_conf = preds[:, 4:5]
+    cls_conf = preds[:, 5:]
+    scores_all = obj_conf * cls_conf
+
+    boxes = np.empty_like(boxes_xywh)
+    boxes[:, 0] = boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2.0
+    boxes[:, 1] = boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2.0
+    boxes[:, 2] = boxes_xywh[:, 0] + boxes_xywh[:, 2] / 2.0
+    boxes[:, 3] = boxes_xywh[:, 1] + boxes_xywh[:, 3] / 2.0
+    boxes /= ratio  # обратно в координаты исходного тайла
+
     target_lower = [c.strip().lower() for c in target_classes]
     dets = []
-    for r in results:
-        if r.boxes is None:
+    for cls_idx in range(scores_all.shape[1]):
+        cls_name = COCO_CLASSES[cls_idx] if cls_idx < len(COCO_CLASSES) else str(cls_idx)
+        cls_name_l = cls_name.lower()
+        # подстрочное совпадение: "person" матчит "person", "человек" и т.д.
+        if not any(t in cls_name_l or cls_name_l in t for t in target_lower):
             continue
-        for box in r.boxes:
-            cls_id = int(box.cls[0])
-            cls_name = _MODEL.names.get(cls_id, str(cls_id)) if hasattr(_MODEL, "names") else str(cls_id)
-            cls_name_l = cls_name.lower()
-            # подстрочное совпадение: "person" матчит "person", "человек" и т.д.
-            if not any(t in cls_name_l or cls_name_l in t for t in target_lower):
-                continue
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            conf = float(box.conf[0])
-            dets.append((x1, y1, x2, y2, conf, cls_name))
+        scores = scores_all[:, cls_idx]
+        mask = scores > conf_threshold
+        if not mask.any():
+            continue
+        cls_boxes, cls_scores = boxes[mask], scores[mask]
+        for i in _nms(cls_boxes, cls_scores):
+            x1, y1, x2, y2 = cls_boxes[i]
+            dets.append((float(x1), float(y1), float(x2), float(y2),
+                          float(cls_scores[i]), cls_name))
     return dets
 
 
@@ -403,76 +531,6 @@ def detect_frame_tiled(frame_bgr, conf_threshold, tile_size, overlap, target_cla
         for i in keep:
             out.append((*boxes[i], scores[i], cls_name))
     return out
-
-
-# ---------------------------------------------------------------------------
-# 2b. ОПЦИОНАЛЬНЫЙ бэкенд тайлинга через SAHI (https://github.com/obss/sahi) --
-#     нарезку/слияние тайлов делает библиотека вместо make_tiles()/nms() выше.
-#     ВЫКЛЮЧЕНО по умолчанию (см. "detector_backend" в DEFAULT_CONFIG) --
-#     отдельная, ещё не обкатанная на боевых полётах ветка, специально не
-#     трогает поведение по умолчанию ("custom" = detect_frame_tiled выше).
-#
-#     Требует `pip install -r requirements-sahi.txt`. Импортируется лениво
-#     (внутри функций, не на уровне модуля) -- отсутствие пакета sahi не
-#     мешает работать всему остальному, если этот бэкенд не включён.
-# ---------------------------------------------------------------------------
-
-_SAHI_MODEL = None
-
-
-def load_model_sahi(weights_path, model_type, target_classes, conf_threshold):
-    """Оборачивает уже загруженную через load_model() ultralytics-модель в
-    SAHI AutoDetectionModel. ВАЖНО: модель передаётся УЖЕ ГОТОВОЙ (а не
-    путём/именем весов) -- это заставляет SAHI использовать set_model()
-    вместо своей загрузки с нуля, поэтому set_classes() для yolo-world
-    (открытый словарь классов без дообучения) сохраняется как есть."""
-    global _SAHI_MODEL
-    try:
-        from sahi import AutoDetectionModel
-    except ImportError as e:
-        raise RuntimeError(
-            "detector_backend='sahi' выбран в конфиге, но пакет sahi не установлен. "
-            "Установите: pip install -r requirements-sahi.txt (или pip install sahi)") from e
-
-    load_model(weights_path, model_type, target_classes)  # заполняет _MODEL как обычно
-    _SAHI_MODEL = AutoDetectionModel.from_pretrained(
-        model_type="ultralytics", model=_MODEL, confidence_threshold=conf_threshold)
-    return _SAHI_MODEL
-
-
-def detect_frame_sahi(frame_bgr, conf_threshold, tile_size, overlap, target_classes):
-    """Аналог detect_frame_tiled(), но нарезкой/слиянием тайлов занимается
-    SAHI. Возвращает тот же формат: [(x1,y1,x2,y2,confidence,class_name), ...]
-    в пиксельных координатах ПОЛНОГО кадра -- SAHI уже сшивает тайлы сам,
-    повторный NMS по кадру (как для detect_frame_tiled) не нужен."""
-    from sahi.predict import get_sliced_prediction
-
-    # SAHI ожидает RGB на входе своего API (внутри сама разворачивает обратно
-    # в BGR перед вызовом ultralytics, см. UltralyticsDetectionModel.
-    # perform_batch_inference) -- кадры из cv2.VideoCapture у нас в BGR.
-    # Без этой конвертации модель получала бы цветоперепутанный кадр молча,
-    # без ошибки -- просто с худшей точностью.
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-    result = get_sliced_prediction(
-        frame_rgb, _SAHI_MODEL,
-        slice_height=tile_size, slice_width=tile_size,
-        overlap_height_ratio=overlap, overlap_width_ratio=overlap,
-        verbose=0, progress_bar=False,
-    )
-
-    target_lower = [c.strip().lower() for c in target_classes]
-    dets = []
-    for op in result.object_prediction_list:
-        cls_name = op.category.name
-        cls_name_l = cls_name.lower()
-        # та же подстрочная логика совпадения классов, что и в run_inference_on_tile,
-        # чтобы поведение фильтрации классов не отличалось между бэкендами
-        if not any(t in cls_name_l or cls_name_l in t for t in target_lower):
-            continue
-        x1, y1, x2, y2 = op.bbox.to_xyxy()
-        dets.append((x1, y1, x2, y2, op.score.value, cls_name))
-    return dets
 
 
 # ---------------------------------------------------------------------------
@@ -808,14 +866,8 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
     _fov_cfg = dict(fov_cfg or {})
     _fov_cfg.setdefault("camera_hfov_deg", camera_hfov_deg)
 
-    # "custom" (по умолчанию) -- собственный тайлинг/NMS, поведение не
-    # менялось. "sahi" -- опционально, см. DEFAULT_CONFIG/detect_frame_sahi.
-    if detector_backend == "sahi":
-        load_model_sahi(weights_path, model_type, target_classes, conf)
-        detect_fn = detect_frame_sahi
-    else:
-        load_model(weights_path, model_type, target_classes)
-        detect_fn = detect_frame_tiled
+    load_model(weights_path, model_type, target_classes)
+    detect_fn = detect_frame_tiled
     telemetry = parse_srt_telemetry(srt_path, gps_tuple_order=srt_gps_tuple_order)
 
     cap = cv2.VideoCapture(video_path)
@@ -1652,10 +1704,9 @@ def main():
                    help="горизонтальный угол обзора камеры дрона в градусах -- для оценки вероятных "
                         "координат объекта детекции (см. camera_hfov_deg в sar_config.json). "
                         "ОБЯЗАТЕЛЬНО проверьте под вашу камеру, дефолт 84° -- не гарантия")
-    p.add_argument("--detector-backend", choices=["custom", "sahi"], default=None,
-                   help="custom (по умолчанию) = собственный тайлинг/NMS, проверено на боевых данных; "
-                        "sahi = нарезка тайлов через библиотеку SAHI (нужен pip install -r "
-                        "requirements-sahi.txt), опционально, отдельная ещё не обкатанная ветка")
+    p.add_argument("--detector-backend", choices=["custom"], default=None,
+                   help="custom = собственный тайлинг/NMS (единственный вариант; бэкенд SAHI "
+                        "убран вместе с ultralytics, поверх которого он только и работал)")
     p.add_argument("--max-estimate-distance-m", type=float, default=None,
                    help="потолок в метрах для 'вероятных координат' объекта -- расчёты дальше "
                         "отбрасываются как численный артефакт (см. max_estimate_distance_m в "
