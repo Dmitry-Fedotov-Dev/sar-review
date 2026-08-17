@@ -1,6 +1,6 @@
 flask
 waitress
-ultralytics
+onnxruntime
 opencv-python
 numpy
 python-telegram-bot>=21,<22
