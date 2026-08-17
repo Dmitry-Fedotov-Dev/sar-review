@@ -231,7 +231,10 @@ def test_pending_cmd_silently_ignores_non_admin():
 
 # --- меню команд ---
 
-def test_post_init_registers_start_and_help_but_not_pending():
+def test_post_init_hides_admin_commands_from_public_menu():
+    """В меню бота показываем только то, что нужно волонтёру. Админские
+    команды (/pending, /role, /revoke, /people) туда не выносим -- незачем
+    подсказывать их всем подряд."""
     fake_app = MagicMock()
     fake_app.bot.set_my_commands = AsyncMock()
 
@@ -240,4 +243,5 @@ def test_post_init_registers_start_and_help_but_not_pending():
     fake_app.bot.set_my_commands.assert_awaited_once()
     registered = fake_app.bot.set_my_commands.await_args[0][0]
     names = {cmd[0] for cmd in registered}
-    assert names == {"start", "help"}  # /pending -- админская, в публичном меню не нужна
+    assert {"start", "help"} <= names
+    assert not (names & {"pending", "role", "revoke", "people"})
