@@ -319,7 +319,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 4
+        "y": 12
       },
       "datasource": {
         "type": "prometheus",
@@ -381,7 +381,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 4
+        "y": 12
       },
       "datasource": {
         "type": "prometheus",
@@ -418,7 +418,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 20
       },
       "datasource": {
         "type": "prometheus",
@@ -459,7 +459,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 20
       },
       "datasource": {
         "type": "prometheus",
@@ -491,7 +491,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 28
       },
       "datasource": {
         "type": "prometheus",
@@ -576,7 +576,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 37
       },
       "datasource": {
         "type": "prometheus",
@@ -709,6 +709,195 @@
             ]
           }
         ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Процессор",
+      "description": "Занято ядер против общего числа. Потолок показан линией: без него проценты не читаются -- 80% на двух ядрах и на двадцати означают разное. Детектор намеренно оставляет два ядра веб-слою, поэтому упор в потолок ожидаем при обработке видео.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_cpu_percent * sar_cpu_cores / 100",
+          "legendFormat": "занято ядер",
+          "refId": "A"
+        },
+        {
+          "expr": "sar_cpu_cores",
+          "legendFormat": "всего ядер",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 1,
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "lineWidth": 2
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "всего ядер"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "занято ядер"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Оперативная память",
+      "description": "Занято против установленного объёма. Пунктир -- потолок. Инференс держит модель в памяти, поэтому рост при обработке видео нормален; тревожен рост, который не спадает после её окончания.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_memory_used_bytes",
+          "legendFormat": "занято",
+          "refId": "A"
+        },
+        {
+          "expr": "sar_memory_total_bytes",
+          "legendFormat": "всего",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "lineWidth": 2
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "всего"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "занято"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     }
   ],

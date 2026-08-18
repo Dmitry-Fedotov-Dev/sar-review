@@ -265,6 +265,52 @@ def test_online_is_exported_as_a_metric(conn):
     assert "sar_viewers_online 1" in text
 
 
+# --- железо: процессор и память -------------------------------------------
+
+def test_hardware_metrics_are_collected(conn):
+    facts = h.collect(conn, ".")
+    if h.psutil is None:
+        pytest.skip("psutil не установлен")
+    assert facts["cpu_cores"] >= 1
+    assert 0.0 <= facts["cpu_percent"] <= 100.0
+    assert facts["mem_total_bytes"] > 0
+    assert 0 < facts["mem_used_bytes"] <= facts["mem_total_bytes"]
+
+
+def test_hardware_is_exported_with_the_ceiling(conn):
+    """Потолок обязателен: без него проценты не читаются -- 80% на двух
+    ядрах и на двадцати означают совершенно разное."""
+    facts = h.collect(conn, ".")
+    if h.psutil is None:
+        pytest.skip("psutil не установлен")
+    text = h.render_prometheus(facts, h.evaluate(facts))
+    assert "sar_cpu_cores" in text
+    assert "sar_cpu_percent" in text
+    assert "sar_memory_total_bytes" in text
+    assert "sar_memory_used_bytes" in text
+
+
+def test_missing_psutil_does_not_break_anything(conn, monkeypatch):
+    """Зависимость мягкая: без psutil метрики железа отсутствуют, всё
+    остальное продолжает считаться."""
+    monkeypatch.setattr(h, "psutil", None)
+    facts = h.collect(conn, ".")
+    assert "cpu_percent" not in facts
+    assert "reports_by_status" in facts          # остальное на месте
+    text = h.render_prometheus(facts, h.evaluate(facts))
+    assert "sar_cpu_percent" not in text          # отсутствующее не нулём
+    assert "sar_up 1" in text
+
+
+def test_hardware_never_blocks(conn):
+    """psutil.cpu_percent(interval=None) не должен ждать: блокирующий замер
+    добавил бы секунду к каждому скрейпу."""
+    import time as _t
+    t0 = _t.time()
+    h.hardware()
+    assert _t.time() - t0 < 0.3
+
+
 # --- размер отчётов не должен блокировать запрос --------------------------
 
 def test_dir_size_never_blocks_the_caller(tmp_path, monkeypatch):
