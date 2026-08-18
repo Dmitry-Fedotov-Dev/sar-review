@@ -268,13 +268,54 @@ def test_online_is_exported_as_a_metric(conn):
 # --- железо: процессор и память -------------------------------------------
 
 def test_hardware_metrics_are_collected(conn):
-    facts = h.collect(conn, ".")
     if h.psutil is None:
         pytest.skip("psutil не установлен")
+    h.hardware()                       # поднимаем фоновый замер
+    import time as _t
+    for _ in range(30):                # ждём первую пробу
+        if h.hardware().get("cpu_cores"):
+            break
+        _t.sleep(0.5)
+    facts = h.collect(conn, ".")
     assert facts["cpu_cores"] >= 1
     assert 0.0 <= facts["cpu_percent"] <= 100.0
     assert facts["mem_total_bytes"] > 0
     assert 0 < facts["mem_used_bytes"] <= facts["mem_total_bytes"]
+
+
+def test_repeated_calls_do_not_zero_the_cpu_metric():
+    """Регрессия на реальный баг.
+
+    Первая версия звала psutil.cpu_percent(interval=None) прямо в
+    обработчике. Эта функция возвращает долю времени С ПРОШЛОГО ВЫЗОВА В
+    ЭТОМ ПРОЦЕССЕ, а вызывающих несколько: Prometheus раз в 30 секунд плюс
+    ручные запросы. Кто приходил вторым в пределах секунды, получал почти
+    нулевое окно -- и на боевом сервере метрика показывала 0.0 ВСЕГДА,
+    притом что psutil в отдельном процессе давал 7-15%.
+
+    Теперь значение берётся из фонового замера, поэтому частые вызовы
+    подряд обязаны отдавать одно и то же, а не обнулять друг друга."""
+    if h.psutil is None:
+        pytest.skip("psutil не установлен")
+    import time as _t
+    h.hardware()
+    for _ in range(30):
+        if h.hardware().get("cpu_cores"):
+            break
+        _t.sleep(0.5)
+    a = h.hardware()
+    b = h.hardware()                   # сразу вторым, как делал Prometheus
+    c = h.hardware()
+    assert a.get("cpu_percent") == b.get("cpu_percent") == c.get("cpu_percent")
+    assert a.get("cpu_cores") == b.get("cpu_cores")
+
+
+def test_hardware_is_absent_until_first_sample(monkeypatch):
+    """Пока фоновый замер не отработал, значений нет -- и это честнее
+    нуля, который не отличить от простаивающей машины."""
+    monkeypatch.setattr(h, "_HW_SAMPLE", {})
+    monkeypatch.setattr(h, "_HW_THREAD", object())   # не поднимать поток
+    assert h.hardware() == {}
 
 
 def test_hardware_is_exported_with_the_ceiling(conn):

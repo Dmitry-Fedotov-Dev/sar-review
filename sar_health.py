@@ -59,30 +59,65 @@ def worst(levels):
 # без него метрики железа просто отсутствуют, всё остальное работает.
 try:
     import psutil
-    psutil.cpu_percent(interval=None)   # первый вызов всегда 0 -- «заряжаем»
 except Exception:                        # noqa: BLE001 -- отсутствие не авария
     psutil = None
 
 
+# Загрузка процессора считается ФОНОВЫМ замером, а не в обработчике запроса.
+#
+# Причина -- поведение psutil, на котором первая версия и сломалась.
+# cpu_percent(interval=None) возвращает долю времени С ПРОШЛОГО ВЫЗОВА В ЭТОМ
+# ПРОЦЕССЕ, а вызывающих у нас несколько: Prometheus раз в 30 секунд, ручные
+# запросы к /metrics, /healthz. Кто пришёл вторым в пределах секунды, получал
+# почти нулевое окно и честный ноль. На боевом сервере метрика показывала
+# 0.0 всегда, притом что psutil в отдельном процессе давал 7-15%.
+#
+# Блокирующий замер (interval=1) эту беду чинит, но добавляет секунду
+# ожидания на каждый запрос -- в такие грабли здесь уже наступали с обходом
+# папки отчётов. Поэтому единственный потребитель psutil -- фоновый поток с
+# фиксированным шагом, а запросы читают готовое значение.
+CPU_SAMPLE_SEC = 5.0
+_HW_LOCK = threading.Lock()
+_HW_SAMPLE = {}
+_HW_THREAD = None
+
+
+def _hw_sampler():
+    while True:
+        try:
+            pct = float(psutil.cpu_percent(interval=CPU_SAMPLE_SEC))
+            m = psutil.virtual_memory()
+            with _HW_LOCK:
+                _HW_SAMPLE.update({
+                    "cpu_percent": pct,
+                    "cpu_cores": int(psutil.cpu_count(logical=True) or 0),
+                    "mem_total_bytes": int(m.total),
+                    "mem_used_bytes": int(m.total - m.available),
+                    "mem_percent": float(m.percent),
+                })
+        except Exception:                # noqa: BLE001 -- сбор метрик не может ронять сервис
+            time.sleep(CPU_SAMPLE_SEC)
+
+
+def _ensure_sampler():
+    global _HW_THREAD
+    if psutil is None or _HW_THREAD is not None:
+        return
+    _HW_THREAD = threading.Thread(target=_hw_sampler, daemon=True)
+    _HW_THREAD.start()
+
+
 def hardware():
-    """Загрузка процессора и памяти. Пустой dict, если psutil недоступен."""
+    """Загрузка процессора и памяти из фонового замера.
+
+    Пустой dict, если psutil недоступен или первый замер ещё не готов --
+    отсутствующее значение честнее нуля, на который его подменяли раньше.
+    """
     if psutil is None:
         return {}
-    out = {}
-    try:
-        # interval=None -- доля времени с ПРОШЛОГО вызова, без блокировки.
-        # Блокирующий замер (interval=1) в обработчике запроса означал бы
-        # секунду ожидания на каждый скрейп -- см. историю с обходом папки
-        # отчётов, туда уже наступали.
-        out["cpu_percent"] = float(psutil.cpu_percent(interval=None))
-        out["cpu_cores"] = int(psutil.cpu_count(logical=True) or 0)
-        m = psutil.virtual_memory()
-        out["mem_total_bytes"] = int(m.total)
-        out["mem_used_bytes"] = int(m.total - m.available)
-        out["mem_percent"] = float(m.percent)
-    except Exception:                    # noqa: BLE001
-        return {}
-    return out
+    _ensure_sampler()
+    with _HW_LOCK:
+        return dict(_HW_SAMPLE)
 
 
 def _disk_free_gb(path):
