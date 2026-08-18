@@ -25,18 +25,29 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_up",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "options": {
         "colorMode": "background",
         "graphMode": "none",
-        "textMode": "value_and_name"
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -80,17 +91,28 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_worker_heartbeat_age_seconds",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "options": {
         "colorMode": "background",
-        "graphMode": "area"
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -129,17 +151,28 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_disk_free_bytes",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "options": {
         "colorMode": "background",
-        "graphMode": "area"
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -177,17 +210,28 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_backup_age_seconds",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "options": {
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -226,17 +270,28 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_stuck_reports",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "options": {
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -268,12 +323,16 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_viewers_online",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "options": {
@@ -284,7 +343,9 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "fieldConfig": {
@@ -305,7 +366,7 @@
               }
             ]
           },
-          "noValue": "0"
+          "noValue": "нет данных"
         },
         "overrides": []
       },
@@ -323,13 +384,17 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_reports",
           "legendFormat": "{{status}}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -385,18 +450,26 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_disk_free_bytes",
           "legendFormat": "свободно",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         },
         {
           "expr": "sar_reports_bytes",
           "legendFormat": "занято отчётами",
-          "refId": "B"
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -422,23 +495,35 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_manual_observations_total",
           "legendFormat": "ручные пометки",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         },
         {
           "expr": "sar_triage_marks_total",
           "legendFormat": "триаж-статусы",
-          "refId": "B"
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         },
         {
           "expr": "sar_people_approved",
           "legendFormat": "людей с доступом",
-          "refId": "C"
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -463,13 +548,17 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_watched_seconds_total / 3600",
           "legendFormat": "часов",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -495,13 +584,17 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_check_level",
           "legendFormat": "{{check}}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "options": {
@@ -580,7 +673,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
@@ -588,7 +681,11 @@
           "legendFormat": "{{check}}",
           "refId": "A",
           "instant": true,
-          "format": "table"
+          "format": "table",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "transformations": [
@@ -723,18 +820,26 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_cpu_percent * sar_cpu_cores / 100",
           "legendFormat": "занято ядер",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         },
         {
           "expr": "sar_cpu_cores",
           "legendFormat": "всего ядер",
-          "refId": "B"
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -818,18 +923,26 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "sar-prometheus"
       },
       "targets": [
         {
           "expr": "sar_memory_used_bytes",
           "legendFormat": "занято",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         },
         {
           "expr": "sar_memory_total_bytes",
           "legendFormat": "всего",
-          "refId": "B"
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -903,17 +1016,6 @@
   ],
   "__inputs": [],
   "templating": {
-    "list": [
-      {
-        "name": "DS_PROMETHEUS",
-        "type": "datasource",
-        "query": "prometheus",
-        "current": {
-          "text": "Prometheus",
-          "value": "Prometheus"
-        },
-        "hide": 2
-      }
-    ]
+    "list": []
   }
 }
