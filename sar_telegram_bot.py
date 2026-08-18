@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
+import sar_alerts
 import sar_common
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -527,6 +528,137 @@ async def on_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.exception("не удалось отправить решение пользователю %s", chat_id)
 
 
+# ---------------------------------------------------------------------------
+# Тревоги о недоступности платформы
+#
+# Проверку делает бот, а не сама платформа: сервис, который лежит, не может
+# сообщить о том, что он лежит. Бот -- отдельный процесс, он переживает
+# падение веб-слоя и продолжает следить.
+#
+# Ограничение, которое надо понимать: если выключится вся машина, бот умрёт
+# вместе с платформой и не скажет ничего. Это закрывается только внешним
+# пингом /healthz откуда-то ещё, см. monitoring/README.md.
+# ---------------------------------------------------------------------------
+
+ALERT_INTERVAL_SEC = 60
+
+
+def health_url():
+    base = (CFG.get("service_url") or "").rstrip("/")
+    return f"{base}/healthz" if base else ""
+
+
+async def alert_tick(context: ContextTypes.DEFAULT_TYPE):
+    url = health_url()
+    if not url:
+        return                       # некуда ходить -- адрес сервиса не задан
+
+    # Соединение закрываем обязательно: задача выполняется раз в минуту, и
+    # незакрытые дескрипторы копились бы тысячами за сутки.
+    conn = _db()
+    try:
+        # Замьютено -- пропускаем проверку ЦЕЛИКОМ, не трогая состояние. Так
+        # после снятия мьюта человек узнает, что сервис всё ещё лежит: если
+        # бы мы обновляли состояние молча, тревога считалась бы отправленной.
+        if sar_alerts.mute_until(conn) is not None:
+            return
+        prev = sar_alerts.load_state(conn, "service")
+    finally:
+        conn.close()
+
+    level, detail = await asyncio.to_thread(sar_alerts.check_service, url)
+    state, notify, held = sar_alerts.decide(prev, level, datetime.now())
+
+    conn = _db()
+    try:
+        sar_alerts.save_state(conn, "service", state["level"], state["since"],
+                               state["notified_at"], state["notified_level"])
+    finally:
+        conn.close()
+    if not notify:
+        return
+
+    text = sar_alerts.message(level, held, url, detail if level == sar_alerts.DOWN else None)
+    for admin_id in CFG.get("admin_chat_ids", []):
+        try:
+            await context.bot.send_message(admin_id, text)
+        except Exception:
+            log.exception("не удалось отправить тревогу админу %s", admin_id)
+
+
+async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CFG["admin_chat_ids"]:
+        return
+    hours = 4.0
+    if context.args:
+        try:
+            hours = float(context.args[0].replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("Формат: /mute [часов], например /mute 2")
+            return
+    conn = _db()
+    try:
+        until = sar_alerts.set_mute(conn, hours)
+    finally:
+        conn.close()
+    await update.message.reply_text(
+        f"\U0001F515 Тревоги отключены до {until:%H:%M %d.%m}.\n\n"
+        f"Включатся сами — навсегда замьютить нельзя специально: молчащий "
+        f"мониторинг хуже отсутствующего.\nВключить раньше: /unmute")
+
+
+async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CFG["admin_chat_ids"]:
+        return
+    conn = _db()
+    try:
+        sar_alerts.clear_mute(conn)
+    finally:
+        conn.close()
+    await update.message.reply_text("\U0001F514 Тревоги включены.")
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Состояние платформы по запросу -- то же, что отдаёт /healthz."""
+    if update.effective_chat.id not in CFG["admin_chat_ids"]:
+        return
+    url = health_url()
+    if not url:
+        await update.message.reply_text("Адрес сервиса не задан в конфиге.")
+        return
+
+    import json
+    import urllib.request
+
+    def fetch():
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            try:
+                return json.loads(e.read().decode("utf-8"))   # 503 отдаёт тело
+            except Exception:
+                return {"error": f"{type(e).__name__}: {e}"}
+
+    data = await asyncio.to_thread(fetch)
+    if "error" in data:
+        await update.message.reply_text(f"\U0001F534 Платформа не отвечает\n{data['error']}")
+        return
+
+    icon = {"ok": "\U0001F7E2", "warn": "\U0001F7E1", "crit": "\U0001F534"}
+    lines = [f"{icon.get(data.get('status'), '')} Состояние платформы\n"]
+    for name, c in (data.get("checks") or {}).items():
+        lines.append(f"{icon.get(c['level'], '')} {c['text']}")
+    conn = _db()
+    try:
+        muted = sar_alerts.mute_until(conn)
+    finally:
+        conn.close()
+    if muted:
+        lines.append(f"\n\U0001F515 Тревоги отключены до {muted:%H:%M %d.%m}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _post_init(app):
     # регистрирует команды в меню бота (значок "/" рядом с полем ввода в
     # Telegram) -- без этого /start и /help работают, но их не видно как
@@ -549,7 +681,19 @@ def build_application():
     app.add_handler(CommandHandler("role", role_cmd))
     app.add_handler(CommandHandler("revoke", revoke_cmd))
     app.add_handler(CommandHandler("people", people_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("mute", mute_cmd))
+    app.add_handler(CommandHandler("unmute", unmute_cmd))
     app.add_handler(CallbackQueryHandler(on_decision))
+
+    # Периодическая проверка доступности. Первый запуск отложен: сразу
+    # после старта бота платформа может ещё подниматься, и тревога об этом
+    # была бы ложной.
+    if app.job_queue is not None:
+        app.job_queue.run_repeating(alert_tick, interval=ALERT_INTERVAL_SEC, first=90)
+    else:
+        log.warning("job_queue недоступна — тревоги о недоступности выключены "
+                     "(нужен пакет python-telegram-bot[job-queue])")
     return app
 
 

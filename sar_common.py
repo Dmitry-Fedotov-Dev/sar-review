@@ -401,9 +401,14 @@ def init_db(db_path):
     -- перестанут смотреть -- и пропустят настоящий.
     CREATE TABLE IF NOT EXISTS alert_state (
         check_name TEXT PRIMARY KEY,
-        level TEXT NOT NULL,          -- ok | warn | crit
-        since TEXT NOT NULL,
-        notified_at TEXT
+        level TEXT NOT NULL,          -- текущее наблюдаемое состояние
+        since TEXT NOT NULL,          -- когда оно началось (для подтверждения)
+        notified_at TEXT,
+        -- о чём человеку уже сказали. Хранится отдельно от level именно
+        -- чтобы пережить смену состояния: без этого после восстановления
+        -- неизвестно, сообщали ли о падении, и "снова работает" уходит
+        -- тем, кто про падение не слышал.
+        notified_level TEXT
     );
     """)
     conn.commit()
