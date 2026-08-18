@@ -39,6 +39,9 @@ DISK_CRIT_GB = 3.0
 WORKER_WARN_SEC = 180          # цикл воркера -- секунды, 3 минуты это уже странно
 WORKER_CRIT_SEC = 600
 STUCK_REPORT_HOURS = 3.0       # дольше всякой разумной обработки одного файла
+# то же окно, что у сервера (ONLINE_WINDOW_SEC): heartbeat раз в 15 с,
+# 40 секунд прощают одну пропущенную отправку
+ONLINE_WINDOW_SEC = 40
 BACKUP_WARN_HOURS = 48.0
 BACKUP_CRIT_HOURS = 24.0 * 7
 
@@ -175,9 +178,15 @@ def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
         "SELECT COUNT(*) n FROM telegram_access_requests WHERE status='approved'"
     ).fetchone()["n"]
 
-    fresh = (now - timedelta(seconds=40)).isoformat()
+    # last_seen в presence хранится ЧИСЛОМ (time.time()), а не строкой ISO --
+    # см. api_heartbeat в sar_server.py. Сравнение числового столбца со
+    # строкой в SQLite всегда ложно (число сортируется раньше текста), и
+    # первая версия этой метрики из-за такой подмены типов показывала ноль
+    # при любом числе зрителей, ничем не жалуясь.
+    fresh = time.time() - ONLINE_WINDOW_SEC
     facts["viewers_online"] = conn.execute(
-        "SELECT COUNT(*) n FROM presence WHERE last_seen > ?", (fresh,)).fetchone()["n"]
+        "SELECT COUNT(DISTINCT viewer_name) n FROM presence WHERE last_seen > ?",
+        (fresh,)).fetchone()["n"]
 
     row = conn.execute(
         "SELECT COALESCE(SUM(end_sec-start_sec),0) s FROM watch_segments").fetchone()

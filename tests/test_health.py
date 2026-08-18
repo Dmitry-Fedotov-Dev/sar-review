@@ -208,6 +208,63 @@ def test_reports_are_broken_down_by_status(conn):
     assert 'sar_reports{status="error"} 1' in text
 
 
+# --- онлайн: совпадение типов с тем, что пишет сервер ---------------------
+
+def _heartbeat(conn, name, seconds_ago=0.0):
+    """Пишет отметку присутствия ТОЧНО ТАК ЖЕ, как api_heartbeat в
+    sar_server.py -- числом time.time(), а не строкой."""
+    import time as _t
+    conn.execute(
+        "INSERT INTO presence (viewer_name, last_seen) VALUES (?,?) "
+        "ON CONFLICT(viewer_name) DO UPDATE SET last_seen=excluded.last_seen",
+        (name, _t.time() - seconds_ago))
+    conn.commit()
+
+
+def test_online_counts_a_present_viewer(conn):
+    """Регрессия на реальный баг.
+
+    Первая версия сравнивала числовой столбец last_seen со строкой ISO.
+    В SQLite число всегда сортируется раньше текста, поэтому условие было
+    ложным ВСЕГДА -- метрика показывала ноль при любом числе зрителей и
+    ни на что не жаловалась. Поймано на живом дашборде, а не тестом,
+    потому что тест писал отметку в своём формате, а не в серверном."""
+    _heartbeat(conn, "Айгуль", seconds_ago=5)
+    facts = h.collect(conn, ".")
+    assert facts["viewers_online"] == 1
+
+
+def test_online_ignores_stale_viewers(conn):
+    _heartbeat(conn, "давно-ушёл", seconds_ago=600)
+    facts = h.collect(conn, ".")
+    assert facts["viewers_online"] == 0
+
+
+def test_online_counts_each_person_once(conn):
+    _heartbeat(conn, "Айгуль", seconds_ago=1)
+    _heartbeat(conn, "Айгуль", seconds_ago=1)      # повторный heartbeat
+    _heartbeat(conn, "Karpuha", seconds_ago=2)
+    facts = h.collect(conn, ".")
+    assert facts["viewers_online"] == 2
+
+
+def test_online_window_matches_the_server():
+    """Окно должно совпадать с ONLINE_WINDOW_SEC сервера, иначе главная
+    страница и дашборд покажут разные числа и им перестанут верить."""
+    import re
+    with open("sar_server.py", encoding="utf-8") as f:
+        m = re.search(r"^ONLINE_WINDOW_SEC\s*=\s*(\d+)", f.read(), re.M)
+    assert m, "не нашёл ONLINE_WINDOW_SEC в sar_server.py"
+    assert int(m.group(1)) == h.ONLINE_WINDOW_SEC
+
+
+def test_online_is_exported_as_a_metric(conn):
+    _heartbeat(conn, "Айгуль", seconds_ago=3)
+    facts = h.collect(conn, ".")
+    text = h.render_prometheus(facts, h.evaluate(facts))
+    assert "sar_viewers_online 1" in text
+
+
 # --- размер отчётов не должен блокировать запрос --------------------------
 
 def test_dir_size_never_blocks_the_caller(tmp_path, monkeypatch):
