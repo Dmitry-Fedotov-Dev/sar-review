@@ -603,7 +603,22 @@ def get_file_ctime(abs_path):
 # Если нужны видео из подпапок — кладите их (или симлинк на них) в корень.
 # ---------------------------------------------------------------------------
 
+# Каталоги, внутрь которых заглядывать нельзя ни при каком обходе: там
+# служебные данные, резервные копии, готовые отчёты с десятками тысяч кропов
+# и телеметрия. Попади они в дерево -- человек увидит мусор вместо своих
+# папок, а обход подорожает на порядки.
+SERVICE_DIRS = {"sar_data", "sar_dataset", "sar_backups", "monitoring",
+                "telemetry", "weights", ".git", ".claude", "__pycache__",
+                ".pytest_cache", "tests", "static", "node_modules"}
+
+
 def scan_watch_dir(watch_dir):
+    """Медиафайлы прямо в корне рабочего каталога.
+
+    Осталась для совместимости и как страховка: файл, положенный мимо
+    операции, не должен исчезать бесследно. Основной обход теперь идёт по
+    папкам операций -- см. scan_operation_folder.
+    """
     found = []
     with os.scandir(watch_dir) as it:
         for entry in it:
@@ -616,6 +631,100 @@ def scan_watch_dir(watch_dir):
     return found
 
 
+def scan_operation_folder(watch_dir, folder, max_depth=12):
+    """Рекурсивный обход папки операции. Возвращает (файлы, папки).
+
+    Заказчик раскладывает материал так же, как у себя в облаке: по дням,
+    бортам, вылетам. Скачанную папку с Google или Яндекс Диска должно быть
+    достаточно распаковать внутрь операции, и она отобразится как есть.
+
+    Файлы отдаются с путём ОТНОСИТЕЛЬНО watch_dir, а не одним именем. Это
+    принципиально: одноимённые DJI_0001.MP4 из папок «борт 1» и «борт 2» --
+    разные материалы, а поиск записи идёт по rel_path. Плоское имя схлопнуло
+    бы их в одну запись и потеряло второй файл.
+
+    Пустые папки тоже возвращаются: человек ожидает увидеть свою структуру
+    целиком, а не только те ветки, где нашлась съёмка.
+
+    Глубина ограничена: облачные выгрузки бывают вложены как угодно, а
+    симлинк на родителя устроил бы бесконечный обход.
+    """
+    root = os.path.join(watch_dir, folder) if folder else watch_dir
+    files, dirs = [], []
+    if not os.path.isdir(root):
+        return files, dirs
+
+    base_depth = root.rstrip(os.sep).count(os.sep)
+    for cur, subdirs, filenames in os.walk(root, followlinks=False):
+        if cur.rstrip(os.sep).count(os.sep) - base_depth >= max_depth:
+            subdirs[:] = []
+        subdirs[:] = sorted(d for d in subdirs if d not in SERVICE_DIRS
+                             and not d.startswith("."))
+
+        for d in subdirs:
+            rel = os.path.relpath(os.path.join(cur, d), watch_dir)
+            dirs.append(rel.replace(os.sep, "/"))
+
+        for name in sorted(filenames):
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in MEDIA_EXTS:
+                continue
+            abs_path = os.path.join(cur, name)
+            rel = os.path.relpath(abs_path, watch_dir).replace(os.sep, "/")
+            kind = "video" if ext in VIDEO_EXTS else "photo"
+            files.append((rel, abs_path, kind))
+    return files, dirs
+
+
+def scan_all_materials(watch_dir):
+    """Все медиафайлы: в папках операций и оставшиеся в корне.
+
+    Единая точка обхода для воркера и сервера -- чтобы список файлов и
+    очередь обработки не могли разойтись в том, что считают материалом.
+
+    Корень продолжает просматриваться намеренно: файл, положенный мимо
+    операции, не должен исчезать бесследно. Он попадёт в «Не разобрано»,
+    откуда его перекладывают в нужную операцию.
+    """
+    seen, found = set(), []
+    for op_id, name, path in operation_folders(watch_dir):
+        files, _ = scan_operation_folder(watch_dir, name)
+        for rel, abs_path, kind in files:
+            key = os.path.normcase(os.path.abspath(abs_path))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((rel, abs_path, kind))
+    for rel, abs_path, kind in scan_watch_dir(watch_dir):
+        key = os.path.normcase(os.path.abspath(abs_path))
+        if key not in seen:
+            seen.add(key)
+            found.append((rel, abs_path, kind))
+    return found
+
+
+def operation_folders(watch_dir):
+    """Папки верхнего уровня, помеченные как операции.
+
+    Помечена -- значит внутри лежит .sar_operation. Папка без метки не
+    операция, а просто папка: пользователь мог создать её для своих нужд,
+    и превращать её в операцию самовольно нельзя.
+    """
+    out = []
+    if not os.path.isdir(watch_dir):
+        return out
+    with os.scandir(watch_dir) as it:
+        for entry in it:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if entry.name in SERVICE_DIRS or entry.name.startswith("."):
+                continue
+            op_id = read_operation_marker(entry.path)
+            if op_id is not None:
+                out.append((op_id, entry.name, entry.path))
+    return sorted(out)
+
+
 # ---------------------------------------------------------------------------
 # ПРЕВЬЮ (первый кадр видео) для списка файлов -- генерирует sar_worker.py
 # (см. watcher_loop), sar_server.py только ОТДАЁТ уже готовый файл (та же
@@ -626,11 +735,22 @@ def scan_watch_dir(watch_dir):
 # ---------------------------------------------------------------------------
 
 def get_thumbnail_path(data_dir, filename):
+    """Путь превью. filename -- rel_path материала (может содержать папки).
+
+    К очищенному имени добавляется хэш ПОЛНОГО относительного пути. Без
+    него материалы «борт 1/DJI_0001.MP4» и «борт 2/DJI_0001.MP4» получили бы
+    одно имя превью и перезаписали друг друга -- в списке показывался бы
+    чужой кадр, причём молча. С появлением папок внутри операции такие
+    совпадения перестали быть редкостью: облачные выгрузки почти всегда
+    содержат одинаковые имена в разных папках.
+    """
     thumbnails_dir = os.path.join(data_dir, "thumbnails")
     os.makedirs(thumbnails_dir, exist_ok=True)
-    stem = os.path.splitext(filename)[0]
-    safe_name = re.sub(r"[^a-zA-Zа-яА-Я0-9_-]+", "_", stem)[:100] or "video"
-    return os.path.join(thumbnails_dir, f"{safe_name}.jpg")
+    norm = str(filename).replace("\\", "/")
+    stem = os.path.splitext(os.path.basename(norm))[0]
+    safe_name = re.sub(r"[^a-zA-Zа-яА-Я0-9_-]+", "_", stem)[:80] or "video"
+    digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(thumbnails_dir, f"{safe_name}__{digest}.jpg")
 
 
 # ---------------------------------------------------------------------------

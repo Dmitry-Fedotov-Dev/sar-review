@@ -194,7 +194,7 @@ def _ensure_duration(report_id, abs_path, current_duration):
 def watcher_loop():
     while True:
         try:
-            for name, abs_path, kind in sar_common.scan_watch_dir(WATCH_DIR):
+            for name, abs_path, kind in sar_common.scan_all_materials(WATCH_DIR):
                 conn = get_db()
                 # Ищем существующую запись ПО ИМЕНИ ФАЙЛА (rel_path), а НЕ по
                 # report_id, пересчитанному из текущего ctime. ctime у больших
