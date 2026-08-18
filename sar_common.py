@@ -422,7 +422,13 @@ def init_db(db_path):
                        "ALTER TABLE manual_observations ADD COLUMN raw_telemetry TEXT",
                        # персональный ключ входа и роль -- см. ROLE_* ниже
                        "ALTER TABLE telegram_access_requests ADD COLUMN access_token TEXT",
-                       "ALTER TABLE telegram_access_requests ADD COLUMN role TEXT"):
+                       "ALTER TABLE telegram_access_requests ADD COLUMN role TEXT",
+                       # notified_level появился ПОСЛЕ того, как alert_state уже
+                       # была создана на боевой базе. CREATE TABLE IF NOT EXISTS
+                       # существующую таблицу не меняет, поэтому без этой строки
+                       # тревоги падали на каждой проверке с "no such column" --
+                       # молча, в лог бота, при внешне работающем мониторинге.
+                       "ALTER TABLE alert_state ADD COLUMN notified_level TEXT"):
         try:
             conn.execute(alter_sql)
             conn.commit()
