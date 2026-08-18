@@ -38,10 +38,11 @@ from collections import defaultdict
 from datetime import datetime
 
 from flask import (Flask, request, session, redirect, url_for, jsonify,
-                    send_from_directory, send_file, make_response, g)
+                    send_from_directory, send_file, make_response, g, Response)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sar_common
+import sar_health
 from sar_video_review import (parse_srt_telemetry, lookup_telemetry, load_config as load_detection_config,
                                Hit, group_hits_into_scenes)
 
@@ -138,7 +139,11 @@ def close_db(exception=None):
 
 @app.before_request
 def require_login():
-    open_paths = ("/login", "/static", "/guide")
+    # /healthz и /metrics открыты намеренно: их опрашивает внешний монитор,
+    # у которого нет и не должно быть пароля от платформы. Отдают только
+    # эксплуатационные счётчики -- ни имён, ни координат, ни содержимого
+    # находок; проверено тестом, чтобы это не расползлось при правках.
+    open_paths = ("/login", "/static", "/guide", "/healthz", "/metrics")
     if request.path.startswith(open_paths):
         return None
     if not session.get("authed"):
@@ -857,6 +862,46 @@ footer {
   <footer>SAR Review · полевой гид для волонтёров</footer>
 </div>
 </body></html>"""
+
+
+def _health_snapshot():
+    """Факты и их оценка. Общий источник для /healthz, /metrics и тревог
+    в боте -- чтобы дашборд, HTTP и телеграм не разошлись в показаниях."""
+    conn = get_db()
+    watch = os.path.abspath(SERVER_CFG["watch_dir"])
+    _, _, db_path, _ = sar_common.resolve_paths(watch)
+    data_dir = os.path.dirname(db_path)
+    facts = sar_health.collect(
+        conn, watch,
+        backup_dir=os.path.join(os.path.dirname(watch.rstrip(os.sep)), "sar_backups"),
+        reports_dir=os.path.join(data_dir, "reports"))
+    return facts, sar_health.evaluate(facts)
+
+
+@app.route("/healthz")
+def healthz():
+    """Состояние платформы для человека и для внешнего монитора.
+
+    Код ответа несёт смысл: 200 -- всё в порядке или есть предупреждения,
+    503 -- критично. Внешние пингеры смотрят именно на код, поэтому
+    предупреждение НЕ должно поднимать тревогу: диск на 8 ГБ -- повод
+    заняться, а не повод будить дежурного ночью.
+    """
+    facts, checks = _health_snapshot()
+    level = sar_health.overall(checks)
+    body = {
+        "status": level,
+        "checks": {k: {"level": lv, "text": txt} for k, (lv, txt) in checks.items()},
+        "facts": facts,
+    }
+    return jsonify(body), (503 if level == sar_health.CRIT else 200)
+
+
+@app.route("/metrics")
+def metrics():
+    facts, checks = _health_snapshot()
+    return Response(sar_health.render_prometheus(facts, checks),
+                     mimetype="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.route("/guide")
