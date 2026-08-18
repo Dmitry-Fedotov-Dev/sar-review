@@ -86,6 +86,98 @@ ROLES_CAN_COMMENT = {ROLE_VIEWER, ROLE_MODERATOR, ROLE_ADMIN}
 ROLES_CAN_UPLOAD = {ROLE_ADMIN}
 
 
+# ---------------------------------------------------------------------------
+# Операции
+#
+# Папка в watch_dir равна операции -- так сохраняется главный жест системы:
+# положил файл в папку, он сам обработался. Обязательный выбор операции при
+# загрузке сделал бы платформу хуже, а не лучше.
+#
+# Опознаётся операция НЕ по имени папки, а по метке внутри неё. Иначе
+# переименование "Курумды_август" в "Курумды_2026" завело бы новую операцию,
+# а прежняя осталась бы с материалами, которых на месте больше нет.
+# ---------------------------------------------------------------------------
+
+OPERATION_MARKER = ".sar_operation"
+
+
+def read_operation_marker(folder_path):
+    """id операции из метки в папке, либо None."""
+    path = os.path.join(folder_path, OPERATION_MARKER)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def write_operation_marker(folder_path, operation_id):
+    path = os.path.join(folder_path, OPERATION_MARKER)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(str(operation_id))
+    return path
+
+
+def create_operation(conn, title, area=None, client=None, coordinator=None,
+                      folder=None):
+    now = datetime.now().isoformat()
+    cur = conn.execute(
+        "INSERT INTO operations (title, area, client, coordinator, folder, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+        (title, area, client, coordinator, folder, now, now))
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_operation(conn, operation_id):
+    return conn.execute("SELECT * FROM operations WHERE id=?",
+                         (operation_id,)).fetchone()
+
+
+def list_operations(conn):
+    return conn.execute("SELECT * FROM operations ORDER BY created_at DESC").fetchall()
+
+
+def attach_material(conn, operation_id, report_id):
+    """Привязывает материал к операции. Повторный вызов безвреден."""
+    conn.execute(
+        "INSERT OR IGNORE INTO operation_materials (operation_id, report_id, added_at) "
+        "VALUES (?,?,?)", (operation_id, report_id, datetime.now().isoformat()))
+    conn.commit()
+
+
+def detach_material(conn, operation_id, report_id):
+    conn.execute("DELETE FROM operation_materials WHERE operation_id=? AND report_id=?",
+                 (operation_id, report_id))
+    conn.commit()
+
+
+def operations_of_material(conn, report_id):
+    return conn.execute(
+        "SELECT o.* FROM operations o JOIN operation_materials m ON m.operation_id=o.id "
+        "WHERE m.report_id=? ORDER BY o.created_at DESC", (report_id,)).fetchall()
+
+
+def materials_of_operation(conn, operation_id):
+    return conn.execute(
+        "SELECT r.* FROM reports r JOIN operation_materials m ON m.report_id=r.report_id "
+        "WHERE m.operation_id=? ORDER BY r.file_ctime DESC, r.rel_path",
+        (operation_id,)).fetchall()
+
+
+def unsorted_materials(conn):
+    """Материалы без единой операции -- раздел «Не разобрано».
+
+    Это не отдельная сущность, а зона ожидания: файл кинули в корень
+    watch_dir, он обработался как обычно, но к операции не привязан.
+    Нужна, чтобы человек не был обязан заранее думать про структуру.
+    """
+    return conn.execute(
+        "SELECT r.* FROM reports r LEFT JOIN operation_materials m "
+        "ON m.report_id=r.report_id WHERE m.report_id IS NULL "
+        "ORDER BY r.file_ctime DESC, r.rel_path").fetchall()
+
+
 def touch_heartbeat(conn, service, note=None):
     """Отметка "процесс жив". Вызывается из цикла воркера и бота.
 
@@ -384,6 +476,37 @@ def init_db(db_path):
         decided_at TEXT,
         decided_by INTEGER
     );
+
+    -- Операция -- поисковые работы целиком: "Курумды, август 2026".
+    -- Человек мыслит поисками, а не файлами; плоский список материалов
+    -- работает, пока поиск один, и перестаёт на третьем.
+    CREATE TABLE IF NOT EXISTS operations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        area TEXT,                     -- район работ
+        client TEXT,                   -- заказчик, если работа платная
+        coordinator TEXT,
+        folder TEXT,                   -- имя папки в watch_dir, если операция заведена папкой
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    -- Связь материала с операцией вынесена в отдельную таблицу, а не в
+    -- колонку у reports. Так одним механизмом закрываются все три случая:
+    --   связей нет   -> материал в "Не разобрано" (лежит в корне watch_dir);
+    --   одна связь   -> материал в операции;
+    --   две и больше -> один вылет пригодился в двух поисках.
+    -- Разметка при этом остаётся привязанной к САМОМУ МАТЕРИАЛУ (триаж,
+    -- комментарии, покрытие -- по report_id), поэтому работа общая: если
+    -- вылет разобрали в одной операции, во второй его не пересматривают.
+    -- Пересматривать час уже разобранного видео в поиске непозволительно.
+    CREATE TABLE IF NOT EXISTS operation_materials (
+        operation_id INTEGER NOT NULL,
+        report_id TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (operation_id, report_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_opmat_report ON operation_materials(report_id);
 
     -- Признак жизни фоновых процессов. Без него смерть воркера неотличима
     -- от "сейчас нечего обрабатывать": очередь пуста в обоих случаях, и
