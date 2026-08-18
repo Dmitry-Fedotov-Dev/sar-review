@@ -208,6 +208,109 @@ def test_reports_are_broken_down_by_status(conn):
     assert 'sar_reports{status="error"} 1' in text
 
 
+# --- онлайн: совпадение типов с тем, что пишет сервер ---------------------
+
+def _heartbeat(conn, name, seconds_ago=0.0):
+    """Пишет отметку присутствия ТОЧНО ТАК ЖЕ, как api_heartbeat в
+    sar_server.py -- числом time.time(), а не строкой."""
+    import time as _t
+    conn.execute(
+        "INSERT INTO presence (viewer_name, last_seen) VALUES (?,?) "
+        "ON CONFLICT(viewer_name) DO UPDATE SET last_seen=excluded.last_seen",
+        (name, _t.time() - seconds_ago))
+    conn.commit()
+
+
+def test_online_counts_a_present_viewer(conn):
+    """Регрессия на реальный баг.
+
+    Первая версия сравнивала числовой столбец last_seen со строкой ISO.
+    В SQLite число всегда сортируется раньше текста, поэтому условие было
+    ложным ВСЕГДА -- метрика показывала ноль при любом числе зрителей и
+    ни на что не жаловалась. Поймано на живом дашборде, а не тестом,
+    потому что тест писал отметку в своём формате, а не в серверном."""
+    _heartbeat(conn, "Айгуль", seconds_ago=5)
+    facts = h.collect(conn, ".")
+    assert facts["viewers_online"] == 1
+
+
+def test_online_ignores_stale_viewers(conn):
+    _heartbeat(conn, "давно-ушёл", seconds_ago=600)
+    facts = h.collect(conn, ".")
+    assert facts["viewers_online"] == 0
+
+
+def test_online_counts_each_person_once(conn):
+    _heartbeat(conn, "Айгуль", seconds_ago=1)
+    _heartbeat(conn, "Айгуль", seconds_ago=1)      # повторный heartbeat
+    _heartbeat(conn, "Karpuha", seconds_ago=2)
+    facts = h.collect(conn, ".")
+    assert facts["viewers_online"] == 2
+
+
+def test_online_window_matches_the_server():
+    """Окно должно совпадать с ONLINE_WINDOW_SEC сервера, иначе главная
+    страница и дашборд покажут разные числа и им перестанут верить."""
+    import re
+    with open("sar_server.py", encoding="utf-8") as f:
+        m = re.search(r"^ONLINE_WINDOW_SEC\s*=\s*(\d+)", f.read(), re.M)
+    assert m, "не нашёл ONLINE_WINDOW_SEC в sar_server.py"
+    assert int(m.group(1)) == h.ONLINE_WINDOW_SEC
+
+
+def test_online_is_exported_as_a_metric(conn):
+    _heartbeat(conn, "Айгуль", seconds_ago=3)
+    facts = h.collect(conn, ".")
+    text = h.render_prometheus(facts, h.evaluate(facts))
+    assert "sar_viewers_online 1" in text
+
+
+# --- железо: процессор и память -------------------------------------------
+
+def test_hardware_metrics_are_collected(conn):
+    facts = h.collect(conn, ".")
+    if h.psutil is None:
+        pytest.skip("psutil не установлен")
+    assert facts["cpu_cores"] >= 1
+    assert 0.0 <= facts["cpu_percent"] <= 100.0
+    assert facts["mem_total_bytes"] > 0
+    assert 0 < facts["mem_used_bytes"] <= facts["mem_total_bytes"]
+
+
+def test_hardware_is_exported_with_the_ceiling(conn):
+    """Потолок обязателен: без него проценты не читаются -- 80% на двух
+    ядрах и на двадцати означают совершенно разное."""
+    facts = h.collect(conn, ".")
+    if h.psutil is None:
+        pytest.skip("psutil не установлен")
+    text = h.render_prometheus(facts, h.evaluate(facts))
+    assert "sar_cpu_cores" in text
+    assert "sar_cpu_percent" in text
+    assert "sar_memory_total_bytes" in text
+    assert "sar_memory_used_bytes" in text
+
+
+def test_missing_psutil_does_not_break_anything(conn, monkeypatch):
+    """Зависимость мягкая: без psutil метрики железа отсутствуют, всё
+    остальное продолжает считаться."""
+    monkeypatch.setattr(h, "psutil", None)
+    facts = h.collect(conn, ".")
+    assert "cpu_percent" not in facts
+    assert "reports_by_status" in facts          # остальное на месте
+    text = h.render_prometheus(facts, h.evaluate(facts))
+    assert "sar_cpu_percent" not in text          # отсутствующее не нулём
+    assert "sar_up 1" in text
+
+
+def test_hardware_never_blocks(conn):
+    """psutil.cpu_percent(interval=None) не должен ждать: блокирующий замер
+    добавил бы секунду к каждому скрейпу."""
+    import time as _t
+    t0 = _t.time()
+    h.hardware()
+    assert _t.time() - t0 < 0.3
+
+
 # --- размер отчётов не должен блокировать запрос --------------------------
 
 def test_dir_size_never_blocks_the_caller(tmp_path, monkeypatch):

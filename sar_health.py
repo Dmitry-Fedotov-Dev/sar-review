@@ -39,6 +39,9 @@ DISK_CRIT_GB = 3.0
 WORKER_WARN_SEC = 180          # цикл воркера -- секунды, 3 минуты это уже странно
 WORKER_CRIT_SEC = 600
 STUCK_REPORT_HOURS = 3.0       # дольше всякой разумной обработки одного файла
+# то же окно, что у сервера (ONLINE_WINDOW_SEC): heartbeat раз в 15 с,
+# 40 секунд прощают одну пропущенную отправку
+ONLINE_WINDOW_SEC = 40
 BACKUP_WARN_HOURS = 48.0
 BACKUP_CRIT_HOURS = 24.0 * 7
 
@@ -48,6 +51,38 @@ _ORDER = {OK: 0, WARN: 1, CRIT: 2}
 
 def worst(levels):
     return max(levels, key=lambda l: _ORDER.get(l, 0), default=OK)
+
+
+# psutil -- единственный кросс-платформенный способ получить загрузку CPU и
+# память: в стандартной библиотеке os.getloadavg() есть только на Unix, а
+# памяти нет вообще. Пакет под BSD-3, с MIT совместим. Зависимость мягкая:
+# без него метрики железа просто отсутствуют, всё остальное работает.
+try:
+    import psutil
+    psutil.cpu_percent(interval=None)   # первый вызов всегда 0 -- «заряжаем»
+except Exception:                        # noqa: BLE001 -- отсутствие не авария
+    psutil = None
+
+
+def hardware():
+    """Загрузка процессора и памяти. Пустой dict, если psutil недоступен."""
+    if psutil is None:
+        return {}
+    out = {}
+    try:
+        # interval=None -- доля времени с ПРОШЛОГО вызова, без блокировки.
+        # Блокирующий замер (interval=1) в обработчике запроса означал бы
+        # секунду ожидания на каждый скрейп -- см. историю с обходом папки
+        # отчётов, туда уже наступали.
+        out["cpu_percent"] = float(psutil.cpu_percent(interval=None))
+        out["cpu_cores"] = int(psutil.cpu_count(logical=True) or 0)
+        m = psutil.virtual_memory()
+        out["mem_total_bytes"] = int(m.total)
+        out["mem_used_bytes"] = int(m.total - m.available)
+        out["mem_percent"] = float(m.percent)
+    except Exception:                    # noqa: BLE001
+        return {}
+    return out
 
 
 def _disk_free_gb(path):
@@ -175,9 +210,15 @@ def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
         "SELECT COUNT(*) n FROM telegram_access_requests WHERE status='approved'"
     ).fetchone()["n"]
 
-    fresh = (now - timedelta(seconds=40)).isoformat()
+    # last_seen в presence хранится ЧИСЛОМ (time.time()), а не строкой ISO --
+    # см. api_heartbeat в sar_server.py. Сравнение числового столбца со
+    # строкой в SQLite всегда ложно (число сортируется раньше текста), и
+    # первая версия этой метрики из-за такой подмены типов показывала ноль
+    # при любом числе зрителей, ничем не жалуясь.
+    fresh = time.time() - ONLINE_WINDOW_SEC
     facts["viewers_online"] = conn.execute(
-        "SELECT COUNT(*) n FROM presence WHERE last_seen > ?", (fresh,)).fetchone()["n"]
+        "SELECT COUNT(DISTINCT viewer_name) n FROM presence WHERE last_seen > ?",
+        (fresh,)).fetchone()["n"]
 
     row = conn.execute(
         "SELECT COALESCE(SUM(end_sec-start_sec),0) s FROM watch_segments").fetchone()
@@ -191,6 +232,8 @@ def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
 
     if reports_dir and os.path.isdir(reports_dir):
         facts["reports_bytes"] = dir_size_cached(reports_dir)
+
+    facts.update(hardware())
     return facts
 
 
@@ -283,6 +326,14 @@ def render_prometheus(facts, checks):
         "Секунд отсмотрено людьми", "counter")
     add("sar_streams_active", facts.get("streams_active"), "Активных трансляций")
     add("sar_reports_bytes", facts.get("reports_bytes"), "Размер готовых отчётов")
+
+    # Железо. Отдаём и текущую загрузку, и потолок -- без потолка проценты
+    # не читаются: 80% на двух ядрах и на двадцати это разные новости.
+    add("sar_cpu_cores", facts.get("cpu_cores"), "Логических ядер всего")
+    add("sar_cpu_percent", facts.get("cpu_percent"), "Загрузка процессора, %")
+    add("sar_memory_total_bytes", facts.get("mem_total_bytes"), "Оперативной памяти всего")
+    add("sar_memory_used_bytes", facts.get("mem_used_bytes"), "Занято оперативной памяти")
+    add("sar_memory_percent", facts.get("mem_percent"), "Занято памяти, %")
 
     age = facts.get("backup_age_hours")
     add("sar_backup_age_seconds", (age * 3600.0) if age is not None else None,
