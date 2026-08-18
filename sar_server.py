@@ -1652,7 +1652,9 @@ def index():
 def api_tree():
     conn = get_db()
     watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
-    found = sar_common.scan_watch_dir(watch_dir)  # только корень, без рекурсии — см. комментарий у функции
+    # Папки операций обходятся рекурсивно (заказчик раскладывает материал
+    # так же, как у себя в облаке), корень -- плоско, там «Не разобрано».
+    found = sar_common.scan_all_materials(watch_dir)
 
     items = []
     for name, abs_path, kind in found:
@@ -1718,7 +1720,7 @@ def api_thumbnail(filename):
     просто join'ится с диском -- защита от path traversal (тот же принцип,
     что и у report_asset() ниже)."""
     watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
-    found = {name: kind for name, _abs_path, kind in sar_common.scan_watch_dir(watch_dir)}
+    found = {name: kind for name, _abs_path, kind in sar_common.scan_all_materials(watch_dir)}
     # превью есть и у видео (первый кадр), и у фото (уменьшенная копия) --
     # см. _generate_thumbnail в sar_worker.py
     if found.get(filename) not in ("video", "photo"):
