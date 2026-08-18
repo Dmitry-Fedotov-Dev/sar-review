@@ -86,6 +86,33 @@ ROLES_CAN_COMMENT = {ROLE_VIEWER, ROLE_MODERATOR, ROLE_ADMIN}
 ROLES_CAN_UPLOAD = {ROLE_ADMIN}
 
 
+def touch_heartbeat(conn, service, note=None):
+    """Отметка "процесс жив". Вызывается из цикла воркера и бота.
+
+    Пишем в ту же базу, через которую процессы и так общаются -- никакого
+    отдельного канала, никакой зависимости одного процесса от другого.
+    """
+    import os as _os
+    conn.execute(
+        "INSERT INTO service_heartbeat (service, last_seen, pid, note) VALUES (?,?,?,?) "
+        "ON CONFLICT(service) DO UPDATE SET last_seen=excluded.last_seen, "
+        "pid=excluded.pid, note=excluded.note",
+        (service, datetime.now().isoformat(), _os.getpid(), note))
+    conn.commit()
+
+
+def heartbeat_age_sec(conn, service):
+    """Секунд с последней отметки, либо None если процесс не отмечался ни разу."""
+    row = conn.execute(
+        "SELECT last_seen FROM service_heartbeat WHERE service=?", (service,)).fetchone()
+    if row is None or not row["last_seen"]:
+        return None
+    try:
+        return (datetime.now() - datetime.fromisoformat(row["last_seen"])).total_seconds()
+    except ValueError:
+        return None
+
+
 def generate_access_token():
     """Персональный ключ входа. secrets -- криптостойкий источник, длины
     32 символов достаточно, чтобы ключ нельзя было подобрать перебором."""
@@ -356,6 +383,27 @@ def init_db(db_path):
         requested_at TEXT NOT NULL,
         decided_at TEXT,
         decided_by INTEGER
+    );
+
+    -- Признак жизни фоновых процессов. Без него смерть воркера неотличима
+    -- от "сейчас нечего обрабатывать": очередь пуста в обоих случаях, и
+    -- узнают об этом, только когда кто-то положит видео и оно не начнёт
+    -- считаться. На поисковой операции это часы потерянного времени.
+    CREATE TABLE IF NOT EXISTS service_heartbeat (
+        service TEXT PRIMARY KEY,     -- worker | bot
+        last_seen TEXT NOT NULL,
+        pid INTEGER,
+        note TEXT
+    );
+
+    -- Журнал уже отправленных тревог: нужен, чтобы слать сообщение при
+    -- СМЕНЕ состояния, а не каждую проверку. Иначе через сутки на алерты
+    -- перестанут смотреть -- и пропустят настоящий.
+    CREATE TABLE IF NOT EXISTS alert_state (
+        check_name TEXT PRIMARY KEY,
+        level TEXT NOT NULL,          -- ok | warn | crit
+        since TEXT NOT NULL,
+        notified_at TEXT
     );
     """)
     conn.commit()

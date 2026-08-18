@@ -239,6 +239,16 @@ def watcher_loop():
                                       row["duration_sec"] if row is not None else None)
         except Exception as e:
             print(f"[watcher] ошибка сканирования: {e}")
+
+        # Отметка "жив" -- ставится ПОСЛЕ обработки ошибки, а не вместо неё:
+        # воркер, у которого падает сканирование, всё равно живой процесс,
+        # и путать это с его смертью не надо. Мониторинг различает две беды
+        # отдельно: молчащий воркер и растущая очередь при живом воркере.
+        try:
+            sar_common.touch_heartbeat(get_db(), "worker")
+        except Exception as e:
+            print(f"[watcher] не удалось отметиться: {e}")
+
         time.sleep(CFG["poll_interval_sec"])
 
 
