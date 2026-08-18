@@ -208,6 +208,73 @@ def test_reports_are_broken_down_by_status(conn):
     assert 'sar_reports{status="error"} 1' in text
 
 
+# --- размер отчётов не должен блокировать запрос --------------------------
+
+def test_dir_size_never_blocks_the_caller(tmp_path, monkeypatch):
+    """Регрессия на реальную поломку.
+
+    Первая версия считала размер папки отчётов прямо в обработчике
+    /healthz. На боевой машине там 573 тысячи файлов -- запрос завис, и
+    сервер перестал отвечать. Плюс эндпоинт открыт без пароля, то есть это
+    ещё и способ положить платформу повторными запросами.
+
+    Теперь вызов обязан возвращаться немедленно, даже если сам обход
+    бесконечно долгий.
+    """
+    import time as _t
+
+    started = {"n": 0}
+
+    def slow_walk(path):
+        started["n"] += 1
+        _t.sleep(30)          # если вызывающего заблокирует -- тест провалится
+        return 123
+
+    monkeypatch.setattr(h, "dir_size_bytes", slow_walk)
+    monkeypatch.setattr(h, "_SIZE_CACHE", {})
+    monkeypatch.setattr(h, "_SIZE_INFLIGHT", set())
+
+    t0 = _t.time()
+    val = h.dir_size_cached(str(tmp_path))
+    assert _t.time() - t0 < 1.0, "вызов заблокировался на обходе папки"
+    assert val is None, "пока значения нет, надо отдавать None, а не ноль"
+
+
+def test_dir_size_returns_cached_value(tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "_SIZE_CACHE", {str(tmp_path): (4242, 1000.0)})
+    monkeypatch.setattr(h, "_SIZE_INFLIGHT", set())
+    assert h.dir_size_cached(str(tmp_path), ttl=900, now=1100.0) == 4242
+
+
+def test_stale_cache_is_still_served_while_refreshing(tmp_path, monkeypatch):
+    """Протухшее значение лучше пустого: показать чуть устаревший размер
+    полезнее, чем пробел, пока считается новый."""
+    monkeypatch.setattr(h, "_SIZE_CACHE", {str(tmp_path): (4242, 0.0)})
+    monkeypatch.setattr(h, "_SIZE_INFLIGHT", set())
+    monkeypatch.setattr(h, "dir_size_bytes", lambda p: 999)
+    assert h.dir_size_cached(str(tmp_path), ttl=1, now=1e6) == 4242
+
+
+def test_only_one_background_walk_at_a_time(tmp_path, monkeypatch):
+    """Иначе частые запросы к открытому эндпоинту наплодят потоков и
+    заставят диск молотить параллельно -- ровно то, от чего уходили."""
+    import time as _t
+    calls = {"n": 0}
+
+    def slow_walk(path):
+        calls["n"] += 1
+        _t.sleep(0.5)
+        return 1
+
+    monkeypatch.setattr(h, "dir_size_bytes", slow_walk)
+    monkeypatch.setattr(h, "_SIZE_CACHE", {})
+    monkeypatch.setattr(h, "_SIZE_INFLIGHT", set())
+    for _ in range(10):
+        h.dir_size_cached(str(tmp_path))
+    _t.sleep(0.9)
+    assert calls["n"] == 1, f"запущено обходов: {calls['n']}"
+
+
 # --- сводный уровень ------------------------------------------------------
 
 def test_overall_takes_the_worst(conn):

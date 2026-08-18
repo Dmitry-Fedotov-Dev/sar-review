@@ -26,6 +26,8 @@
 import os
 import re
 import shutil
+import threading
+import time
 from datetime import datetime, timedelta
 
 import sar_common
@@ -93,6 +95,49 @@ def dir_size_bytes(path):
     return total
 
 
+# Обход папки отчётов -- дорогая операция: на боевой машине там 573 тысячи
+# файлов (кропы и кадры), полный проход занимает десятки секунд. Считать его
+# в обработчике HTTP-запроса нельзя по двум причинам, и обе выяснились на
+# живом сервере: во-первых, /healthz просто зависал; во-вторых, эндпоинт
+# открыт БЕЗ пароля, то есть любой желающий мог заставить сервер молотить
+# диск, повторяя запрос. Поэтому размер считается в фоне и отдаётся из кеша,
+# а пока значения нет -- метрика отсутствует, что честнее нуля.
+_SIZE_CACHE = {}          # path -> (значение, время расчёта)
+_SIZE_INFLIGHT = set()
+_SIZE_LOCK = threading.Lock()
+DIR_SIZE_TTL_SEC = 900
+
+
+def dir_size_cached(path, ttl=DIR_SIZE_TTL_SEC, now=None):
+    """Размер папки из кеша. Никогда не блокирует вызывающего.
+
+    Возвращает None, если значения ещё нет -- и запускает расчёт в фоне.
+    """
+    now = now if now is not None else time.time()
+    with _SIZE_LOCK:
+        cached = _SIZE_CACHE.get(path)
+        fresh = cached is not None and (now - cached[1]) < ttl
+        need_refresh = not fresh and path not in _SIZE_INFLIGHT
+        if need_refresh:
+            _SIZE_INFLIGHT.add(path)
+
+    if need_refresh:
+        def _worker():
+            try:
+                size = dir_size_bytes(path)
+                with _SIZE_LOCK:
+                    _SIZE_CACHE[path] = (size, time.time())
+            except Exception:
+                pass
+            finally:
+                with _SIZE_LOCK:
+                    _SIZE_INFLIGHT.discard(path)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    return cached[0] if cached is not None else None
+
+
 def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
     """Снимок состояния. Возвращает dict фактов -- без оценок и порогов."""
     now = datetime.now()
@@ -145,7 +190,7 @@ def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
         facts["streams_active"] = None        # ветка стримов ещё не влита
 
     if reports_dir and os.path.isdir(reports_dir):
-        facts["reports_bytes"] = dir_size_bytes(reports_dir)
+        facts["reports_bytes"] = dir_size_cached(reports_dir)
     return facts
 
 
