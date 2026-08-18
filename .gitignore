@@ -68,3 +68,6 @@ cf_err.log
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Пароль Grafana -- как и sar_config.json, в репозиторий не попадает
+monitoring/.env

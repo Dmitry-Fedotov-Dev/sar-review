@@ -1,0 +1,58 @@
+# Мониторинг SAR Review: Prometheus + Grafana.
+#
+# ОПЦИОНАЛЕН. Платформа работает и без него: /healthz и /metrics отдаёт сам
+# сервер, а тревоги о недоступности шлёт телеграм-бот. Этот стек нужен там,
+# где хотят историю и графики -- на постоянной установке, у заказчика с
+# отделом эксплуатации, на демонстрации. В поле, где всё поднимают двумя
+# командами на ноутбуке, его ставить не надо.
+#
+# Платформа работает НА ХОСТЕ, а не в контейнере, поэтому Prometheus ходит к
+# ней через host.docker.internal. На Linux этот адрес не резолвится сам --
+# для него добавлен extra_hosts, см. ниже.
+#
+#   cd monitoring
+#   docker compose up -d
+#   Grafana: http://localhost:3000  (admin / задаётся в .env)
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: sar-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 90 дней истории: хватает, чтобы увидеть сезонность нагрузки и рост
+      # диска, и при этом не съедает место само по себе
+      - --storage.tsdb.retention.time=90d
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:9090:9090"     # только локально: наружу торчать незачем
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: sar-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      # Пароль ОБЯЗАТЕЛЬНО задать в monitoring/.env -- дефолта тут нет
+      # намеренно: Grafana с admin/admin наружу это готовая дыра.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?задайте GRAFANA_PASSWORD в monitoring/.env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  prometheus-data:
+  grafana-data:

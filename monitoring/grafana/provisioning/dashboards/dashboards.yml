@@ -1,0 +1,12 @@
+apiVersion: 1
+providers:
+  - name: SAR Review
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    # Дашборд разложен файлом, а не заведён руками: при переустановке он
+    # приезжает сам, а его правки видны в git как изменения кода.
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards

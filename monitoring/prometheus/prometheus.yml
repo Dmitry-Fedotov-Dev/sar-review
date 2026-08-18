@@ -1,0 +1,15 @@
+# Что опрашиваем. Платформа отдаёт /metrics сама -- отдельный экспортер не
+# нужен, метрики уже в формате Prometheus (см. sar_health.render_prometheus).
+global:
+  scrape_interval: 30s          # состояние платформы меняется медленно,
+  scrape_timeout: 10s           # чаще опрашивать незачем
+
+scrape_configs:
+  - job_name: sar-platform
+    metrics_path: /metrics
+    static_configs:
+      # Платформа работает на хосте, а Prometheus в контейнере.
+      # Порт должен совпадать с server.port в sar_config.json.
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          instance: sar-review
