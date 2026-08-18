@@ -1,26 +1,67 @@
 {
   "uid": "sar-health",
   "title": "SAR Review — состояние платформы",
-  "tags": ["sar"],
+  "tags": [
+    "sar"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
-  "time": { "from": "now-24h", "to": "now" },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
   "panels": [
     {
       "type": "stat",
       "title": "Платформа",
       "description": "Отвечает ли сервер. Пропадание значения = сервер недоступен или Prometheus до него не дотягивается.",
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_up", "refId": "A" }],
-      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_up",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "1": { "text": "работает", "color": "green", "index": 0 } } },
-            { "type": "special", "options": { "match": "null", "result": { "text": "НЕДОСТУПНА", "color": "red", "index": 1 } } }
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "работает",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "НЕДОСТУПНА",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
           ],
           "noValue": "НЕДОСТУПНА"
         },
@@ -31,10 +72,26 @@
       "type": "stat",
       "title": "Воркер",
       "description": "Секунд с последней отметки. Воркер умеет умирать тихо: очередь при мёртвом воркере выглядит так же, как при живом без работы.",
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_worker_heartbeat_age_seconds", "refId": "A" }],
-      "options": { "colorMode": "background", "graphMode": "area" },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_worker_heartbeat_age_seconds",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -42,9 +99,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 180 },
-              { "color": "red", "value": 600 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 180
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
             ]
           }
         },
@@ -55,19 +121,44 @@
       "type": "stat",
       "title": "Свободно на диске",
       "description": "Уже приводило к остановке: за сутки место уползло с 18 ГБ до 3.4, потому что отчёты хранили все полные кадры.",
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_disk_free_bytes", "refId": "A" }],
-      "options": { "colorMode": "background", "graphMode": "area" },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_disk_free_bytes",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "yellow", "value": 3000000000 },
-              { "color": "green", "value": 10000000000 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 3000000000
+              },
+              {
+                "color": "green",
+                "value": 10000000000
+              }
             ]
           }
         },
@@ -76,12 +167,28 @@
     },
     {
       "type": "stat",
-      "title": "Возраст резервной копии",
-      "description": "Если копий нет ни одной, метрика ОТСУТСТВУЕТ и панель честно показывает «нет копий». Нулём это подменять нельзя: time() - 0 нарисовал бы полвека.",
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_backup_age_seconds", "refId": "A" }],
-      "options": { "colorMode": "background", "graphMode": "none" },
+      "title": "Копия базы, давность",
+      "description": "Возраст самой свежей резервной копии БАЗЫ ДАННЫХ: отчёты, триаж, ручные пометки, покрытие просмотра, участники и права. Исходное видео и готовые отчёты в копию НЕ входят — они большие и пересчитываются из исходников. Если копий нет ни одной, метрика отсутствует и панель показывает «копий нет»: подменять её нулём нельзя, time() - 0 нарисовал бы полвека.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_backup_age_seconds",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -89,9 +196,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 172800 },
-              { "color": "red", "value": 604800 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 172800
+              },
+              {
+                "color": "red",
+                "value": 604800
+              }
             ]
           }
         },
@@ -102,17 +218,39 @@
       "type": "stat",
       "title": "Залипло в обработке",
       "description": "Отчёты в статусе processing дольше трёх часов: на диске всё готово, а статус остался. Известная болезнь, чинится перезапуском воркера.",
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_stuck_reports", "refId": "A" }],
-      "options": { "colorMode": "background", "graphMode": "none" },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_stuck_reports",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
       "fieldConfig": {
         "defaults": {
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
             ]
           }
         },
@@ -121,28 +259,117 @@
     },
     {
       "type": "stat",
-      "title": "Зрителей сейчас",
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_viewers_online", "refId": "A" }],
-      "options": { "colorMode": "value", "graphMode": "area" },
-      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } }, "overrides": [] }
+      "title": "Онлайн сейчас",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_viewers_online",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "description": "Сколько человек прямо сейчас открыли платформу. Считается по heartbeat раз в 15 с: «онлайн» -- уникальные имена с отметкой не старше 40 с."
     },
-
     {
       "type": "timeseries",
       "title": "Файлы по статусам",
       "description": "Растущая очередь при живом воркере означает, что обработка не поспевает за поступлением.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_reports", "legendFormat": "{{status}}", "refId": "A" }],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_reports",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
-        "defaults": { "custom": { "fillOpacity": 10, "showPoints": "never" } },
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "error" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-          { "matcher": { "id": "byName", "options": "done" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "done"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
         ]
       }
     },
@@ -150,31 +377,77 @@
       "type": "timeseries",
       "title": "Свободное место",
       "description": "Смотреть на наклон, а не на значение: важно, за сколько часов место кончится при текущем темпе.",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "expr": "sar_disk_free_bytes", "legendFormat": "свободно", "refId": "A" },
-        { "expr": "sar_reports_bytes", "legendFormat": "занято отчётами", "refId": "B" }
+        {
+          "expr": "sar_disk_free_bytes",
+          "legendFormat": "свободно",
+          "refId": "A"
+        },
+        {
+          "expr": "sar_reports_bytes",
+          "legendFormat": "занято отчётами",
+          "refId": "B"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 10, "showPoints": "never" } },
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
         "overrides": []
       }
     },
-
     {
       "type": "timeseries",
       "title": "Работа людей",
       "description": "Главная ценность в базе: ручные пометки и триаж-статусы ставят только люди, автоматически они не появляются.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "expr": "sar_manual_observations_total", "legendFormat": "ручные пометки", "refId": "A" },
-        { "expr": "sar_triage_marks_total", "legendFormat": "триаж-статусы", "refId": "B" },
-        { "expr": "sar_people_approved", "legendFormat": "людей с доступом", "refId": "C" }
+        {
+          "expr": "sar_manual_observations_total",
+          "legendFormat": "ручные пометки",
+          "refId": "A"
+        },
+        {
+          "expr": "sar_triage_marks_total",
+          "legendFormat": "триаж-статусы",
+          "refId": "B"
+        },
+        {
+          "expr": "sar_people_approved",
+          "legendFormat": "людей с доступом",
+          "refId": "C"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "custom": { "fillOpacity": 5, "showPoints": "never" } },
+        "defaults": {
+          "custom": {
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
+        },
         "overrides": []
       }
     },
@@ -182,37 +455,260 @@
       "type": "timeseries",
       "title": "Отсмотрено людьми, часов",
       "description": "Накопленное покрытие ручного просмотра. Плоская линия при непустой очереди означает, что материал лежит непросмотренным.",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_watched_seconds_total / 3600", "legendFormat": "часов", "refId": "A" }],
-      "fieldConfig": {
-        "defaults": { "unit": "h", "custom": { "fillOpacity": 10, "showPoints": "never" } },
-        "overrides": []
-      }
-    },
-
-    {
-      "type": "timeseries",
-      "title": "Уровни проверок",
-      "description": "0 — норма, 1 — предупреждение, 2 — критично. Те же проверки, что отдаёт /healthz и по которым бот шлёт тревоги.",
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [{ "expr": "sar_check_level", "legendFormat": "{{check}}", "refId": "A" }],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_watched_seconds_total / 3600",
+          "legendFormat": "часов",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
-          "max": 2,
-          "min": 0,
-          "custom": { "fillOpacity": 15, "showPoints": "never", "lineInterpolation": "stepAfter" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 2 }
-            ]
+          "unit": "h",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "Проверки во времени",
+      "description": "Строка на проверку, цвет — состояние. Обычная линейная диаграмма тут не годится: когда всё в норме, все линии лежат на нуле друг под другом и сливаются в одну.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_check_level",
+          "legendFormat": "{{check}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showValue": "never",
+        "rowHeight": 0.85,
+        "mergeValues": true,
+        "alignValue": "center",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "норма",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "предупреждение",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "критично",
+                  "color": "red",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
+          "noValue": "нет данных"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Что именно проверяется",
+      "description": "Текущее состояние каждой проверки числом. backup — возраст резервной копии БАЗЫ (видео и отчёты в копию не входят). disk — свободное место. worker — жив ли обработчик. stuck — отчёты, застрявшие в обработке. errors — файлы, которые не удалось обработать.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sar_check_level",
+          "legendFormat": "{{check}}",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "renameByName": {
+              "check": "проверка",
+              "Value": "состояние"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "состояние"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "норма",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "предупреждение",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "2": {
+                        "text": "критично",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "проверка"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "backup": {
+                        "text": "резервная копия базы",
+                        "index": 0
+                      },
+                      "disk": {
+                        "text": "место на диске",
+                        "index": 1
+                      },
+                      "worker": {
+                        "text": "обработчик видео",
+                        "index": 2
+                      },
+                      "stuck": {
+                        "text": "застрявшие отчёты",
+                        "index": 3
+                      },
+                      "errors": {
+                        "text": "файлы с ошибкой",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
       }
     }
   ],
@@ -223,7 +719,10 @@
         "name": "DS_PROMETHEUS",
         "type": "datasource",
         "query": "prometheus",
-        "current": { "text": "Prometheus", "value": "Prometheus" },
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
         "hide": 2
       }
     ]
