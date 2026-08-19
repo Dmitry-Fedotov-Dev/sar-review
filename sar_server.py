@@ -1779,7 +1779,7 @@ async function load() {{
     // Считать его здесь делением было бы неверно -- watched_sec это уже
     // уникальное покрытие, а человеко-часы лежат отдельно в viewer_sec.
     const pct = o.coverage_pct || 0;
-    return `<a class="op" href="/?op=${{o.id}}">
+    return `<a class="op" href="/operation/${{o.id}}/">
       <h2>${{esc(o.title)}}</h2>
       <div class="area">${{esc(o.area || '')}}</div>
       <div class="nums">
@@ -1845,6 +1845,215 @@ def operations_page():
     return OPERATIONS_PAGE_HTML.format(viewer_name=session.get("viewer_name", ""))
 
 
+OPERATION_CARD_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Операция — SAR Review</title>
+<style>
+:root {{
+  --bg:#12171c; --card:#1a2129; --card2:#212a33; --line:#2b353f;
+  --ink:#e8eeec; --soft:#9aa8a5; --dim:#6f7d7a;
+  --accent:#5fb8c7; --warm:#e07a3f;
+}}
+*{{box-sizing:border-box}}
+body{{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,"Segoe UI",system-ui,sans-serif;line-height:1.5}}
+.wrap{{max-width:1000px;margin:0 auto;padding:16px 14px 70px}}
+a{{color:inherit}}
+
+.top{{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  flex-wrap:wrap;font-size:13px;color:var(--soft);margin-bottom:14px}}
+.top a{{color:var(--accent);text-decoration:none}}
+h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
+.area{{font-size:13px;color:var(--soft);margin-bottom:12px}}
+
+.sum{{display:flex;flex-wrap:wrap;gap:4px 22px;font-size:13px;
+  color:var(--soft);margin-bottom:8px}}
+.sum b{{color:var(--ink);font-weight:650}}
+.cov{{height:6px;background:var(--card2);border-radius:3px;overflow:hidden;
+  margin-bottom:18px}}
+.cov i{{display:block;height:100%;background:var(--accent)}}
+
+.tabs{{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:14px;
+  overflow-x:auto}}
+.tab{{padding:9px 15px;font-size:14px;color:var(--soft);cursor:pointer;
+  border-bottom:2px solid transparent;white-space:nowrap;background:none;
+  border-top:0;border-left:0;border-right:0;font-family:inherit}}
+.tab.on{{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}}
+
+.crumbs{{font-size:13px;color:var(--soft);margin-bottom:10px;
+  word-break:break-word}}
+.crumbs a{{color:var(--accent);text-decoration:none}}
+.crumbs .sep{{color:var(--dim);margin:0 5px}}
+
+.row{{display:flex;align-items:center;gap:11px;padding:9px 11px;
+  border-bottom:1px solid var(--line);text-decoration:none;color:inherit}}
+.row:hover{{background:var(--card)}}
+.row .ic{{width:19px;text-align:center;flex-shrink:0;opacity:.85}}
+.row .nm{{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-size:14px}}
+.row .meta{{font-size:12px;color:var(--soft);flex-shrink:0}}
+.bar{{width:74px;height:6px;background:var(--card2);border-radius:3px;
+  overflow:hidden;flex-shrink:0}}
+.bar i{{display:block;height:100%;background:var(--accent)}}
+
+.empty{{color:var(--soft);padding:34px 14px;text-align:center;
+  border:1px dashed var(--line);border-radius:9px}}
+.note{{font-size:12px;color:var(--dim);margin:10px 2px}}
+.find{{padding:11px;border-bottom:1px solid var(--line)}}
+.find .lbl{{font-size:14px}}
+.find .sub{{font-size:12px;color:var(--soft);margin-top:2px}}
+.tag{{display:inline-block;font-size:11px;padding:1px 7px;border-radius:4px;
+  background:var(--card2);color:var(--soft);margin-right:6px}}
+</style></head><body>
+<div class="wrap">
+  <div class="top">
+    <a href="/operations">← Все операции</a>
+    <span>{viewer_name}</span>
+  </div>
+  <h1 id="title">…</h1>
+  <div class="area" id="area"></div>
+  <div class="sum" id="sum"></div>
+  <div class="cov"><i id="covbar" style="width:0%"></i></div>
+
+  <div class="tabs">
+    <button class="tab on" data-t="mat">Материалы</button>
+    <button class="tab" data-t="live">Эфиры</button>
+    <button class="tab" data-t="find">Находки</button>
+    <button class="tab" data-t="rep">Отчёт</button>
+  </div>
+  <div id="body"></div>
+</div>
+
+<script>
+const OP = Number(location.pathname.split('/').filter(Boolean)[1]);
+let path = new URLSearchParams(location.search).get('path') || '';
+let tab = 'mat';
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+const hhmm = s => {{
+  s = Math.round(s || 0);
+  const h = Math.floor(s/3600), m = Math.round((s%3600)/60);
+  return h ? `${{h}} ч ${{m}} мин` : `${{m}} мин`;
+}};
+
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => {{
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  tab = b.dataset.t;
+  render();
+}});
+
+let data = null, findings = null;
+
+async function loadBrowse() {{
+  const r = await fetch(`/api/operations/${{OP}}/browse?path=` + encodeURIComponent(path));
+  data = await r.json();
+  const o = data.operation, s = data.summary;
+  document.getElementById('title').textContent = o.title;
+  document.getElementById('area').textContent = o.area || '';
+  document.getElementById('sum').innerHTML =
+    `<span>материалов <b>${{s.materials}}</b></span>` +
+    `<span>отснято <b>${{hhmm(s.footage_sec)}}</b></span>` +
+    `<span>просмотрено <b>${{hhmm(s.watched_sec)}}</b></span>` +
+    `<span>человеко-часов <b>${{hhmm(s.viewer_sec)}}</b></span>` +
+    `<span>пометок <b>${{s.marks}}</b></span>`;
+  document.getElementById('covbar').style.width = (s.coverage_pct || 0) + '%';
+  render();
+}}
+
+// Крошки: путь с возвратом на любой уровень. Без них человек, провалившись
+// в третью вложенную папку, не понимает, где он и как выйти.
+function crumbs() {{
+  const parts = path ? path.split('/') : [];
+  let acc = '', html = `<a href="#" onclick="go('');return false">${{esc(data.operation.title)}}</a>`;
+  parts.forEach((p, i) => {{
+    acc = acc ? acc + '/' + p : p;
+    const last = i === parts.length - 1;
+    html += `<span class="sep">›</span>` + (last
+      ? esc(p)
+      : `<a href="#" onclick="go('${{esc(acc)}}');return false">${{esc(p)}}</a>`);
+  }});
+  return `<div class="crumbs">${{html}}</div>`;
+}}
+
+function go(p) {{
+  path = p;
+  history.replaceState(null, '', `/operation/${{OP}}/` + (p ? '?path=' + encodeURIComponent(p) : ''));
+  loadBrowse();
+}}
+
+function fileRow(f) {{
+  const href = f.kind === 'video' ? `/report/${{f.report_id}}/player/`
+                                   : `/report/${{f.report_id}}/viewer/`;
+  const bar = (f.percent != null)
+    ? `<span class="bar"><i style="width:${{f.percent}}%"></i></span>` : '';
+  return `<a class="row" href="${{href}}">
+    <span class="ic">${{f.kind === 'video' ? '▭' : '🖼'}}</span>
+    <span class="nm">${{esc(f.name)}}</span>
+    ${{bar}}
+    <span class="meta">✍ ${{f.manual_count || 0}}</span></a>`;
+}}
+
+function render() {{
+  const b = document.getElementById('body');
+  if (!data) return;
+
+  if (tab === 'mat') {{
+    let html = crumbs();
+    const rows = data.folders.map(f =>
+      `<a class="row" href="#" onclick="go('${{esc(path ? path + '/' + f.name : f.name)}}');return false">
+        <span class="ic">📁</span><span class="nm">${{esc(f.name)}}</span>
+        <span class="meta">${{f.files ? f.files + ' файл(ов)' : '—'}}</span></a>`
+    ).concat(data.files.map(fileRow));
+
+    if (data.outside && data.outside.length) {{
+      rows.push(`<div class="note">Вне папки операции — добавлены вручную:</div>`);
+      data.outside.forEach(f => rows.push(fileRow(f)));
+    }}
+    html += rows.length ? rows.join('') : `<div class="empty">Папка пуста</div>`;
+    b.innerHTML = html;
+
+  }} else if (tab === 'find') {{
+    if (!findings) {{ b.innerHTML = '<div class="empty">Загружаю…</div>'; loadFindings(); return; }}
+    b.innerHTML = findings.length
+      ? `<div class="note">Только размеченное человеком: ручные пометки и
+           статусы триажа. Сцены модели сюда не попадают — их тысячи, и
+           настоящие находки в них потерялись бы.</div>` +
+        findings.map(f => `<div class="find">
+          <div class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}</div>
+          <div class="sub">${{esc(f.file)}}${{f.seconds != null ? ' · ' + hhmm(f.seconds) : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</div>
+        </div>`).join('')
+      : `<div class="empty">Находок пока нет</div>`;
+
+  }} else if (tab === 'live') {{
+    b.innerHTML = `<div class="empty">Эфиры появятся, когда включим трансляции.<br>
+      Записи эфиров будут попадать сюда же, в материалы операции.</div>`;
+  }} else {{
+    b.innerHTML = `<div class="empty">Отчёт заказчику — в работе.<br>
+      Соберётся из сводки выше и находок, размеченных людьми.</div>`;
+  }}
+}}
+
+async function loadFindings() {{
+  const r = await fetch(`/api/operations/${{OP}}/findings`);
+  findings = (await r.json()).findings || [];
+  render();
+}}
+
+loadBrowse();
+</script></body></html>"""
+
+
+@app.route("/operation/<int:op_id>/")
+def operation_card_page(op_id):
+    conn = get_db()
+    if sar_common.get_operation(conn, op_id) is None:
+        return "Операции нет", 404
+    return OPERATION_CARD_HTML.format(viewer_name=session.get("viewer_name", ""))
+
+
 def can_manage_operations():
     """Кто заводит операции.
 
@@ -1885,6 +2094,66 @@ def api_operations():
         client=(data.get("client") or "").strip() or None,
         coordinator=session.get("viewer_name"))
     return jsonify({"ok": True, "id": op_id, "title": title, "folder": folder})
+
+
+@app.route("/api/operations/<int:op_id>/browse")
+def api_operation_browse(op_id):
+    """Одна папка операции: подпапки и материалы. Ходим как в проводнике."""
+    conn = get_db()
+    watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
+    subpath = (request.args.get("path") or "").strip("/")
+    # путь приходит из адресной строки -- не пускаем его выше папки операции
+    if ".." in subpath.split("/"):
+        return jsonify({"error": "недопустимый путь"}), 400
+
+    data = sar_common.browse_operation(conn, watch_dir, op_id, subpath)
+    if data is None:
+        return jsonify({"error": "операции нет"}), 404
+
+    def short(r):
+        rel = (r["rel_path"] or "").replace("\\", "/")
+        item = {"report_id": r["report_id"], "name": rel.split("/")[-1],
+                "rel_path": rel, "kind": r["kind"], "status": r["status"],
+                "duration_sec": r.get("duration_sec"),
+                "manual_count": conn.execute(
+                    "SELECT COUNT(*) c FROM manual_observations WHERE report_id=?",
+                    (r["report_id"],)).fetchone()["c"]}
+        if r["kind"] == "video":
+            item.update(get_report_stats(conn, r["report_id"], r.get("duration_sec")))
+        return item
+
+    return jsonify({
+        "operation": {"id": data["operation"]["id"],
+                       "title": data["operation"]["title"],
+                       "area": data["operation"]["area"],
+                       "folder": data["operation"]["folder"]},
+        "path": data["path"],
+        "folders": data["folders"],
+        "files": [short(r) for r in data["files"]],
+        "outside": [short(r) for r in data["outside"]],
+        "summary": sar_common.operation_summary(conn, op_id),
+    })
+
+
+@app.route("/api/operations/<int:op_id>/findings")
+def api_operation_findings(op_id):
+    conn = get_db()
+    if sar_common.get_operation(conn, op_id) is None:
+        return jsonify({"error": "операции нет"}), 404
+    out = []
+    for f in sar_common.operation_findings(conn, op_id):
+        rel = (f.get("rel_path") or "").replace("\\", "/")
+        out.append({
+            "kind": f["kind"],
+            "report_id": f["report_id"],
+            "file": rel.split("/")[-1],
+            "label": f.get("label") or f.get("priority") or "",
+            "viewer": f.get("viewer_name") or f.get("author") or "",
+            "seconds": f.get("timestamp_sec"),
+            "lat": f.get("lat"), "lon": f.get("lon"),
+            "created_at": f.get("created_at") or f.get("updated_at"),
+        })
+    return jsonify({"findings": out})
 
 
 @app.route("/api/tree")
