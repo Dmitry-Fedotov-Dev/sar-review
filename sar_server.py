@@ -178,7 +178,10 @@ button {{ width:100%; padding:10px; border-radius:6px; border:none; background:#
 
 
 def _login_response(name, next_url=None):
-    resp = make_response(redirect(next_url or url_for("index")))
+    # После входа человек попадает в СПИСОК ОПЕРАЦИЙ, а не в общий список
+    # файлов. Иначе ссылка из бота приводила в кучу всех материалов сразу,
+    # мимо той структуры, ради которой операции и заводились.
+    resp = make_response(redirect(next_url or url_for("operations_page")))
     resp.set_cookie("sar_viewer_name", urllib.parse.quote(name), httponly=False, samesite="Lax")
     return resp
 
@@ -1747,7 +1750,10 @@ input[type=text]:focus{{outline:2px solid var(--accent);outline-offset:-1px}}
   <input type="text" id="c" placeholder="необязательно">
   <div class="err" id="err"></div>
   <div class="row">
-    <button class="btn ghost" value="cancel">Отмена</button>
+    <!-- type="button" обязателен: кнопка внутри формы по умолчанию считается
+         отправкой, и браузер требует заполнить обязательное поле ПРЕЖДЕ чем
+         закрыть окно. Человек не мог отменить создание, не придумав название. -->
+    <button class="btn ghost" type="button" id="cancel">Отмена</button>
     <button class="btn" id="create" value="ok">Создать</button>
   </div>
 </form></dialog>
@@ -1814,6 +1820,14 @@ document.getElementById('new').onclick = () => {{
   document.getElementById('err').textContent = '';
   dlg.showModal();
   document.getElementById('t').focus();
+}};
+
+// Отмена закрывает окно ВСЕГДА, независимо от заполненности полей, и
+// очищает их: иначе брошенный черновик всплывёт при следующем открытии.
+document.getElementById('cancel').onclick = () => {{
+  ['t','a','c'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('err').textContent = '';
+  dlg.close();
 }};
 
 document.getElementById('create').addEventListener('click', async (e) => {{
@@ -1900,7 +1914,9 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .empty{{color:var(--soft);padding:34px 14px;text-align:center;
   border:1px dashed var(--line);border-radius:9px}}
 .note{{font-size:12px;color:var(--dim);margin:10px 2px}}
-.find{{padding:11px;border-bottom:1px solid var(--line)}}
+.find{{display:block;padding:11px;border-bottom:1px solid var(--line);
+  text-decoration:none;color:inherit}}
+.find:hover{{background:var(--card)}}
 .find .lbl{{font-size:14px}}
 .find .sub{{font-size:12px;color:var(--soft);margin-top:2px}}
 .tag{{display:inline-block;font-size:11px;padding:1px 7px;border-radius:4px;
@@ -2021,10 +2037,21 @@ function render() {{
       ? `<div class="note">Только размеченное человеком: ручные пометки и
            статусы триажа. Сцены модели сюда не попадают — их тысячи, и
            настоящие находки в них потерялись бы.</div>` +
-        findings.map(f => `<div class="find">
-          <div class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}</div>
-          <div class="sub">${{esc(f.file)}}${{f.seconds != null ? ' · ' + hhmm(f.seconds) : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</div>
-        </div>`).join('')
+        findings.map(f => {{
+          // Находка ведёт ТУДА, ГДЕ ОНА НАЙДЕНА: в плеер на её таймкод.
+          // Список без переходов бесполезен -- человек видит «верёвка,
+          // 66 с» и не может посмотреть, что там на самом деле.
+          const href = `/report/${{f.report_id}}/player/` +
+            (f.seconds != null ? `?t=${{Math.max(0, Math.floor(f.seconds))}}` : '');
+          const tc = f.seconds != null
+            ? String(Math.floor(f.seconds / 60)).padStart(2,'0') + ':' +
+              String(Math.floor(f.seconds % 60)).padStart(2,'0')
+            : '';
+          return `<a class="find" href="${{href}}">
+            <div class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}</div>
+            <div class="sub">${{esc(f.file)}}${{tc ? ' · ' + tc : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</div>
+          </a>`;
+        }}).join('')
       : `<div class="empty">Находок пока нет</div>`;
 
   }} else if (tab === 'live') {{
@@ -3170,6 +3197,9 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .cmt-head {{ display:flex; align-items:center; gap:8px; margin-bottom:2px; }}
 .cmt-author {{ font-size:11px; font-weight:bold; color:#9fe8b5; }}
 .cmt-time {{ font-size:10px; color:#777; }}
+.crumbs {{ font-size:13px; color:#888; margin:0; }}
+.crumbs a {{ color:#6bb; text-decoration:none; }}
+.crumbs a:hover {{ text-decoration:underline; }}
 .cmt-del {{ margin-left:auto; background:none; border:none; color:#777; cursor:pointer;
             font-size:15px; line-height:1; padding:0 2px; }}
 .cmt-del:hover {{ color:#ff6666; }}
@@ -3193,7 +3223,7 @@ h1 {{ font-size:16px; margin:12px 0; }}
 </style></head>
 <body>
 <div class="header-row">
-  <p><a href="/report/{report_id}/">&larr; к сценам</a> &nbsp;·&nbsp; <a href="/">к списку файлов</a></p>
+  <p class="crumbs">{crumbs}</p>
   <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>
 </div>
 <h1>Ручной просмотр — {name}</h1>
@@ -3808,6 +3838,30 @@ if (isProcessing) {{
 </body></html>"""
 
 
+def material_crumbs(conn, report, extra=""):
+    """Крошки для страниц материала: путь назад в его операцию.
+
+    Раньше плеер и отчёт вели «к списку файлов» -- в общую кучу всех
+    материалов, мимо операции, из которой человек пришёл. Теперь виден путь
+    и есть возврат на любой уровень.
+
+    Материал может принадлежать двум операциям сразу: показываем ту, что
+    добавлена раньше, остальные не теряются -- они видны в самой операции.
+    """
+    ops = sar_common.operations_of_material(conn, report["report_id"])
+    name = (report["rel_path"] or "").replace("\\", "/").split("/")[-1]
+    parts = ['<a href="/operations">Операции</a>']
+    if ops:
+        op = ops[-1]
+        parts.append('<a href="/operation/%d/">%s</a>' % (op["id"], op["title"]))
+    else:
+        parts.append('<a href="/">Не разобрано</a>')
+    if extra:
+        parts.append(extra)
+    parts.append("<span>%s</span>" % name)
+    return " &rsaquo; ".join(parts)
+
+
 @app.route("/report/<report_id>/player/")
 def player_page(report_id):
     report = get_report_row(report_id)
@@ -3850,6 +3904,10 @@ def player_page(report_id):
 
     return PLAYER_PAGE_HTML.format(
         report_id=report_id, name=report["rel_path"],
+        crumbs=material_crumbs(
+            get_db(), report,
+            extra='<a href="/report/%s/">сцены</a>' % report_id
+            if report["status"] == "done" else ""),
         processing_banner=processing_banner,
         is_processing_js="true" if is_processing else "false",
         # json.dumps -- корректно экранирует кавычки/юникод в имени, которое
