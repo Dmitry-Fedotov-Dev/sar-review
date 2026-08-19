@@ -1762,19 +1762,22 @@ async function load() {{
   let html = d.operations.map(o => {{
     // Покрытие -- отношение отсмотренного к отснятому. Главная цифра для
     // заказчика: "мы просмотрели столько-то процентов материала".
-    const pct = o.footage_sec > 0
-      ? Math.min(100, Math.round(o.watched_sec / o.footage_sec * 100)) : 0;
+    // Процент считает СЕРВЕР: там объединяются пересечения сегментов.
+    // Считать его здесь делением было бы неверно -- watched_sec это уже
+    // уникальное покрытие, а человеко-часы лежат отдельно в viewer_sec.
+    const pct = o.coverage_pct || 0;
     return `<a class="op" href="/?op=${{o.id}}">
       <h2>${{esc(o.title)}}</h2>
       <div class="area">${{esc(o.area || '')}}</div>
       <div class="nums">
         <span>материалов <b>${{o.materials}}</b></span>
         <span>отснято <b>${{hhmm(o.footage_sec)}}</b></span>
-        <span>отсмотрено <b>${{hhmm(o.watched_sec)}}</b></span>
+        <span>просмотрено <b>${{hhmm(o.watched_sec)}}</b></span>
+        <span>человеко-часов <b>${{hhmm(o.viewer_sec)}}</b></span>
         <span>пометок <b>${{o.marks}}</b></span>
       </div>
       <div class="cov"><i style="width:${{pct}}%"></i></div>
-      <div class="covnote">просмотрено ${{pct}}% отснятого</div>
+      <div class="covnote">просмотрено ${{pct}}% отснятого материала</div>
     </a>`;
   }}).join('');
 
