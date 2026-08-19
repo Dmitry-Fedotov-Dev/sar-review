@@ -618,6 +618,25 @@ async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\U0001F514 Тревоги включены.")
 
 
+def monitoring_block():
+    """Строки про дашборд для /status. Пусто, если адрес не задан.
+
+    Адрес у бесплатного туннеля временный и меняется при каждом
+    перезапуске, а ссылка нужна именно тогда, когда что-то пошло не так.
+    Держать её в /status удобнее, чем искать в переписке: команду видно в
+    меню, и она всегда отдаёт текущий адрес из конфига.
+    """
+    url = (CFG.get("grafana_url") or "").strip()
+    if not url:
+        return []
+    out = ["", "\U0001F4CA Дашборд мониторинга", url]
+    login = (CFG.get("grafana_login") or "").strip()
+    pw = (CFG.get("grafana_password") or "").strip()
+    if login and pw:
+        out.append(f"вход: {login} / {pw} (только чтение)")
+    return out
+
+
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Состояние платформы по запросу -- то же, что отдаёт /healthz."""
     if update.effective_chat.id not in CFG["admin_chat_ids"]:
@@ -642,7 +661,13 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = await asyncio.to_thread(fetch)
     if "error" in data:
-        await update.message.reply_text(f"\U0001F534 Платформа не отвечает\n{data['error']}")
+        # Дашборд нужен ИМЕННО СЕЙЧАС: платформа молчит, и посмотреть, что с
+        # ней, можно только там. Обрывать сообщение без ссылки -- оставлять
+        # человека без единственного оставшегося инструмента.
+        await update.message.reply_text(
+            "\n".join([f"\U0001F534 Платформа не отвечает", data["error"]]
+                       + monitoring_block()),
+            disable_web_page_preview=True)
         return
 
     icon = {"ok": "\U0001F7E2", "warn": "\U0001F7E1", "crit": "\U0001F534"}
@@ -656,7 +681,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
     if muted:
         lines.append(f"\n\U0001F515 Тревоги отключены до {muted:%H:%M %d.%m}")
-    await update.message.reply_text("\n".join(lines))
+
+    lines.extend(monitoring_block())
+    await update.message.reply_text("\n".join(lines),
+                                     disable_web_page_preview=True)
 
 
 # Меню команд бота (значок "/" рядом с полем ввода). Без него команда
