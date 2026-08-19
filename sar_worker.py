@@ -228,6 +228,15 @@ def watcher_loop():
                     print(f"[watcher] новый файл ({where}): {name} -> {report_id}")
                 else:
                     report_id = row["report_id"]
+
+                # Файл, лежащий в папке операции, должен попадать в неё САМ.
+                # Без этой привязки материалы находились и обрабатывались, но
+                # висели в «Не разобрано»: папка операции не работала как
+                # папка операции. Вызов идемпотентен и делается на каждом
+                # проходе -- операцию могли завести уже ПОСЛЕ появления файлов.
+                op_id = sar_common.attach_by_folder(conn, WATCH_DIR, report_id, name)
+                if op_id is not None and row is None:
+                    print(f"[watcher] {name} -> операция #{op_id}")
                 conn.close()
 
                 # превью нужно и видео, и фото -- список файлов показывает

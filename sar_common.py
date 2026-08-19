@@ -877,6 +877,39 @@ def scan_operation_folder(watch_dir, folder, max_depth=12):
     return files, dirs
 
 
+def operation_for_path(watch_dir, rel_path):
+    """К какой операции относится файл по своему расположению.
+
+    Определяется по метке .sar_operation в папке верхнего уровня. Нужна,
+    чтобы файл, положенный в папку операции, попадал в неё САМ. Без этого
+    материалы находились и обрабатывались, но висели в «Не разобрано» -- то
+    есть папка операции не работала как папка операции.
+    """
+    rel = (rel_path or "").replace("\\", "/").strip("/")
+    if "/" not in rel:
+        return None                       # лежит в корне watch_dir
+    top = rel.split("/", 1)[0]
+    if top in SERVICE_DIRS or top.startswith("."):
+        return None
+    return read_operation_marker(os.path.join(watch_dir, top))
+
+
+def attach_by_folder(conn, watch_dir, report_id, rel_path):
+    """Привязывает материал к операции, в чьей папке он лежит.
+
+    Вызывается при появлении нового файла. Повторный вызов безвреден, а
+    ручную привязку к другой операции не ломает: связи складываются, а не
+    заменяют друг друга.
+    """
+    op_id = operation_for_path(watch_dir, rel_path)
+    if op_id is None:
+        return None
+    if get_operation(conn, op_id) is None:
+        return None                       # метка осталась от удалённой операции
+    attach_material(conn, op_id, report_id)
+    return op_id
+
+
 def scan_all_materials(watch_dir):
     """Все медиафайлы: в папках операций и оставшиеся в корне.
 
