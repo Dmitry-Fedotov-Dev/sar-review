@@ -272,6 +272,100 @@ def operation_summary(conn, operation_id):
             "coverage_pct": pct, "marks": marks["n"]}
 
 
+def browse_operation(conn, watch_dir, operation_id, subpath=""):
+    """Содержимое одной папки операции: подпапки и материалы в ней.
+
+    Ходим по папкам, как в проводнике: показываем ровно один уровень, а не
+    всё дерево. Так одинаково работает и на телефоне, и при сотнях файлов --
+    список не превращается в кашу.
+
+    Материалы берутся из СВЯЗЕЙ операции, а файлы с диска -- только чтобы
+    узнать, в какой папке они лежат. Материал, привязанный к операции, но
+    лежащий вне её папки, не теряется: он показывается в корне помеченным.
+    """
+    op = get_operation(conn, operation_id)
+    if op is None:
+        return None
+    linked = {r["report_id"]: dict(r)
+              for r in materials_of_operation(conn, operation_id)}
+    by_rel = {}
+    for r in linked.values():
+        by_rel.setdefault((r["rel_path"] or "").replace("\\", "/"), []).append(r)
+
+    root = (op["folder"] or "").replace("\\", "/").strip("/")
+    here = "/".join(p for p in (root, subpath.strip("/")) if p)
+
+    folders, files, outside = {}, [], []
+    for rel, recs in by_rel.items():
+        if here and not rel.startswith(here + "/"):
+            if not subpath:                       # вне папки операции
+                outside.extend(recs)
+            continue
+        if not here:
+            tail = rel
+        else:
+            tail = rel[len(here) + 1:]
+        if "/" in tail:                           # лежит глубже -- это папка
+            name = tail.split("/", 1)[0]
+            f = folders.setdefault(name, {"name": name, "files": 0})
+            f["files"] += len(recs)
+        else:
+            files.extend(recs)
+
+    # пустые папки берём с диска: в связях их нет по определению, а человек
+    # ожидает увидеть свою структуру целиком
+    disk = os.path.join(watch_dir, here.replace("/", os.sep)) if here else watch_dir
+    if os.path.isdir(disk):
+        try:
+            for entry in os.scandir(disk):
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if entry.name in SERVICE_DIRS or entry.name.startswith("."):
+                    continue
+                folders.setdefault(entry.name, {"name": entry.name, "files": 0})
+        except OSError:
+            pass
+
+    return {"operation": dict(op),
+            "path": subpath.strip("/"),
+            "folders": sorted(folders.values(), key=lambda f: f["name"].lower()),
+            "files": sorted(files, key=lambda r: (r["rel_path"] or "").lower()),
+            "outside": outside if not subpath else []}
+
+
+def operation_findings(conn, operation_id):
+    """Находки операции -- только размеченные ЧЕЛОВЕКОМ.
+
+    Сцены модели сюда не попадают намеренно: их тысячи, и почти всё --
+    камни. Утопить в них десяток настоящих находок значит сделать вкладку
+    бесполезной. Ручная пометка и триаж-статус ставятся человеком, и именно
+    они идут в отчёт заказчику.
+    """
+    out = []
+    for r in conn.execute(
+            "SELECT o.*, rp.rel_path FROM manual_observations o "
+            "JOIN operation_materials m ON m.report_id=o.report_id "
+            "JOIN reports rp ON rp.report_id=o.report_id "
+            "WHERE m.operation_id=? ORDER BY o.created_at DESC",
+            (operation_id,)):
+        d = dict(r)
+        d["kind"] = "manual"
+        out.append(d)
+    try:
+        for r in conn.execute(
+                "SELECT p.*, rp.rel_path FROM detection_priorities p "
+                "JOIN operation_materials m ON m.report_id=p.report_id "
+                "JOIN reports rp ON rp.report_id=p.report_id "
+                "WHERE m.operation_id=? ORDER BY p.updated_at DESC",
+                (operation_id,)):
+            d = dict(r)
+            d["kind"] = "triage"
+            out.append(d)
+    except Exception:
+        pass
+    return out
+
+
 def unsorted_materials(conn):
     """Материалы без единой операции -- раздел «Не разобрано».
 
