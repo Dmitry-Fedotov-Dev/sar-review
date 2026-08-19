@@ -118,6 +118,19 @@ def write_operation_marker(folder_path, operation_id):
     return path
 
 
+# имя папки делаем из названия операции: человек ищет её в проводнике
+# по тому же слову, что видит в интерфейсе. Символы, запрещённые в именах
+# файлов Windows, заменяем -- иначе операция «Поиск 12/08» создала бы
+# вложенную папку вместо одной.
+_BAD_IN_NAME = r'<>:"/\\|?*'
+
+
+def folder_name_for(title):
+    name = "".join("_" if ch in _BAD_IN_NAME else ch for ch in str(title))
+    name = " ".join(name.split()).strip(" .")     # без хвостовых точек и пробелов
+    return name[:80] or "операция"
+
+
 def create_operation(conn, title, area=None, client=None, coordinator=None,
                       folder=None):
     now = datetime.now().isoformat()
@@ -163,6 +176,48 @@ def materials_of_operation(conn, operation_id):
         "SELECT r.* FROM reports r JOIN operation_materials m ON m.report_id=r.report_id "
         "WHERE m.operation_id=? ORDER BY r.file_ctime DESC, r.rel_path",
         (operation_id,)).fetchall()
+
+
+def create_operation_with_folder(conn, watch_dir, title, area=None, client=None,
+                                  coordinator=None):
+    """Заводит операцию и её папку разом.
+
+    Порядок важен: сначала запись в базе (нужен id для метки), потом папка,
+    потом метка. Если папку создать не удалось -- запись остаётся, операция
+    просто без папки, и материалы в неё можно добавлять через браузер. Это
+    лучше, чем откатывать: пустая операция чинится одним движением, а
+    потерянная -- нет.
+    """
+    op_id = create_operation(conn, title, area=area, client=client,
+                             coordinator=coordinator)
+    folder = folder_name_for(title)
+    path = os.path.join(watch_dir, folder)
+    try:
+        os.makedirs(path, exist_ok=True)
+        write_operation_marker(path, op_id)
+        conn.execute("UPDATE operations SET folder=? WHERE id=?", (folder, op_id))
+        conn.commit()
+    except OSError:
+        folder = None
+    return op_id, folder
+
+
+def operation_summary(conn, operation_id):
+    """Сводка по операции для карточки в списке."""
+    row = conn.execute(
+        "SELECT COUNT(*) n, COALESCE(SUM(r.duration_sec),0) secs "
+        "FROM reports r JOIN operation_materials m ON m.report_id=r.report_id "
+        "WHERE m.operation_id=?", (operation_id,)).fetchone()
+    watched = conn.execute(
+        "SELECT COALESCE(SUM(w.end_sec-w.start_sec),0) s FROM watch_segments w "
+        "JOIN operation_materials m ON m.report_id=w.report_id "
+        "WHERE m.operation_id=?", (operation_id,)).fetchone()
+    marks = conn.execute(
+        "SELECT COUNT(*) n FROM manual_observations o "
+        "JOIN operation_materials m ON m.report_id=o.report_id "
+        "WHERE m.operation_id=?", (operation_id,)).fetchone()
+    return {"materials": row["n"], "footage_sec": float(row["secs"] or 0),
+            "watched_sec": float(watched["s"] or 0), "marks": marks["n"]}
 
 
 def unsorted_materials(conn):
