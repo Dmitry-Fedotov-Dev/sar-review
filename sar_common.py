@@ -202,22 +202,74 @@ def create_operation_with_folder(conn, watch_dir, title, area=None, client=None,
     return op_id, folder
 
 
+def merged_length(segments):
+    """Суммарная длина отрезков БЕЗ учёта пересечений.
+
+    Нужна, чтобы отличать «просмотрено» от «человеко-часов». Три человека,
+    посмотревшие одно и то же видео, дают втрое больше человеко-часов, но
+    материал при этом просмотрен ровно один раз.
+    """
+    total, cur_s, cur_e = 0.0, None, None
+    for s, e in sorted(segments):
+        if s is None or e is None or e <= s:
+            continue
+        if cur_e is None:
+            cur_s, cur_e = s, e
+        elif s <= cur_e:
+            cur_e = max(cur_e, e)
+        else:
+            total += cur_e - cur_s
+            cur_s, cur_e = s, e
+    if cur_e is not None:
+        total += cur_e - cur_s
+    return total
+
+
 def operation_summary(conn, operation_id):
-    """Сводка по операции для карточки в списке."""
+    """Сводка по операции для карточки в списке.
+
+    Различаются две принципиально разные величины:
+
+      watched_sec  -- сколько материала ПРОСМОТРЕНО, с объединением
+                      пересечений. Это ответ заказчику: «мы прошли столько-то
+                      процентов отснятого».
+      viewer_sec   -- человеко-часы команды. Может многократно превышать
+                      длительность съёмки, и это нормально.
+
+    Раньше на карточке стояла вторая величина под именем первой, и операция
+    показывала «просмотрено 193%» -- цифра, которую нельзя показать клиенту.
+    """
     row = conn.execute(
         "SELECT COUNT(*) n, COALESCE(SUM(r.duration_sec),0) secs "
         "FROM reports r JOIN operation_materials m ON m.report_id=r.report_id "
         "WHERE m.operation_id=?", (operation_id,)).fetchone()
-    watched = conn.execute(
-        "SELECT COALESCE(SUM(w.end_sec-w.start_sec),0) s FROM watch_segments w "
-        "JOIN operation_materials m ON m.report_id=w.report_id "
-        "WHERE m.operation_id=?", (operation_id,)).fetchone()
+
+    by_material = {}
+    viewer_sec = 0.0
+    for w in conn.execute(
+            "SELECT w.report_id, w.start_sec, w.end_sec FROM watch_segments w "
+            "JOIN operation_materials m ON m.report_id=w.report_id "
+            "WHERE m.operation_id=?", (operation_id,)):
+        s, e = w["start_sec"], w["end_sec"]
+        if s is None or e is None or e <= s:
+            continue
+        viewer_sec += e - s
+        by_material.setdefault(w["report_id"], []).append((s, e))
+    watched = sum(merged_length(v) for v in by_material.values())
+
     marks = conn.execute(
         "SELECT COUNT(*) n FROM manual_observations o "
         "JOIN operation_materials m ON m.report_id=o.report_id "
         "WHERE m.operation_id=?", (operation_id,)).fetchone()
-    return {"materials": row["n"], "footage_sec": float(row["secs"] or 0),
-            "watched_sec": float(watched["s"] or 0), "marks": marks["n"]}
+
+    footage = float(row["secs"] or 0)
+    # покрытие не может превышать 100%: если сегменты выходят за длительность
+    # (перемотка в конец, битая длительность), зажимаем -- лучше честные 100,
+    # чем невозможные 193
+    pct = min(100, round(watched / footage * 100)) if footage > 0 else 0
+    return {"materials": row["n"], "footage_sec": footage,
+            "watched_sec": watched, "viewer_sec": viewer_sec,
+            "coverage_pct": pct, "marks": marks["n"]}
 
 
 def unsorted_materials(conn):

@@ -175,6 +175,71 @@ def test_summary_counts_materials_and_work(env):
     assert op["marks"] == 1
 
 
+def test_coverage_never_exceeds_100_percent(env):
+    """Регрессия, замеченная на боевых данных.
+
+    Сводка складывала сегменты ВСЕХ зрителей, и операция показывала
+    «просмотрено 193%»: 1.6 часа съёмки против 3.0 часов суммарного
+    просмотра. Такую цифру нельзя показать заказчику -- она выглядит как
+    поломка, а по сути путает два разных показателя."""
+    client, _, db = env
+    _login(client)
+    oid = client.post("/api/operations", json={"title": "Курумды"}).get_json()["id"]
+    c = sar_common.get_db_connection(db)
+    c.execute("INSERT INTO reports (report_id, rel_path, abs_path, kind, status, "
+              "duration_sec, created_at, updated_at) VALUES "
+              "('r1','a.MP4','/a.MP4','video','done',100,'x','x')")
+    # трое посмотрели ОДНО И ТО ЖЕ видео целиком
+    for who in ("Айгуль", "Karpuha", "Олеся"):
+        c.execute("INSERT INTO watch_segments (report_id, viewer_name, start_sec, "
+                  "end_sec, ts) VALUES ('r1',?,0,100,'x')", (who,))
+    c.commit()
+    sar_common.attach_material(c, oid, "r1")
+    c.close()
+
+    op = client.get("/api/operations").get_json()["operations"][0]
+    assert op["coverage_pct"] == 100, op["coverage_pct"]
+    assert op["watched_sec"] == 100, "просмотрено должно быть длительностью видео"
+    assert op["viewer_sec"] == 300, "человеко-часы должны считаться отдельно"
+
+
+def test_partial_coverage_is_computed_correctly(env):
+    client, _, db = env
+    _login(client)
+    oid = client.post("/api/operations", json={"title": "Курумды"}).get_json()["id"]
+    c = sar_common.get_db_connection(db)
+    c.execute("INSERT INTO reports (report_id, rel_path, abs_path, kind, status, "
+              "duration_sec, created_at, updated_at) VALUES "
+              "('r1','a.MP4','/a.MP4','video','done',200,'x','x')")
+    # два пересекающихся отрезка: 0-60 и 40-100 -> уникально 0-100
+    c.execute("INSERT INTO watch_segments (report_id, viewer_name, start_sec, "
+              "end_sec, ts) VALUES ('r1','Айгуль',0,60,'x')")
+    c.execute("INSERT INTO watch_segments (report_id, viewer_name, start_sec, "
+              "end_sec, ts) VALUES ('r1','Karpuha',40,100,'x')")
+    c.commit()
+    sar_common.attach_material(c, oid, "r1")
+    c.close()
+
+    op = client.get("/api/operations").get_json()["operations"][0]
+    assert op["watched_sec"] == 100
+    assert op["viewer_sec"] == 120
+    assert op["coverage_pct"] == 50
+
+
+@pytest.mark.parametrize("segs,expect", [
+    ([(0, 10)], 10),
+    ([(0, 10), (0, 10)], 10),               # полное совпадение
+    ([(0, 10), (5, 15)], 15),               # пересечение
+    ([(0, 10), (20, 30)], 20),              # разрыв
+    ([(0, 10), (10, 20)], 20),              # стык
+    ([(10, 20), (0, 10)], 20),              # порядок не важен
+    ([(5, 5), (0, 10)], 10),                # пустой отрезок
+    ([], 0),
+])
+def test_merged_length(segs, expect):
+    assert sar_common.merged_length(segs) == expect
+
+
 def test_list_reports_unsorted_count(env):
     client, _, db = env
     _login(client)
