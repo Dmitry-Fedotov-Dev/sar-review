@@ -38,9 +38,15 @@ import sar_common
 
 # Таблицы, потеря которых невосполнима: их содержимое создано людьми и не
 # пересчитывается из файлов на диске. По ним же сверяем копию.
+#
+# Список обязан пополняться вместе со схемой. Таблицы операций сюда попали
+# не сразу: копия их сохраняла (снимок делается со всей базы), но сверка
+# молчала бы, окажись они пустыми. Тест теперь сравнивает этот список с
+# реальной схемой, чтобы следующая новая таблица не осталась без проверки.
 CRITICAL_TABLES = ("manual_observations", "detection_priorities",
                    "detection_comments", "telegram_access_requests",
-                   "watch_segments", "reports")
+                   "watch_segments", "reports",
+                   "operations", "operation_materials")
 
 
 def table_counts(conn):
