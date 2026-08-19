@@ -1731,6 +1731,7 @@ input[type=text]:focus{{outline:2px solid var(--accent);outline-offset:-1px}}
     <h1>Операции</h1>
     <div style="display:flex;align-items:center;gap:14px">
       <span class="who">{viewer_name}</span>
+      <a class="btn ghost" href="/guide" style="text-decoration:none">📖 Как смотреть</a>
       <a class="btn ghost" href="/" style="text-decoration:none">Все материалы</a>
       <button class="btn" id="new" style="display:none">Новая операция</button>
     </div>
@@ -1925,7 +1926,7 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 <div class="wrap">
   <div class="top">
     <a href="/operations">← Все операции</a>
-    <span>{viewer_name}</span>
+    <span><a href="/guide">📖 Как смотреть</a> &nbsp;·&nbsp; {viewer_name}</span>
   </div>
   <h1 id="title">…</h1>
   <div class="area" id="area"></div>
@@ -3200,6 +3201,17 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .crumbs {{ font-size:13px; color:#888; margin:0; }}
 .crumbs a {{ color:#6bb; text-decoration:none; }}
 .crumbs a:hover {{ text-decoration:underline; }}
+
+/* Памятка по отсмотру. Стоит НАД видео, потому что именно здесь человек
+   смотрит, и именно здесь методика имеет значение. Раньше гид существовал,
+   но ссылок на него не было нигде -- найти можно было только зная адрес. */
+.howto {{ background:#16202a; border:1px solid #24323d; border-left:3px solid #5fb8c7;
+          border-radius:7px; padding:9px 13px; margin:10px 0 12px;
+          font-size:13px; color:#a8b6b3; }}
+.howto b {{ color:#dfe8e6; font-weight:650; }}
+.howto a {{ color:#5fb8c7; text-decoration:none; white-space:nowrap; }}
+.howto a:hover {{ text-decoration:underline; }}
+.howto .pts {{ display:flex; flex-wrap:wrap; gap:3px 16px; margin-top:3px; }}
 .cmt-del {{ margin-left:auto; background:none; border:none; color:#777; cursor:pointer;
             font-size:15px; line-height:1; padding:0 2px; }}
 .cmt-del:hover {{ color:#ff6666; }}
@@ -3224,6 +3236,15 @@ h1 {{ font-size:16px; margin:12px 0; }}
 <body>
 <div class="header-row">
   <p class="crumbs">{crumbs}</p>
+  <div class="howto">
+    <b>Как смотреть</b> · <a href="/guide" target="_blank">полная методика →</a>
+    <div class="pts">
+      <span>Темп <b>не быстрее 0.5×</b>, сложный рельеф — покадрово</span>
+      <span>Делите кадр на <b>9 секторов</b>: находки чаще у краёв</span>
+      <span>Смена каждые <b>20–30 мин</b></span>
+      <span>Ищем <b>не снег и не камень</b>, а не «яркое»</span>
+    </div>
+  </div>
   <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>
 </div>
 <h1>Ручной просмотр — {name}</h1>
