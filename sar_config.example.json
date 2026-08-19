@@ -37,6 +37,9 @@
     "admin_chat_ids": [],
     "service_url": "",
     "guide_url": "",
-    "presentation_url": ""
+    "presentation_url": "",
+    "grafana_url": "",
+    "grafana_login": "",
+    "grafana_password": ""
   }
 }
