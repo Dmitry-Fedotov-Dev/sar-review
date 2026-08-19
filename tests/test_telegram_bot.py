@@ -240,17 +240,65 @@ def test_pending_cmd_silently_ignores_non_admin():
 
 # --- меню команд ---
 
-def test_post_init_hides_admin_commands_from_public_menu():
-    """В меню бота показываем только то, что нужно волонтёру. Админские
-    команды (/pending, /role, /revoke, /people) туда не выносим -- незачем
-    подсказывать их всем подряд."""
+def test_public_menu_has_no_admin_commands():
+    """Волонтёр видит только то, что ему нужно. Админские команды в общее
+    меню не выносим -- незачем подсказывать их всем подряд."""
+    names = {c[0] for c in bot.BASE_COMMANDS}
+    assert {"start", "help", "changelog"} <= names
+    assert not (names & {"pending", "role", "revoke", "people",
+                          "status", "mute", "unmute"})
+
+
+def test_admin_menu_has_every_working_command():
+    """Обратная сторона: команда, которая работает, но которой нет в меню,
+    существует только для тех, кто знает её название. Так семь админских
+    команд и оставались невидимыми."""
+    import re
+    with open("sar_telegram_bot.py", encoding="utf-8") as f:
+        src = f.read()
+    handlers = set(re.findall(r'CommandHandler\("([a-z_]+)"', src))
+    in_menu = {c[0] for c in bot.ADMIN_COMMANDS}
+    missing = handlers - in_menu
+    assert not missing, f"команды работают, но их нет в меню: {sorted(missing)}"
+
+
+def test_every_menu_command_has_a_description():
+    for name, desc in bot.ADMIN_COMMANDS:
+        assert desc and len(desc) > 5, f"у /{name} нет внятного описания"
+
+
+def test_post_init_sets_public_menu_and_admin_menus(monkeypatch):
+    """Общее меню одно, плюс персональное каждому администратору."""
+    monkeypatch.setitem(bot.CFG, "admin_chat_ids", [111, 222])
     fake_app = MagicMock()
     fake_app.bot.set_my_commands = AsyncMock()
 
     _run(bot._post_init(fake_app))
 
-    fake_app.bot.set_my_commands.assert_awaited_once()
-    registered = fake_app.bot.set_my_commands.await_args[0][0]
-    names = {cmd[0] for cmd in registered}
-    assert {"start", "help"} <= names
-    assert not (names & {"pending", "role", "revoke", "people"})
+    calls = fake_app.bot.set_my_commands.await_args_list
+    assert len(calls) == 3, "общее меню + два администратора"
+    # первый вызов -- общее меню, без scope
+    assert "scope" not in calls[0].kwargs
+    assert {c[0] for c in calls[0].args[0]} == {c[0] for c in bot.BASE_COMMANDS}
+    # дальше -- персональные, со scope
+    for call in calls[1:]:
+        assert call.kwargs.get("scope") is not None
+        assert "pending" in {c[0] for c in call.args[0]}
+
+
+def test_failed_admin_menu_does_not_break_the_rest(monkeypatch):
+    """Координатор мог не начинать диалог с ботом -- Telegram ответит
+    отказом, и это не повод не поставить меню остальным."""
+    monkeypatch.setitem(bot.CFG, "admin_chat_ids", [111, 222])
+    fake_app = MagicMock()
+
+    calls = []
+
+    async def flaky(commands, scope=None):
+        calls.append(scope)
+        if scope is not None and len(calls) == 2:
+            raise RuntimeError("chat not found")
+
+    fake_app.bot.set_my_commands = flaky
+    _run(bot._post_init(fake_app))
+    assert len(calls) == 3, "сбой на одном чате не должен обрывать остальные"

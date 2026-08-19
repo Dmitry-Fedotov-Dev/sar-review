@@ -52,9 +52,9 @@ def test_changelog_leaks_no_secrets():
 
 
 def test_changelog_is_registered_in_command_menu():
-    import inspect
-    src = inspect.getsource(bot._post_init)
-    assert "changelog" in src
+    # команды переехали из тела _post_init в списки BASE/ADMIN_COMMANDS,
+    # чтобы одно и то же меню можно было поставить в разных областях
+    assert "changelog" in {c[0] for c in bot.BASE_COMMANDS}
 
 
 def test_changelog_handler_is_wired():
