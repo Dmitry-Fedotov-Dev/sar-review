@@ -159,3 +159,52 @@ def test_restore_note_explains_the_wal_trap(tmp_path):
 def test_restore_note_warns_about_credentials():
     note = sb.RESTORE_NOTE.format(stamp="x", counts="")
     assert "ключи входа" in note or "ключи доступа" in note.lower()
+
+
+# --- список сверяемых таблиц не должен отставать от схемы -----------------
+
+def test_operations_are_verified(tmp_path):
+    """Таблицы операций сначала не попали в сверку: копия их сохраняла, но
+    молчала бы, окажись они пустыми."""
+    assert "operations" in sb.CRITICAL_TABLES
+    assert "operation_materials" in sb.CRITICAL_TABLES
+
+
+def test_every_table_with_human_work_is_verified(tmp_path):
+    """Ловит следующую новую таблицу, которую забудут добавить в сверку.
+
+    Служебные и восстановимые таблицы исключены явно: логи пересчитываются
+    при повторной обработке, presence живёт минуты, состояние тревог и
+    отметки процессов восстанавливаются сами.
+    """
+    import sar_common
+    db = str(tmp_path / "t.db")
+    sar_common.init_db(db)
+    c = sar_common.get_db_connection(db)
+    tables = {r[0] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name NOT LIKE 'sqlite_%'")}
+    c.close()
+
+    RECOVERABLE = {"logs", "presence", "alert_state", "service_heartbeat"}
+    must_verify = tables - RECOVERABLE
+    missing = must_verify - set(sb.CRITICAL_TABLES)
+    assert not missing, (
+        f"таблицы не проверяются при бэкапе: {sorted(missing)}. "
+        "Либо добавьте их в CRITICAL_TABLES, либо в RECOVERABLE, если "
+        "их содержимое восстанавливается само")
+
+
+def test_counts_include_operations(tmp_path):
+    import sar_common
+    src = str(tmp_path / "s.db")
+    sar_common.init_db(src)
+    c = sar_common.get_db_connection(src)
+    sar_common.create_operation(c, "Курумды")
+    c.close()
+
+    dst = str(tmp_path / "b.db")
+    counts = sb.make_backup(src, dst)
+    assert counts["operations"] == 1
+    problems, got = sb.verify(dst, counts)
+    assert problems == [] and got["operations"] == 1
