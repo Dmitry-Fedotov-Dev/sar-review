@@ -57,11 +57,35 @@ def test_player_shows_the_reminder():
     assert 'href="/guide"' in html
 
 
+def test_reminder_is_not_inside_the_header_row():
+    """Регрессия по вёрстке.
+
+    Памятку сначала вложили в header-row -- флекс-строку с крошками и
+    счётчиком онлайн. Она встала третьей колонкой между ними, и шапка
+    разъехалась: крошки сжались в две строки, счётчик уехал к краю."""
+    html = sar_server.PLAYER_PAGE_HTML
+    head = html[html.index('<div class="header-row">'):html.index("<h1>")]
+    assert 'class="howto"' not in head
+
+
+def test_title_does_not_repeat_the_path():
+    """Полный путь уже стоит в крошках строкой выше -- повторять его в
+    заголовке значит занимать место дважды."""
+    html = sar_server.PLAYER_PAGE_HTML
+    assert "<h1>{short_name}</h1>" in html
+    assert "<h1>Ручной просмотр — {name}</h1>" not in html
+
+
+def test_crumbs_do_not_wrap():
+    """Длинный путь ломал шапку на две строки."""
+    assert "white-space:nowrap" in sar_server.PLAYER_PAGE_HTML
+
+
 @pytest.mark.parametrize("point", [
-    "0.5",            # темп
-    "9 сектор",       # сетка
-    "20–30 мин",      # смены
-    "не снег и не камень",   # главная установка про цвет
+    "0.5",              # темп
+    "9 сектор",         # сетка
+    "20–30 мин",        # смены
+    "отмечать всегда",  # сомнительное фиксируем
 ])
 def test_reminder_carries_the_key_rules(point):
     """Памятка бесполезна, если в ней общие слова. Четыре правила, которые
@@ -69,11 +93,19 @@ def test_reminder_carries_the_key_rules(point):
     assert point in sar_server.PLAYER_PAGE_HTML
 
 
+def test_reminder_avoids_rules_that_need_context():
+    """Установка «ищем не снег и не камень» верна, но одной строкой без
+    объяснения читается как бессмыслица -- в памятке ей не место, а в
+    гиде она разобрана целым разделом."""
+    assert "не снег и не камень" not in sar_server.PLAYER_PAGE_HTML
+    assert "не снег и не камень" in sar_server.GUIDE_PAGE_HTML
+
+
 def test_reminder_matches_the_guide():
     """Памятка не должна разойтись с самим гидом -- иначе человек получит
     два разных указания."""
     guide = sar_server.GUIDE_PAGE_HTML
-    for point in ("0.5", "не снег и не камень"):
+    for point in ("0.5", "Сомнительное фиксируем всегда"):
         assert point in guide, f"в гиде нет: {point}"
 
 
