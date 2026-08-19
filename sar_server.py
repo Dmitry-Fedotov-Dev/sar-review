@@ -3242,7 +3242,7 @@ h1 {{ font-size:16px; margin:12px 0; }}
       <span>Темп <b>не быстрее 0.5×</b>, сложный рельеф — покадрово</span>
       <span>Делите кадр на <b>9 секторов</b>: находки чаще у краёв</span>
       <span>Смена каждые <b>20–30 мин</b></span>
-      <span>Ищем <b>не снег и не камень</b>, а не «яркое»</span>
+      <span>Сомнительное <b>отмечаем всегда</b></span>
     </div>
   </div>
   <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>

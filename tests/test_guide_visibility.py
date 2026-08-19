@@ -58,10 +58,10 @@ def test_player_shows_the_reminder():
 
 
 @pytest.mark.parametrize("point", [
-    "0.5",            # темп
-    "9 сектор",       # сетка
-    "20–30 мин",      # смены
-    "не снег и не камень",   # главная установка про цвет
+    "0.5",              # темп
+    "9 сектор",         # сетка
+    "20–30 мин",        # смены
+    "отмечаем всегда",  # сомнительное фиксируем
 ])
 def test_reminder_carries_the_key_rules(point):
     """Памятка бесполезна, если в ней общие слова. Четыре правила, которые
@@ -69,11 +69,19 @@ def test_reminder_carries_the_key_rules(point):
     assert point in sar_server.PLAYER_PAGE_HTML
 
 
+def test_reminder_avoids_rules_that_need_context():
+    """Установка «ищем не снег и не камень» верна, но одной строкой без
+    объяснения читается как бессмыслица -- в памятке ей не место, а в
+    гиде она разобрана целым разделом."""
+    assert "не снег и не камень" not in sar_server.PLAYER_PAGE_HTML
+    assert "не снег и не камень" in sar_server.GUIDE_PAGE_HTML
+
+
 def test_reminder_matches_the_guide():
     """Памятка не должна разойтись с самим гидом -- иначе человек получит
     два разных указания."""
     guide = sar_server.GUIDE_PAGE_HTML
-    for point in ("0.5", "не снег и не камень"):
+    for point in ("0.5", "Сомнительное фиксируем всегда"):
         assert point in guide, f"в гиде нет: {point}"
 
 
