@@ -1295,8 +1295,9 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .upload-status {{ font-size:12px; color:#999; }}
 </style></head>
 <body>
-<h1>SAR Review — файлы
+<h1><span id="page-title">SAR Review — файлы</span>
   <span class="header-right">
+    <a id="ops-link" href="/operations" style="color:#8bd;text-decoration:none;font-size:13px">← Операции</a>
     <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>
     <span class="whoami">{viewer_name} · <a href="/login" style="color:#999">сменить</a></span>
   </span>
@@ -1352,9 +1353,21 @@ function updateSortDirLabel() {{
 
 let lastData = {{ items: [] }};
 
+// Какая операция открыта -- берём из адреса, чтобы ссылка была
+// поделимой: человек может кинуть коллеге /?op=3 и тот увидит то же самое.
+const OP = new URLSearchParams(location.search).get('op') || '';
+
 async function loadTree() {{
-  const res = await fetch('/api/tree');
+  const res = await fetch('/api/tree' + (OP ? ('?op=' + encodeURIComponent(OP)) : ''));
   lastData = await res.json();
+  // Заголовок называет операцию, если открыта одна: иначе непонятно, почему
+  // в списке часть файлов, и выглядит как пропажа материала.
+  const t = document.getElementById('page-title');
+  if (t) {{
+    t.textContent = lastData.operation
+      ? ('Материалы: ' + lastData.operation)
+      : 'SAR Review — файлы';
+  }}
   render(lastData);
 }}
 
@@ -1882,6 +1895,24 @@ def api_tree():
     # так же, как у себя в облаке), корень -- плоско, там «Не разобрано».
     found = sar_common.scan_all_materials(watch_dir)
 
+    # Фильтр по операции. Отбор идёт по СВЯЗЯМ в базе, а не по префиксу пути:
+    # материал может быть добавлен в операцию, физически лежа где угодно, и
+    # может принадлежать двум операциям сразу. Путь на диске -- удобство
+    # раскладки, а не источник истины о принадлежности.
+    op_param = (request.args.get("op") or "").strip()
+    only = None
+    op_title = None
+    if op_param == "unsorted":
+        only = {r["report_id"] for r in sar_common.unsorted_materials(conn)}
+        op_title = "Не разобрано"
+    elif op_param.isdigit():
+        op = sar_common.get_operation(conn, int(op_param))
+        if op is None:
+            return jsonify({"items": [], "error": "операции нет"}), 404
+        only = {r["report_id"]
+                for r in sar_common.materials_of_operation(conn, int(op_param))}
+        op_title = op["title"]
+
     items = []
     for name, abs_path, kind in found:
         # ищем ПО ИМЕНИ ФАЙЛА (rel_path), а не пересчитывая report_id из
@@ -1930,9 +1961,11 @@ def api_tree():
             elif r["status"] == "done" and kind == "photo":
                 stats = get_report_stats(conn, report_id, None)
                 item["viewer_count"] = stats["viewer_count"]
+        if only is not None and item["report_id"] not in only:
+            continue
         items.append(item)
 
-    return jsonify({"items": items})
+    return jsonify({"items": items, "operation": op_title, "op": op_param or None})
 
 
 @app.route("/api/thumbnail/<path:filename>")
@@ -2460,7 +2493,14 @@ def _get_ai_scenes_for_report(report):
     if report["status"] == "done" and report_id in _ai_scenes_cache:
         return _ai_scenes_cache[report_id]
 
-    det_path = os.path.join(report["out_dir"], "detections.json")
+    # out_dir может быть пустым у записи, созданной до начала обработки или
+    # повреждённой. Раньше это роняло ВЕСЬ список файлов с TypeError: одна
+    # плохая строка делала страницу недоступной целиком. Считаем, что сцен
+    # просто нет -- список должен пережить любую отдельную запись.
+    out_dir = report["out_dir"]
+    if not out_dir:
+        return []
+    det_path = os.path.join(out_dir, "detections.json")
     raw_hits = _read_detections_file(det_path) if os.path.exists(det_path) else []
     if not raw_hits:
         return []
