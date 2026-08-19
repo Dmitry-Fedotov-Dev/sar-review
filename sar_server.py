@@ -3123,8 +3123,10 @@ PLAYER_PAGE_HTML = """<!DOCTYPE html>
 body {{ font-family: -apple-system, Arial, sans-serif; background:#111; color:#eee; margin:0; padding:20px; }}
 a {{ color:#8ecbff; }}
 h1 {{ font-size:16px; margin:12px 0; }}
-.header-row {{ display:flex; justify-content:space-between; align-items:center; }}
-.online-indicator {{ display:flex; align-items:center; gap:6px; font-size:13px; color:#ccc; }}
+.header-row {{ display:flex; justify-content:space-between; align-items:baseline;
+               gap:16px; margin-bottom:6px; }}
+.online-indicator {{ display:flex; align-items:center; gap:6px; font-size:13px;
+                     color:#ccc; flex-shrink:0; white-space:nowrap; }}
 .online-dot {{ width:6px; height:6px; border-radius:50%; background:#2f9e44; flex-shrink:0; }}
 .layout {{ display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; }}
 .video-col {{ flex:2; min-width:480px; }}
@@ -3198,20 +3200,27 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .cmt-head {{ display:flex; align-items:center; gap:8px; margin-bottom:2px; }}
 .cmt-author {{ font-size:11px; font-weight:bold; color:#9fe8b5; }}
 .cmt-time {{ font-size:10px; color:#777; }}
-.crumbs {{ font-size:13px; color:#888; margin:0; }}
+.crumbs {{ font-size:13px; color:#888; margin:0; min-width:0;
+           overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
 .crumbs a {{ color:#6bb; text-decoration:none; }}
 .crumbs a:hover {{ text-decoration:underline; }}
 
 /* Памятка по отсмотру. Стоит НАД видео, потому что именно здесь человек
    смотрит, и именно здесь методика имеет значение. Раньше гид существовал,
    но ссылок на него не было нигде -- найти можно было только зная адрес. */
-.howto {{ background:#16202a; border:1px solid #24323d; border-left:3px solid #5fb8c7;
-          border-radius:7px; padding:9px 13px; margin:10px 0 12px;
-          font-size:13px; color:#a8b6b3; }}
+/* Памятка -- ОТДЕЛЬНАЯ полоса во всю ширину, а не элемент флекс-строки.
+   Вложенная в header-row, она вставала третьей колонкой между крошками и
+   счётчиком онлайн, и шапка разъезжалась. */
+.howto {{ display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 18px;
+          background:#16202a; border:1px solid #24323d;
+          border-left:3px solid #5fb8c7; border-radius:7px;
+          padding:9px 14px; margin:0 0 14px; font-size:13px; color:#98a6a3; }}
 .howto b {{ color:#dfe8e6; font-weight:650; }}
+.howto-head {{ display:flex; align-items:baseline; gap:10px; }}
 .howto a {{ color:#5fb8c7; text-decoration:none; white-space:nowrap; }}
 .howto a:hover {{ text-decoration:underline; }}
-.howto .pts {{ display:flex; flex-wrap:wrap; gap:3px 16px; margin-top:3px; }}
+.howto .pts {{ display:flex; flex-wrap:wrap; gap:4px 18px; }}
+.howto .pts span {{ white-space:nowrap; }}
 .cmt-del {{ margin-left:auto; background:none; border:none; color:#777; cursor:pointer;
             font-size:15px; line-height:1; padding:0 2px; }}
 .cmt-del:hover {{ color:#ff6666; }}
@@ -3236,18 +3245,18 @@ h1 {{ font-size:16px; margin:12px 0; }}
 <body>
 <div class="header-row">
   <p class="crumbs">{crumbs}</p>
-  <div class="howto">
-    <b>Как смотреть</b> · <a href="/guide" target="_blank">полная методика →</a>
-    <div class="pts">
-      <span>Темп <b>не быстрее 0.5×</b>, сложный рельеф — покадрово</span>
-      <span>Делите кадр на <b>9 секторов</b>: находки чаще у краёв</span>
-      <span>Смена каждые <b>20–30 мин</b></span>
-      <span>Сомнительное <b>отмечаем всегда</b></span>
-    </div>
-  </div>
   <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>
 </div>
-<h1>Ручной просмотр — {name}</h1>
+<h1>{short_name}</h1>
+<div class="howto">
+  <span class="howto-head"><b>Как смотреть</b><a href="/guide" target="_blank">полная методика →</a></span>
+  <span class="pts">
+    <span>темп <b>не быстрее 0.5×</b></span>
+    <span>делить кадр на <b>9 секторов</b></span>
+    <span>смена каждые <b>20–30 мин</b></span>
+    <span>сомнительное <b>отмечать всегда</b></span>
+  </span>
+</div>
 {processing_banner}
 
 <div class="layout">
@@ -3925,6 +3934,9 @@ def player_page(report_id):
 
     return PLAYER_PAGE_HTML.format(
         report_id=report_id, name=report["rel_path"],
+        # в заголовке -- ИМЯ файла: полный путь уже стоит в крошках строкой
+        # выше, и повторять его значит занимать место дважды
+        short_name=(report["rel_path"] or "").replace("\\", "/").split("/")[-1],
         crumbs=material_crumbs(
             get_db(), report,
             extra='<a href="/report/%s/">сцены</a>' % report_id
