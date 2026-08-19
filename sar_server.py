@@ -1655,6 +1655,222 @@ def index():
     return TREE_PAGE_HTML.format(viewer_name=session.get("viewer_name", ""), upload_section=upload_section)
 
 
+OPERATIONS_PAGE_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Операции — SAR Review</title>
+<style>
+:root {{
+  --bg:#12171c; --card:#1a2129; --card2:#212a33; --line:#2b353f;
+  --ink:#e8eeec; --soft:#9aa8a5; --dim:#6f7d7a;
+  --accent:#5fb8c7; --warm:#e07a3f;
+}}
+*{{box-sizing:border-box}}
+body{{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,"Segoe UI",system-ui,sans-serif;line-height:1.55}}
+.wrap{{max-width:960px;margin:0 auto;padding:20px 16px 80px}}
+.top{{display:flex;align-items:center;justify-content:space-between;
+  gap:12px;flex-wrap:wrap;margin-bottom:22px}}
+h1{{font-size:21px;margin:0;font-weight:700}}
+.who{{font-size:13px;color:var(--soft)}}
+.btn{{background:var(--accent);color:#0d1418;border:0;border-radius:7px;
+  padding:9px 16px;font-size:14px;font-weight:600;cursor:pointer}}
+.btn:hover{{filter:brightness(1.08)}}
+.btn.ghost{{background:transparent;color:var(--soft);border:1px solid var(--line)}}
+
+.grid{{display:grid;gap:12px}}
+.op{{display:block;text-decoration:none;color:inherit;background:var(--card);
+  border:1px solid var(--line);border-radius:10px;padding:16px 18px}}
+.op:hover{{border-color:var(--accent)}}
+.op h2{{margin:0 0 4px;font-size:17px;font-weight:650}}
+.op .area{{font-size:13px;color:var(--soft);margin-bottom:12px}}
+.nums{{display:flex;flex-wrap:wrap;gap:6px 20px;font-size:13px;color:var(--soft)}}
+.nums b{{color:var(--ink);font-weight:650}}
+.cov{{margin-top:12px;height:6px;background:var(--card2);border-radius:3px;overflow:hidden}}
+.cov i{{display:block;height:100%;background:var(--accent)}}
+.covnote{{font-size:12px;color:var(--dim);margin-top:5px}}
+
+.unsorted{{background:transparent;border:1px dashed var(--line)}}
+.unsorted h2{{color:var(--warm)}}
+
+.empty{{text-align:center;color:var(--soft);padding:48px 20px;
+  border:1px dashed var(--line);border-radius:10px}}
+.empty p{{margin:0 0 14px}}
+
+dialog{{background:var(--card);color:var(--ink);border:1px solid var(--line);
+  border-radius:12px;padding:0;max-width:440px;width:calc(100% - 32px)}}
+dialog::backdrop{{background:rgba(0,0,0,.6)}}
+.dlg{{padding:22px 24px}}
+.dlg h3{{margin:0 0 4px;font-size:18px}}
+.dlg .hint{{font-size:13px;color:var(--soft);margin:0 0 18px}}
+label{{display:block;font-size:13px;color:var(--soft);margin:12px 0 5px}}
+input[type=text]{{width:100%;background:var(--bg);color:var(--ink);
+  border:1px solid var(--line);border-radius:7px;padding:9px 11px;font-size:15px}}
+input[type=text]:focus{{outline:2px solid var(--accent);outline-offset:-1px}}
+.row{{display:flex;gap:10px;justify-content:flex-end;margin-top:22px}}
+.err{{color:#ff9d7a;font-size:13px;margin-top:10px;min-height:18px}}
+</style></head><body>
+<div class="wrap">
+  <div class="top">
+    <h1>Операции</h1>
+    <div style="display:flex;align-items:center;gap:14px">
+      <span class="who">{viewer_name}</span>
+      <a class="btn ghost" href="/" style="text-decoration:none">Все материалы</a>
+      <button class="btn" id="new" style="display:none">Новая операция</button>
+    </div>
+  </div>
+  <div class="grid" id="list"></div>
+</div>
+
+<dialog id="dlg"><form method="dialog" class="dlg">
+  <h3>Новая операция</h3>
+  <p class="hint">Рядом появится папка с этим названием — складывайте материал
+     туда, можно прямо распакованной папкой из облака.</p>
+  <label for="t">Название</label>
+  <input type="text" id="t" placeholder="Курумды, август 2026" maxlength="120" required>
+  <label for="a">Район работ</label>
+  <input type="text" id="a" placeholder="Алайский район, пик Курумды">
+  <label for="c">Заказчик</label>
+  <input type="text" id="c" placeholder="необязательно">
+  <div class="err" id="err"></div>
+  <div class="row">
+    <button class="btn ghost" value="cancel">Отмена</button>
+    <button class="btn" id="create" value="ok">Создать</button>
+  </div>
+</form></dialog>
+
+<script>
+const hhmm = s => {{
+  s = Math.round(s || 0);
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return h ? `${{h}} ч ${{m}} мин` : `${{m}} мин`;
+}};
+
+async function load() {{
+  const r = await fetch('/api/operations');
+  const d = await r.json();
+  document.getElementById('new').style.display = d.can_manage ? '' : 'none';
+  const list = document.getElementById('list');
+
+  if (!d.operations.length && !d.unsorted) {{
+    list.innerHTML = `<div class="empty"><p>Операций пока нет.</p>` +
+      (d.can_manage ? `<p>Создайте первую — рядом появится папка,
+        куда складывать съёмку.</p>` : `<p>Их создаёт координатор.</p>`) + `</div>`;
+    return;
+  }}
+
+  let html = d.operations.map(o => {{
+    // Покрытие -- отношение отсмотренного к отснятому. Главная цифра для
+    // заказчика: "мы просмотрели столько-то процентов материала".
+    const pct = o.footage_sec > 0
+      ? Math.min(100, Math.round(o.watched_sec / o.footage_sec * 100)) : 0;
+    return `<a class="op" href="/?op=${{o.id}}">
+      <h2>${{esc(o.title)}}</h2>
+      <div class="area">${{esc(o.area || '')}}</div>
+      <div class="nums">
+        <span>материалов <b>${{o.materials}}</b></span>
+        <span>отснято <b>${{hhmm(o.footage_sec)}}</b></span>
+        <span>отсмотрено <b>${{hhmm(o.watched_sec)}}</b></span>
+        <span>пометок <b>${{o.marks}}</b></span>
+      </div>
+      <div class="cov"><i style="width:${{pct}}%"></i></div>
+      <div class="covnote">просмотрено ${{pct}}% отснятого</div>
+    </a>`;
+  }}).join('');
+
+  if (d.unsorted) {{
+    html += `<a class="op unsorted" href="/">
+      <h2>Не разобрано</h2>
+      <div class="area">материалы, которые ещё не отнесены к операции</div>
+      <div class="nums"><span>файлов <b>${{d.unsorted}}</b></span></div>
+    </a>`;
+  }}
+  list.innerHTML = html;
+}}
+
+function esc(s) {{
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+}}
+
+const dlg = document.getElementById('dlg');
+document.getElementById('new').onclick = () => {{
+  document.getElementById('err').textContent = '';
+  dlg.showModal();
+  document.getElementById('t').focus();
+}};
+
+document.getElementById('create').addEventListener('click', async (e) => {{
+  const title = document.getElementById('t').value.trim();
+  if (!title) {{ e.preventDefault(); document.getElementById('err').textContent =
+    'Название обязательно'; return; }}
+  e.preventDefault();
+  const r = await fetch('/api/operations', {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{title,
+      area: document.getElementById('a').value.trim(),
+      client: document.getElementById('c').value.trim()}})
+  }});
+  const d = await r.json();
+  if (!d.ok) {{ document.getElementById('err').textContent = d.error || 'Не вышло'; return; }}
+  dlg.close();
+  document.getElementById('t').value = '';
+  document.getElementById('a').value = '';
+  document.getElementById('c').value = '';
+  load();
+}});
+
+load();
+</script></body></html>"""
+
+
+@app.route("/operations")
+def operations_page():
+    return OPERATIONS_PAGE_HTML.format(viewer_name=session.get("viewer_name", ""))
+
+
+def can_manage_operations():
+    """Кто заводит операции.
+
+    Модератор и администратор -- те же права, что и на модерацию находок:
+    операция это организация работы команды, а не личное действие. Заводить
+    поиски всем подряд не нужно, иначе список зарастёт черновиками.
+    """
+    return is_moderator()
+
+
+@app.route("/api/operations", methods=["GET", "POST"])
+def api_operations():
+    conn = get_db()
+    if request.method == "GET":
+        out = []
+        for o in sar_common.list_operations(conn):
+            item = dict(o)
+            item.update(sar_common.operation_summary(conn, o["id"]))
+            out.append(item)
+        return jsonify({"operations": out,
+                         "unsorted": len(sar_common.unsorted_materials(conn)),
+                         "can_manage": can_manage_operations()})
+
+    if not can_manage_operations():
+        return jsonify({"ok": False, "error": "нужны права модератора"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"ok": False, "error": "не задано название"}), 400
+    if len(title) > 120:
+        return jsonify({"ok": False, "error": "название слишком длинное"}), 400
+
+    watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
+    op_id, folder = sar_common.create_operation_with_folder(
+        conn, watch_dir, title,
+        area=(data.get("area") or "").strip() or None,
+        client=(data.get("client") or "").strip() or None,
+        coordinator=session.get("viewer_name"))
+    return jsonify({"ok": True, "id": op_id, "title": title, "folder": folder})
+
+
 @app.route("/api/tree")
 def api_tree():
     conn = get_db()
