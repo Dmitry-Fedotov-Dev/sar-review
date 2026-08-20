@@ -161,10 +161,28 @@ def test_dashboard_queries_only_metrics_the_platform_exports(dash, tmp_path):
 
 
 def test_online_panel_shows_the_right_metric(dash):
-    p = next(x for x in dash["panels"] if "нлайн" in x["title"])
+    p = next(x for x in dash["panels"]
+             if x.get("type") == "stat" and "нлайн" in x["title"])
     exprs = [t["expr"] for t in p["targets"]]
     assert exprs == ["sar_viewers_online"], exprs
-    assert p["options"]["graphMode"] == "none", "просили просто цифру"
+
+
+def test_stat_tiles_show_a_number_and_not_a_sparkline(dash):
+    """Плашка отвечает на вопрос «сколько сейчас», тренд -- дело графика.
+
+    Фон-спарклайн на этих плашках либо дублировал полноценный график,
+    который стоит ниже на этом же дашборде (место на диске, запросы в
+    секунду, время ответа, ошибки), либо рисовал бессмыслицу: возраст
+    heartbeat -- это пила, сбрасывающаяся каждые несколько секунд, а время
+    без перезапуска -- прямая, которая всегда растёт. Из обоих нельзя
+    прочитать ничего, но они занимают всю плашку и мешают увидеть цифру.
+    """
+    for p in dash["panels"]:
+        if p.get("type") != "stat":
+            continue
+        assert p["options"].get("graphMode") == "none", (
+            f"на плашке «{p['title']}» фоновый график: он либо повторяет "
+            "полный график ниже, либо не читается вовсе")
 
 
 def test_online_has_a_history_chart_and_not_only_a_number(dash):
