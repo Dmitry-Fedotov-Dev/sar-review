@@ -179,6 +179,48 @@ def require_login():
     return None
 
 
+# --- пульс присутствия ---
+#
+# Один и тот же код нужен на КАЖДОЙ странице, где работает вошедший
+# человек. Раньше он был вписан руками в три страницы (список файлов,
+# страница обработки, плеер), а страницы операций появились позже -- и
+# пульса им никто не добавил. В итоге "онлайн" считал только тех, кто
+# открыл плеер: человек, зашедший на платформу, выбирающий операцию и
+# читающий список материалов, числился отсутствующим. Именно туда после
+# входа и попадает большинство.
+#
+# Поэтому реализация здесь одна и подставляется во все страницы разом --
+# чтобы следующая новая страница не завела четвёртую копию и не завела
+# заодно тот же баг.
+#
+# На /guide пульса намеренно нет: эта страница открыта БЕЗ входа (см.
+# open_paths выше), и присутствие оттуда означало бы "онлайн" для того,
+# кого мы не опознали.
+HEARTBEAT_JS = """<script>
+async function heartbeat() {
+  try {
+    const res = await fetch('/api/heartbeat', { method: 'POST' });
+    const data = await res.json();
+    // Счётчик есть не на каждой странице -- присутствие всё равно должно
+    // отмечаться. Поэтому проверяем элемент, а не полагаемся на catch.
+    const el = document.getElementById('online-count');
+    if (el && data.count !== undefined) el.textContent = data.count;
+  } catch (e) {
+    // НЕ глухой catch: ровно пустой catch однажды спрятал сломанный
+    // счётчик онлайна, и баг нашёл человек, а не тест (см. CLAUDE.md).
+    console.warn('пульс присутствия не прошёл', e);
+  }
+}
+heartbeat();
+setInterval(heartbeat, 15000);
+</script>"""
+
+# Тот же код для шаблонов, проходящих через .format(): там фигурные скобки
+# JS обязаны быть удвоены, иначе format примет их за подстановку. Версия
+# выводится из основной, чтобы две не разъехались при правке.
+HEARTBEAT_JS_FORMAT = HEARTBEAT_JS.replace("{", "{{").replace("}", "}}")
+
+
 # --- страницы ---
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -212,6 +254,7 @@ def _login_response(name, next_url=None):
     resp = make_response(redirect(next_url or url_for("operations_page")))
     resp.set_cookie("sar_viewer_name", urllib.parse.quote(name), httponly=False, samesite="Lax")
     return resp
+
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -1668,15 +1711,6 @@ function renderItems(items) {{
 loadTree();
 setInterval(loadTree, 5000);
 
-async function heartbeat() {{
-  try {{
-    const res = await fetch('/api/heartbeat', {{ method: 'POST' }});
-    const data = await res.json();
-    if (data.count !== undefined) document.getElementById('online-count').textContent = data.count;
-  }} catch (e) {{}}
-}}
-heartbeat();
-setInterval(heartbeat, 15000);
 </script>
 </body></html>"""
 
@@ -1897,6 +1931,13 @@ OPERATION_CARD_HTML = """<!DOCTYPE html>
   --bg:#12171c; --card:#1a2129; --card2:#212a33; --line:#2b353f;
   --ink:#e8eeec; --soft:#9aa8a5; --dim:#6f7d7a;
   --accent:#5fb8c7; --warm:#e07a3f;
+  /* Размер превью материала.
+     Привязан к высоте экрана, а не задан жёстко: на 1920x1080 выходит
+     примерно 56px, и тогда в список без прокрутки помещается ровно
+     десять строк. На экране повыше превью само становится крупнее, на
+     низком ноутбучном -- мельче, но не ниже 44px: меньше этого кадр с
+     дрона перестаёт узнаваться, а ради него всё и делается. */
+  --thumb:clamp(44px,5.2vh,76px);
 }}
 *{{box-sizing:border-box}}
 body{{margin:0;background:var(--bg);color:var(--ink);
@@ -1929,10 +1970,27 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .crumbs a{{color:var(--accent);text-decoration:none}}
 .crumbs .sep{{color:var(--dim);margin:0 5px}}
 
-.row{{display:flex;align-items:center;gap:11px;padding:9px 11px;
+/* Отступ маленький намеренно: высоту строки задаёт превью, и лишние
+   вертикальные поля здесь стоят прямо строк на экране. */
+.row{{display:flex;align-items:center;gap:12px;padding:4px 11px;
   border-bottom:1px solid var(--line);text-decoration:none;color:inherit}}
 .row:hover{{background:var(--card)}}
-.row .ic{{width:19px;text-align:center;flex-shrink:0;opacity:.85}}
+/* Квадрат, а не 16:9 по форме кадра. Кадр с дрона -- это местность, и
+   квадратный кроп оставляет центр кадра, по которому видео и узнают;
+   к тому же одинаковая ширина держит имена файлов в одной колонке,
+   независимо от того, папка это, видео или фото. */
+.row .ic,.row .thumb{{width:var(--thumb);height:var(--thumb);flex-shrink:0;
+  border-radius:7px;display:flex;align-items:center;justify-content:center}}
+.row .ic{{background:var(--card2);font-size:calc(var(--thumb)*.42);opacity:.85}}
+.row .thumb{{position:relative;overflow:hidden;background:var(--card2)}}
+.row .thumb img{{width:100%;height:100%;object-fit:cover;display:block;
+  position:relative;z-index:1}}
+/* Значок лежит ПОД картинкой, а не вместо неё: пока превью грузится или
+   если его вовсе нет (файл только появился, воркер до него не дошёл),
+   строка выглядит так же и не прыгает по высоте. */
+.row .thumb .fb{{position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;font-size:calc(var(--thumb)*.42);opacity:.45}}
+.row:hover .thumb{{outline:1px solid var(--accent);outline-offset:-1px}}
 .row .nm{{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;font-size:14px}}
 .row .meta{{font-size:12px;color:var(--soft);flex-shrink:0}}
@@ -2048,8 +2106,18 @@ function fileRow(f) {{
                                    : `/report/${{f.report_id}}/viewer/`;
   const bar = (f.percent != null)
     ? `<span class="bar"><i style="width:${{f.percent}}%"></i></span>` : '';
+  // Превью просится по ПОЛНОМУ пути материала (rel_path), а не по одному
+  // имени файла: в разных папках операции лежат файлы с совпадающими
+  // именами, и по короткому имени превью досталось бы не тому.
+  const key = encodeURIComponent(f.rel_path || f.name);
+  const glyph = f.kind === 'video' ? '▭' : '🖼';
+  // onerror убирает картинку, и из-под неё показывается значок. Превью
+  // может не быть законно: файл только положили, воркер до него не дошёл.
+  const thumb = `<span class="thumb"><span class="fb">${{glyph}}</span>` +
+    `<img src="/api/thumbnail/${{key}}" alt="" loading="lazy" ` +
+    `decoding="async" onerror="this.remove()"></span>`;
   return `<a class="row" href="${{href}}">
-    <span class="ic">${{f.kind === 'video' ? '▭' : '🖼'}}</span>
+    ${{thumb}}
     <span class="nm">${{esc(f.name)}}</span>
     ${{bar}}
     <span class="meta">✍ ${{f.manual_count || 0}}</span></a>`;
@@ -2065,6 +2133,8 @@ function render() {{
       `<a class="row" href="#" onclick="go('${{esc(path ? path + '/' + f.name : f.name)}}');return false">
         <span class="ic">📁</span><span class="nm">${{esc(f.name)}}</span>
         <span class="meta">${{f.files ? f.files + ' файл(ов)' : '—'}}</span></a>`
+      // значок папки того же размера, что превью: иначе имена файлов и
+      // имена папок встанут в разные колонки и список поедет
     ).concat(data.files.map(fileRow));
 
     if (data.outside && data.outside.length) {{
@@ -2528,15 +2598,6 @@ async function poll() {{
 }}
 poll();
 
-async function heartbeat() {{
-  try {{
-    const res = await fetch('/api/heartbeat', {{ method: 'POST' }});
-    const data = await res.json();
-    if (data.count !== undefined) document.getElementById('online-count').textContent = data.count;
-  }} catch (e) {{}}
-}}
-heartbeat();
-setInterval(heartbeat, 15000);
 </script>
 </body></html>"""
 
@@ -3858,15 +3919,6 @@ setInterval(() => {{
 }}, 5000);
 
 // --- онлайн-индикатор (та же логика, что на остальных страницах) ---
-async function heartbeat() {{
-  try {{
-    const res = await fetch('/api/heartbeat', {{ method: 'POST' }});
-    const data = await res.json();
-    if (data.count !== undefined) document.getElementById('online-count').textContent = data.count;
-  }} catch (e) {{}}
-}}
-heartbeat();
-setInterval(heartbeat, 15000);
 
 // Одна галка прячет ВСЁ, что подсказала модель: и рамки поверх видео, и
 // список сцен справа. Нужно, чтобы можно было пройти видео своими глазами,
@@ -4113,6 +4165,33 @@ def api_heartbeat():
 def api_online():
     conn = get_db()
     return jsonify({"count": get_online_count(conn)})
+
+
+# ---------------------------------------------------------------------------
+# ПУЛЬС ПРИСУТСТВИЯ ВО ВСЕ СТРАНИЦЫ
+#
+# Делается здесь, в конце модуля, а не рядом с самими шаблонами: так блок
+# гарантированно выполняется после того, как определены ВСЕ шаблоны, в
+# каком бы порядке их ни переставили дальше. Маршруты читают эти имена в
+# момент запроса, а не при импорте, поэтому подмена в конце модуля на них
+# действует.
+#
+# Список страниц явный, а не "все шаблоны подряд": на страницу входа и на
+# открытый без пароля /guide пульс ставить нельзя -- там человек ещё не
+# опознан, и присутствие означало бы "онлайн" неизвестно кого.
+# ---------------------------------------------------------------------------
+
+PAGES_WITH_PRESENCE = (
+    "TREE_PAGE_HTML", "PROCESSING_PAGE_HTML", "PLAYER_PAGE_HTML",
+    "OPERATIONS_PAGE_HTML", "OPERATION_CARD_HTML", "PHOTO_VIEWER_HTML",
+)
+
+for _page in PAGES_WITH_PRESENCE:
+    _tpl = globals()[_page]
+    assert "</body>" in _tpl, f"{_page}: некуда вставить пульс присутствия"
+    globals()[_page] = _tpl.replace(
+        "</body>", HEARTBEAT_JS_FORMAT + "\n</body>", 1)
+del _page, _tpl
 
 
 # ---------------------------------------------------------------------------
