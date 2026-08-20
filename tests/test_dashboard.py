@@ -81,6 +81,38 @@ def test_no_panel_disguises_missing_data_as_zero(dash):
             f"панель «{p['title']}» показывает отсутствие данных как ноль")
 
 
+def test_error_rate_shows_zero_when_there_are_no_errors(dash):
+    """Обратная сторона правила «пустое не подменяем нулём».
+
+    Панель доли ошибок молчала на живом проде. Причина: пятисоток не было
+    вовсе, sum() по пустому набору даёт пустоту, а деление пустоты на что
+    угодно -- снова пустота. Получалось, что «ошибок нет» и «данных нет»
+    выглядят одинаково, хотя это противоположные новости: первое -- всё
+    хорошо, второе -- мониторинг сломан.
+
+    Здесь ноль честный: запросы шли, ошибок среди них не было. Поэтому у
+    числителя обязана быть привязка к реальному трафику -- она даёт 0 при
+    живом трафике без ошибок и оставляет панель пустой, когда трафика нет
+    совсем.
+    """
+    p = next(x for x in dash["panels"] if x["title"] == "Доля ошибок")
+    expr = p["targets"][0]["expr"]
+    assert " or " in expr, (
+        "у числителя нет запасного нуля: при отсутствии ошибок панель "
+        "замолчит вместо того, чтобы показать 0%")
+    assert "0 *" in expr, (
+        "запасной ноль должен быть привязан к трафику (0 * <трафик>), "
+        "иначе панель покажет 0% даже когда метрик нет вовсе")
+
+
+def test_health_check_is_excluded_from_the_error_rate(dash):
+    """Проверка здоровья отвечает 503, когда что-то не так -- это её штатный
+    способ сказать «плохо», а не сбой сервера. Считать её в ошибки значит
+    зажигать график каждый раз, когда воркер молчит пару минут."""
+    p = next(x for x in dash["panels"] if x["title"] == "Доля ошибок")
+    assert 'endpoint!="healthz"' in p["targets"][0]["expr"]
+
+
 def test_stat_panels_have_complete_reduce_options(dash):
     for p in dash["panels"]:
         if p.get("type") != "stat":
@@ -133,6 +165,26 @@ def test_online_panel_shows_the_right_metric(dash):
     exprs = [t["expr"] for t in p["targets"]]
     assert exprs == ["sar_viewers_online"], exprs
     assert p["options"]["graphMode"] == "none", "просили просто цифру"
+
+
+def test_online_has_a_history_chart_and_not_only_a_number(dash):
+    """Пробел, который вылез на разборе нагрузки.
+
+    Индикатор «N онлайн» показывал только текущее значение и нигде его не
+    хранил. Из-за этого на вопрос «сколько людей было одновременно в ночь
+    с 15 на 16» пришлось отвечать по памяти людей: в данных ответа не
+    было. Цифры «сейчас» недостаточно -- нужен ряд во времени.
+    """
+    hist = [p for p in dash["panels"]
+            if p.get("type") == "timeseries"
+            and any("sar_viewers_online" in t.get("expr", "")
+                    for t in p.get("targets", []))]
+    assert hist, "нет графика истории онлайна -- только текущее значение"
+
+    exprs = " ".join(t["expr"] for t in hist[0]["targets"])
+    assert "max_over_time" in exprs, (
+        "нет пика за окно: на длинном интервале Grafana прореживает точки, "
+        "и короткий всплеск между ними просто исчезнет с графика")
 
 
 def test_hardware_panels_show_the_ceiling(dash):

@@ -6,7 +6,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 4,
   "refresh": "30s",
   "time": {
     "from": "now-24h",
@@ -634,7 +634,7 @@
     {
       "type": "stat",
       "title": "Доля ошибок",
-      "description": "Ответы 5xx, кроме проверки здоровья: она отвечает 503, когда что-то не так, и это её штатный сигнал, а не поломка сервера.",
+      "description": "Ответы 5xx, кроме проверки здоровья: она отвечает 503, когда что-то не так, и это её штатный сигнал, а не поломка сервера. Ноль ошибок показывается как 0%, а не как пустая панель -- пусто здесь означало бы «нет данных», и это разные новости.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -647,7 +647,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(sar_http_requests_total{status=~\"5..\",endpoint!=\"healthz\"}[5m])) / clamp_min(sum(rate(sar_http_requests_total{endpoint!=\"healthz\"}[5m])), 0.0001)",
+          "expr": "(sum(rate(sar_http_requests_total{status=~\"5..\",endpoint!=\"healthz\"}[5m])) or 0 * sum(rate(sar_http_requests_total{endpoint!=\"healthz\"}[5m]))) / clamp_min(sum(rate(sar_http_requests_total{endpoint!=\"healthz\"}[5m])), 0.0001)",
           "legendFormat": "Доля ошибок",
           "refId": "A",
           "datasource": {
@@ -1136,13 +1136,117 @@
     },
     {
       "type": "timeseries",
+      "title": "Онлайн, история",
+      "description": "Сколько людей одновременно держали платформу открытой. Считается по heartbeat раз в 15 секунд, онлайн -- те, кто отметился за последние 40 секунд. Это ЧИСЛО ЛЮДЕЙ НА ПЛАТФОРМЕ, а не число тех, у кого играет видео: читающий отчёт или ставящий пометку тоже здесь. История ведётся с 18 августа 2026 -- с момента запуска мониторинга; пик операции 15-16 августа в неё не попал, тогда ничего не писалось.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sar-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sar_viewers_online",
+          "legendFormat": "сейчас",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
+        },
+        {
+          "expr": "max_over_time(sar_viewers_online[1h])",
+          "legendFormat": "пик за час",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sar-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "lineInterpolation": "stepAfter"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "пик за час"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "сейчас"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
       "title": "Работа людей",
       "description": "Главная ценность в базе: ручные пометки и триаж-статусы ставят только люди, автоматически они не появляются.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 48
       },
       "datasource": {
         "type": "prometheus",
@@ -1195,7 +1299,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 48
       },
       "datasource": {
         "type": "prometheus",
@@ -1231,7 +1335,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 56
       },
       "datasource": {
         "type": "prometheus",
@@ -1320,7 +1424,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 65
       },
       "datasource": {
         "type": "prometheus",
