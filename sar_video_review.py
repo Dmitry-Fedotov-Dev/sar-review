@@ -421,6 +421,29 @@ COLOR_RANGES = {
 }
 
 
+def imwrite_safe(path, img, params=None):
+    """Запись картинки по пути, который может содержать кириллицу.
+
+    cv2.imwrite на Windows молча возвращает False, если в пути есть
+    не-ASCII символы. Именно так в отчётах пропали ВСЕ кропы цветовых
+    аномалий: имя файла собирается из названия класса, а класс называется
+    «цвет: оранжевый/красный (снаряжение)» -- то есть по-русски. Кропы
+    модели («person») при этом сохранялись, поэтому часть карточек в отчёте
+    работала, а часть показывала битую картинку, и на баг не думали годами.
+
+    Возвращаемое значение проверяется вызывающим: молчаливый провал записи
+    и есть причина, по которой это прожило так долго.
+    """
+    ok, buf = cv2.imencode(os.path.splitext(path)[1] or ".jpg", img, params or [])
+    if not ok:
+        return False
+    try:
+        buf.tofile(path)          # обходит ту же проблему, что и imdecode при чтении
+        return True
+    except OSError:
+        return False
+
+
 def detect_color_anomalies(frame_bgr, min_area_px=25, max_area_frac=0.02, max_per_frame=12):
     """Возвращает [(x1,y1,x2,y2,score,label), ...] для пятен нетипичного цвета.
     score — эвристическая "уверенность" на основе насыщенности и компактности пятна.
@@ -924,7 +947,9 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
                 # передаётся отдельно через frameBoxes в отчёте.
                 full_img_name = f"f{frame_idx:07d}_full.jpg"
                 full_img_path = os.path.join(frames_dir, full_img_name)
-                cv2.imwrite(full_img_path, frame, [cv2.IMWRITE_JPEG_QUALITY, full_frame_quality])
+                if not imwrite_safe(full_img_path, frame,
+                                     [cv2.IMWRITE_JPEG_QUALITY, full_frame_quality]):
+                    print(f"  ! не удалось сохранить кадр: {full_img_path}", flush=True)
                 full_rel_path = os.path.relpath(full_img_path, out_dir)
             else:
                 full_rel_path = None
@@ -951,7 +976,8 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
                 safe_cls = re.sub(r"[^a-zA-Zа-яА-Я0-9]+", "_", cls_name)[:30]
                 img_name = f"f{frame_idx:07d}_{safe_cls}_c{score:.2f}.jpg"
                 img_path = os.path.join(crops_dir, img_name)
-                cv2.imwrite(img_path, crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if not imwrite_safe(img_path, crop, [cv2.IMWRITE_JPEG_QUALITY, 90]):
+                    print(f"  ! не удалось сохранить кроп: {img_path}", flush=True)
 
                 # ОЦЕНКА координат объекта (не дрона) -- см. предупреждения в
                 # sar_common.estimate_ground_point. bbox уже в пиксельных

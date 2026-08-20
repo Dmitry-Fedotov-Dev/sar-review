@@ -1920,6 +1920,7 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .find:hover{{background:var(--card)}}
 .find .lbl{{font-size:14px}}
 .find .sub{{font-size:12px;color:var(--soft);margin-top:2px}}
+.find .when{{color:var(--dim);font-size:11.5px}}
 .tag{{display:inline-block;font-size:11px;padding:1px 7px;border-radius:4px;
   background:var(--card2);color:var(--soft);margin-right:6px}}
 </style></head><body>
@@ -1953,6 +1954,19 @@ const hhmm = s => {{
   s = Math.round(s || 0);
   const h = Math.floor(s/3600), m = Math.round((s%3600)/60);
   return h ? `${{h}} ч ${{m}} мин` : `${{m}} мин`;
+}};
+
+// Когда находку записали. Год обязателен: поиски идут годами, и «16.08»
+// без года не отличить от прошлогоднего. Никакого внешнего сервиса
+// времени -- toLocaleString встроен в браузер, работает офлайн и в любой
+// стране, ничего никуда не передаёт.
+const fmtStamp = iso => {{
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso).replace('T', ' ').slice(0, 16);
+  return d.toLocaleString('ru-RU', {{ day:'2-digit', month:'2-digit',
+                                      year:'numeric', hour:'2-digit',
+                                      minute:'2-digit' }});
 }};
 
 document.querySelectorAll('.tab').forEach(b => b.onclick = () => {{
@@ -2051,6 +2065,7 @@ function render() {{
           return `<a class="find" href="${{href}}">
             <div class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}</div>
             <div class="sub">${{esc(f.file)}}${{tc ? ' · ' + tc : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</div>
+            <div class="sub when">записано ${{fmtStamp(f.created_at)}}</div>
           </a>`;
         }}).join('')
       : `<div class="empty">Находок пока нет</div>`;
@@ -3173,6 +3188,8 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .obs-item {{ background:#1b1b1b; border:1px solid #2a2a2a; border-radius:8px; padding:10px 12px; margin-bottom:8px; }}
 .obs-head {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }}
 .obs-time {{ color:#8ecbff; font-weight:bold; cursor:pointer; font-size:14px; }}
+/* когда пометка СДЕЛАНА -- отдельно от таймкода в видео, иначе их путают */
+.obs-when {{ color:#777; font-size:11.5px; margin-left:auto; white-space:nowrap; }}
 .obs-author {{ font-size:11px; color:#888; }}
 .obs-label {{ font-weight:bold; margin-bottom:2px; }}
 .obs-note {{ font-size:13px; color:#ccc; white-space:pre-wrap; }}
@@ -3547,6 +3564,7 @@ async function loadObservations() {{
         <div class="obs-head">
           <span class="obs-time" onclick="jumpTo(${{o.timestamp_sec}})">▶ ${{fmtTime(o.timestamp_sec)}}</span>
           <span class="obs-author">${{o.viewer_name}}</span>
+          <span class="obs-when">${{fmtStamp(o.created_at)}}</span>
         </div>
         ${{o.label ? `<div class="obs-label">${{o.label}}</div>` : ''}}
         ${{o.note ? `<div class="obs-note">${{o.note}}</div>` : ''}}
@@ -3665,13 +3683,32 @@ async function loadComments() {{
   }} catch (e) {{}}
 }}
 
-function fmtCommentTime(iso) {{
+// Когда запись СДЕЛАНА. Не путать с fmtTime -- та показывает место в видео.
+//
+// Год обязателен: без него «16.08 07:19» не отличить от прошлогоднего, а
+// поиски идут годами и материал по ним хранится. Именно на этом и споткнулись.
+//
+// Никакого внешнего сервиса времени: toLocaleString -- встроенная функция
+// браузера, работает офлайн, в любой стране, ничего никуда не передаёт и
+// заблокировать её нельзя. Часы берутся с машины пользователя.
+//
+// Время в базе записано БЕЗ пояса -- это местное время операции. new Date()
+// разбирает такую строку как местное, поэтому цифра остаётся ровно той, что
+// записали: 07:06 в поле останется 07:06 и у зрителя из другого часового
+// пояса. Пересчитывать её было бы хуже -- «во сколько нашли» имеет смысл
+// именно по времени места работ.
+function fmtStamp(iso) {{
+  if (!iso) return '';
   try {{
     const d = new Date(iso);
+    if (isNaN(d)) return String(iso).replace('T', ' ').slice(0, 16);
     return d.toLocaleString('ru-RU', {{ day:'2-digit', month:'2-digit',
-                                        hour:'2-digit', minute:'2-digit' }});
+                                        year:'numeric', hour:'2-digit',
+                                        minute:'2-digit' }});
   }} catch (e) {{ return ''; }}
 }}
+
+function fmtCommentTime(iso) {{ return fmtStamp(iso); }}
 
 function renderComments(kind, refKey) {{
   const list = commentsMap[kind + '|' + refKey] || [];
