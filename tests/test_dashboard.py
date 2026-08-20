@@ -96,6 +96,12 @@ def test_dashboard_queries_only_metrics_the_platform_exports(dash, tmp_path):
     db = str(tmp_path / "t.db")
     sar_common.init_db(db)
     conn = sar_common.get_db_connection(db)
+    # Один запрос учитываем намеренно: метрики нагрузки появляются только
+    # после первого обслуженного запроса. Без этого проверка имён метрик
+    # запросов зависела бы от того, ходил ли кто-то в тестовый клиент в
+    # предыдущих файлах тестов -- при запуске этого файла в одиночку она
+    # падала, а в полном прогоне проходила случайно.
+    sar_health.record_request("healthz", "GET", 200, 0.01)
     facts = sar_health.collect(conn, ".")
     text = sar_health.render_prometheus(facts, sar_health.evaluate(facts))
     conn.close()

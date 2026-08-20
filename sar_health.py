@@ -120,6 +120,98 @@ def hardware():
         return dict(_HW_SAMPLE)
 
 
+# ---------------------------------------------------------------------------
+# Учёт HTTP-запросов
+#
+# До этого нагрузка на API не считалась вообще: ни счётчиков, ни журнала
+# доступа. Поэтому вопрос «сколько запросов было 15 августа» остался без
+# ответа -- данных просто нет, и восстановить их неоткуда.
+#
+# Счётчики живут в памяти процесса. Для waitress этого достаточно: он один
+# процесс на много потоков, все запросы проходят через эти же счётчики.
+# Перезапуск сервера обнуляет их -- поэтому Prometheus и нужен: он хранит
+# историю, а счётчик отдаёт только текущее значение с момента старта.
+#
+# Пути группируются по ПРАВИЛУ маршрута, а не по фактическому адресу:
+# иначе /report/<id>/ породит по метрике на каждый отчёт, и в Prometheus
+# окажутся десятки тысяч рядов вместо одного.
+# ---------------------------------------------------------------------------
+
+# Границы гистограммы в секундах. Подобраны под то, что уже измерено
+# нагрузочным тестом: медиана ответа единицы миллисекунд, тяжёлый
+# /api/tree -- сотни, а всё, что дольше секунды, человек ощущает как
+# ожидание (см. sar_loadtest.py).
+LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+
+_HTTP_LOCK = threading.Lock()
+_HTTP_COUNT = {}       # (endpoint, method, status) -> число
+_HTTP_BUCKETS = {}     # endpoint -> [счётчики по границам]
+_HTTP_SUM = {}         # endpoint -> суммарное время
+_HTTP_STARTED = time.time()
+
+
+def record_request(endpoint, method, status, seconds):
+    """Учесть один запрос. Вызывается из обработчика after_request."""
+    ep = endpoint or "unknown"
+    key = (ep, method, int(status))
+    with _HTTP_LOCK:
+        _HTTP_COUNT[key] = _HTTP_COUNT.get(key, 0) + 1
+        b = _HTTP_BUCKETS.setdefault(ep, [0] * (len(LATENCY_BUCKETS) + 1))
+        placed = False
+        for i, edge in enumerate(LATENCY_BUCKETS):
+            if seconds <= edge:
+                b[i] += 1
+                placed = True
+                break
+        if not placed:
+            b[-1] += 1
+        _HTTP_SUM[ep] = _HTTP_SUM.get(ep, 0.0) + seconds
+
+
+def http_snapshot():
+    with _HTTP_LOCK:
+        return (dict(_HTTP_COUNT), {k: list(v) for k, v in _HTTP_BUCKETS.items()},
+                dict(_HTTP_SUM), _HTTP_STARTED)
+
+
+def render_http_metrics():
+    """Метрики запросов в формате Prometheus.
+
+    Счётчик, а не мгновенный RPS: скорость считает сам Prometheus через
+    rate(). Считать её здесь значило бы усреднять по произвольному окну и
+    терять возможность выбрать его на графике.
+    """
+    counts, buckets, sums, started = http_snapshot()
+    if not counts:
+        return ""
+    out = ["# HELP sar_http_requests_total Запросов обработано",
+           "# TYPE sar_http_requests_total counter"]
+    for (ep, method, status), n in sorted(counts.items()):
+        out.append(f'sar_http_requests_total{{endpoint="{_esc(ep)}",'
+                    f'method="{_esc(method)}",status="{status}"}} {n}')
+
+    out += ["# HELP sar_http_request_duration_seconds Время ответа",
+            "# TYPE sar_http_request_duration_seconds histogram"]
+    for ep in sorted(buckets):
+        cum = 0
+        for i, edge in enumerate(LATENCY_BUCKETS):
+            cum += buckets[ep][i]
+            out.append(f'sar_http_request_duration_seconds_bucket'
+                        f'{{endpoint="{_esc(ep)}",le="{edge}"}} {cum}')
+        cum += buckets[ep][-1]
+        out.append(f'sar_http_request_duration_seconds_bucket'
+                    f'{{endpoint="{_esc(ep)}",le="+Inf"}} {cum}')
+        out.append(f'sar_http_request_duration_seconds_sum'
+                    f'{{endpoint="{_esc(ep)}"}} {sums.get(ep, 0.0):.4f}')
+        out.append(f'sar_http_request_duration_seconds_count'
+                    f'{{endpoint="{_esc(ep)}"}} {cum}')
+
+    out += ["# HELP sar_http_uptime_seconds Секунд с запуска сервера",
+            "# TYPE sar_http_uptime_seconds gauge",
+            f"sar_http_uptime_seconds {time.time() - started:.0f}"]
+    return "\n".join(out) + "\n"
+
+
 def _disk_free_gb(path):
     try:
         return shutil.disk_usage(path).free / 1e9
@@ -380,4 +472,4 @@ def render_prometheus(facts, checks):
     for name, (lvl, _) in checks.items():
         out.append(f'sar_check_level{{check="{_esc(name)}"}} {_ORDER.get(lvl, 0)}')
 
-    return "\n".join(out) + "\n"
+    return "\n".join(out) + "\n" + render_http_metrics()
