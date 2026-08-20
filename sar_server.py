@@ -138,6 +138,34 @@ def close_db(exception=None):
 
 
 @app.before_request
+def _metrics_start():
+    g._t0 = time.perf_counter()
+
+
+@app.after_request
+def _metrics_done(response):
+    """Учёт каждого запроса.
+
+    Группируем по ПРАВИЛУ маршрута (request.endpoint), а не по фактическому
+    адресу: иначе /report/<id>/ породит отдельную метрику на каждый отчёт, и
+    в Prometheus окажутся десятки тысяч рядов вместо одного -- это его
+    известным образом убивает.
+
+    Сам учёт не должен ронять ответ ни при каких обстоятельствах: метрика
+    полезна, но не настолько, чтобы из-за неё человек не увидел страницу.
+    """
+    try:
+        t0 = getattr(g, "_t0", None)
+        if t0 is not None:
+            sar_health.record_request(
+                request.endpoint, request.method,
+                response.status_code, time.perf_counter() - t0)
+    except Exception:                    # noqa: BLE001
+        pass
+    return response
+
+
+@app.before_request
 def require_login():
     # /healthz и /metrics открыты намеренно: их опрашивает внешний монитор,
     # у которого нет и не должно быть пароля от платформы. Отдают только
