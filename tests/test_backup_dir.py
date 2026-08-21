@@ -9,6 +9,7 @@
 неправду. Тревога о протухших копиях не погасла бы никогда, сколько копий
 ни делай, а настоящая пропажа копий на её фоне осталась бы незамеченной.
 """
+import io
 import os
 
 import sar_backup
@@ -64,3 +65,28 @@ def test_snapshot_leftovers_are_removed(tmp_path):
 
 def test_removing_a_missing_snapshot_is_not_an_error(tmp_path):
     sar_backup._remove_snapshot(str(tmp_path / "нет-такого.db"))
+
+
+def test_no_module_computes_the_path_on_its_own():
+    """Путь считался ТРИ раза в трёх файлах, и два из трёх были неверны.
+
+    Хуже всего был третий: sar_server.py передавал свой вариант явным
+    аргументом и перебивал общее значение, поэтому исправление в двух
+    других местах ничего не меняло. Пока путь можно собрать "где-то ещё",
+    он снова разъедется -- поэтому проверяем, что никто, кроме
+    sar_common, его не составляет.
+    """
+    import glob
+    culprits = []
+    for path in sorted(glob.glob("sar_*.py")):
+        if path == "sar_common.py":
+            continue
+        with io.open(path, encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if '"sar_backups"' in line or "'sar_backups'" in line:
+                    culprits.append("%s:%d" % (path, i))
+    assert not culprits, (
+        "папка копий составляется в обход sar_common.backups_dir(): %s"
+        % culprits)
