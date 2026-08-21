@@ -2497,6 +2497,25 @@ def _finding_preview_url_inner(conn, f):
     return None
 
 
+def _finding_label(f):
+    """Подпись находки человеческими словами.
+
+    У ручной пометки это её текст. У триажа в базе лежит служебный ключ
+    вроде "confirmed_person" -- показывать его человеку нельзя, для того и
+    существует PRIORITY_LABELS. Если у триажа была ещё и ручная подпись,
+    она добавляется: "точно человек" и "резко чёрное" вместе говорят
+    больше, чем по отдельности.
+    """
+    if f.get("label"):
+        return f["label"]
+    priority = f.get("priority")
+    if not priority:
+        return ""
+    name = sar_common.PRIORITY_LABELS.get(priority, priority)
+    obs_label = f.get("obs_label")
+    return f"{name} · {obs_label}" if obs_label else name
+
+
 @app.route("/api/operations/<int:op_id>/findings")
 def api_operation_findings(op_id):
     conn = get_db()
@@ -2509,11 +2528,17 @@ def api_operation_findings(op_id):
             "kind": f["kind"],
             "report_id": f["report_id"],
             "file": rel.split("/")[-1],
-            "label": f.get("label") or f.get("priority") or "",
-            "viewer": f.get("viewer_name") or f.get("author") or "",
-            "seconds": f.get("timestamp_sec"),
+            "label": _finding_label(f),
+            # у ручной пометки автор в viewer_name, у триажа -- в set_by
+            "viewer": (f.get("viewer_name") or f.get("author")
+                        or f.get("set_by") or ""),
+            # у триажа своего таймкода нет; для поставленного на ручную
+            # пометку он подтягивается из неё (см. operation_findings)
+            "seconds": f.get("timestamp_sec") or f.get("obs_seconds"),
             "lat": f.get("lat"), "lon": f.get("lon"),
-            "created_at": f.get("created_at") or f.get("updated_at"),
+            # время постановки: created_at у пометки, set_at у триажа
+            "created_at": (f.get("created_at") or f.get("set_at")
+                            or f.get("updated_at")),
             "preview": _finding_preview_url(conn, f),
         })
     return jsonify({"findings": out})

@@ -351,12 +351,33 @@ def operation_findings(conn, operation_id):
         d = dict(r)
         d["kind"] = "manual"
         out.append(d)
-    try:
+    # Столбец называется set_at, а не updated_at.
+    #
+    # Здесь стояло "ORDER BY p.updated_at" -- такого столбца в
+    # detection_priorities нет и никогда не было. Запрос падал ВСЕГДА, а
+    # обёртка try/except Exception: pass это молча съедала. В итоге ни одна
+    # из 47 отметок триажа никогда не показывалась во вкладке находок: люди
+    # ставили "точно человек" и "предположительно человек", а список находок
+    # делал вид, что таких отметок нет вовсе.
+    #
+    # Глухого перехвата тут больше нет. Отсутствие таблицы -- законная
+    # ситуация (база от старой версии), и она проверяется явно; а вот ошибка
+    # в самом запросе обязана быть видна, а не притворяться пустотой.
+    if _table_exists(conn, "detection_priorities"):
+        # Таймкод подтягивается для триажа, поставленного на РУЧНУЮ пометку:
+        # без него находка открывалась бы в начале видео, а не там, где её
+        # нашли -- то есть список находок снова был бы просто перечнем.
+        # У сцен модели таймкода в ключе нет, и для них он останется пустым.
         for r in conn.execute(
-                "SELECT p.*, rp.rel_path FROM detection_priorities p "
+                "SELECT p.*, rp.rel_path, o.timestamp_sec AS obs_seconds, "
+                "       o.label AS obs_label "
+                "FROM detection_priorities p "
                 "JOIN operation_materials m ON m.report_id=p.report_id "
                 "JOIN reports rp ON rp.report_id=p.report_id "
-                "WHERE m.operation_id=? ORDER BY p.updated_at DESC",
+                "LEFT JOIN manual_observations o "
+                "  ON p.kind='manual' AND o.report_id=p.report_id "
+                " AND o.id=CAST(p.ref_key AS INTEGER) "
+                "WHERE m.operation_id=? ORDER BY p.set_at DESC",
                 (operation_id,)):
             d = dict(r)
             # Своё поле kind у записи триажа ('manual' | 'ai_scene') говорит,
@@ -367,9 +388,13 @@ def operation_findings(conn, operation_id):
             d["target_kind"] = d.get("kind")
             d["kind"] = "triage"
             out.append(d)
-    except Exception:
-        pass
     return out
+
+
+def _table_exists(conn, name):
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone() is not None
 
 
 def unsorted_materials(conn):
