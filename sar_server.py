@@ -3117,10 +3117,16 @@ a {{ color:#8ecbff; }}
 .header-row {{ display:flex; justify-content:space-between; align-items:center; }}
 .online-indicator {{ display:flex; align-items:center; gap:6px; font-size:13px; color:#ccc; }}
 .online-dot {{ width:6px; height:6px; border-radius:50%; background:#2f9e44; flex-shrink:0; }}
+/* Крошки: путь назад в операцию материала. Раньше здесь стояла ссылка
+   "к списку файлов" -- в общую кучу всех материалов, мимо операции, из
+   которой человек пришёл. */
+.crumbs {{ font-size:13px; color:#888; margin:0 0 10px; }}
+.crumbs a {{ color:#6bb; text-decoration:none; }}
+.crumbs a:hover {{ text-decoration:underline; }}
 </style></head>
 <body>
 <div class="header-row">
-  <p><a href="/">&larr; к списку файлов</a></p>
+  <p class="crumbs">{crumbs}</p>
   <span class="online-indicator"><span class="online-dot"></span><span id="online-count">—</span> онлайн</span>
 </div>
 <h1>{name}</h1>
@@ -3270,10 +3276,16 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .viewport.dragging {{ cursor:grabbing; }}
 .stage {{ position:absolute; top:50%; left:50%; transform-origin:50% 50%; will-change:transform; }}
 .stage img {{ display:block; max-width:none; user-select:none; -webkit-user-drag:none; }}
+/* Крошки: путь назад в операцию материала. Раньше здесь стояла ссылка
+   "к списку файлов" -- в общую кучу всех материалов, мимо операции, из
+   которой человек пришёл. */
+.crumbs {{ font-size:13px; color:#888; margin:0 0 10px; }}
+.crumbs a {{ color:#6bb; text-decoration:none; }}
+.crumbs a:hover {{ text-decoration:underline; }}
 </style></head>
 <body>
-<p><a href="/">&larr; к списку файлов</a>{report_link}</p>
-<h1>Снимок — {name}</h1>
+<p class="crumbs">{crumbs}{report_link}</p>
+<h1>Снимок — {short_name}</h1>
 {banner}
 <div class="toolbar">
   <span class="zoom-controls">
@@ -3367,8 +3379,14 @@ def photo_viewer_page(report_id):
                   'смотреть уже сейчас, кандидаты появятся в отчёте позже.</div>')
         report_link = ""
 
-    return PHOTO_VIEWER_HTML.format(report_id=report_id, name=report["rel_path"],
-                                     banner=banner, report_link=report_link)
+    # Возврат -- в ОПЕРАЦИЮ материала, а не в общий список всех файлов.
+    # Раньше отсюда вела ссылка "к списку файлов" -- в кучу, мимо операции,
+    # из которой человек пришёл; на этом он и споткнулся.
+    rel = (report["rel_path"] or "").replace("\\", "/")
+    return PHOTO_VIEWER_HTML.format(
+        report_id=report_id, name=rel, short_name=rel.split("/")[-1],
+        crumbs=material_crumbs(get_db(), report),
+        banner=banner, report_link=report_link)
 
 
 @app.route("/api/report/<report_id>/coverage")
@@ -3806,8 +3824,32 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .video-col {{ flex:2; min-width:480px; }}
 .obs-col {{ flex:1; min-width:320px; }}
 
-.video-wrap {{ position:relative; width:100%; background:#000; border-radius:6px; overflow:hidden; }}
-.video-wrap video {{ width:100%; display:block; }}
+.video-wrap {{ position:relative; width:100%; background:#000; border-radius:6px;
+               overflow:hidden; }}
+/* Сцена -- то, что масштабируется. Видео и слой разметки внутри неё, поэтому
+   при зуме рамки едут вместе с картинкой, а не отстают от неё. */
+#stage {{ transform-origin:0 0; will-change:transform; }}
+#stage video {{ width:100%; display:block; }}
+
+/* В полном экране разворачивается ОБЁРТКА, а не <video>: иначе слой
+   разметки остаётся в обычном документе (см. комментарий в разметке).
+   Здесь же выравниваем видео по центру -- у экрана и кадра разные
+   пропорции, и без этого видео прилипало бы к верхнему краю. */
+.video-wrap:fullscreen {{ border-radius:0; display:flex; align-items:center;
+                          justify-content:center; }}
+.video-wrap:fullscreen #stage {{ width:100%; }}
+.video-wrap:fullscreen #stage video {{ max-height:100vh; object-fit:contain; }}
+
+/* Кнопки масштаба и полного экрана. Поверх видео, но выше нативных
+   элементов управления не лезут -- те снизу, эти сверху справа. */
+.vid-tools {{ position:absolute; top:8px; right:8px; display:flex; gap:5px;
+              z-index:3; }}
+.vid-tools button {{ min-width:30px; height:28px; padding:0 7px; cursor:pointer;
+  border-radius:6px; border:1px solid rgba(255,255,255,.22);
+  background:rgba(0,0,0,.55); color:#eee; font-family:inherit; font-size:13px;
+  line-height:1; }}
+.vid-tools button:hover {{ background:rgba(0,0,0,.85); border-color:#5fb8c7; }}
+#zoom-level {{ font-variant-numeric:tabular-nums; }}
 /* pointer-events:none по умолчанию -- иначе оверлей перехватывает клики по
    нативным элементам управления видео (play/пауза/перемотка/громкость),
    и ими становится невозможно пользоваться. Включаем перехват кликов
@@ -3992,9 +4034,23 @@ h1 {{ font-size:16px; margin:12px 0; }}
 
 <div class="layout">
   <div class="video-col">
-    <div class="video-wrap">
-      <video id="video" controls src="/report/{report_id}/video"></video>
-      <svg id="overlay"></svg>
+    <div class="video-wrap" id="video-wrap">
+      <!-- Видео и слой разметки лежат в ОДНОЙ сцене и масштабируются
+           вместе. Раньше <svg> был соседом <video>, и нативная кнопка
+           полного экрана разворачивала только видео: слой разметки
+           оставался в обычном документе, поэтому в полном экране рамки
+           пропадали, а рисовать было нечем. -->
+      <div id="stage">
+        <video id="video" controls controlsList="nofullscreen"
+               disablePictureInPicture src="/report/{report_id}/video"></video>
+        <svg id="overlay"></svg>
+      </div>
+      <div class="vid-tools">
+        <button type="button" id="zoom-out" title="Отдалить">&minus;</button>
+        <button type="button" id="zoom-level" title="Сбросить масштаб">100%</button>
+        <button type="button" id="zoom-in" title="Приблизить">+</button>
+        <button type="button" id="fs-toggle" title="Во весь экран">⛶</button>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -4052,12 +4108,156 @@ drawToggle.addEventListener('click', () => {{
   drawToggle.classList.toggle('active', drawMode);
 }});
 
+// Размер слоя разметки в ЕГО СОБСТВЕННЫХ координатах.
+//
+// getBoundingClientRect() возвращает размер НА ЭКРАНЕ, то есть уже
+// умноженный на масштаб сцены. А SVG рисует в своих непреобразованных
+// единицах. Если смешать одно с другим, при любом зуме рамки уезжают:
+// экранные координаты попадают в SVG как есть.
+// --- масштаб видео и полный экран ----------------------------------------
+//
+// Оба бага, о которых сообщил пользователь, растут из одного места:
+// нативная кнопка полного экрана разворачивает САМ <video>, а слой
+// разметки -- его сосед. В полном экране слой оставался в обычном
+// документе: рамки пропадали, рисовать было нечем. Зума же в плеере не
+// было вовсе -- ни в окне, ни в полном экране.
+//
+// Поэтому: видео и слой лежат в одной сцене (#stage), масштабируется
+// сцена целиком, а в полный экран уходит ОБЁРТКА, внутри которой оба.
+const videoWrap = document.getElementById('video-wrap');
+const stage = document.getElementById('stage');
+const zoomLevel = document.getElementById('zoom-level');
+let vz = {{ scale: 1, x: 0, y: 0, drag: null, pinch: 0 }};
+
+function applyStage() {{
+  // Не даём утащить кадр за края: увеличенное видео легко "потерять" и
+  // смотреть в чёрное поле, не понимая, куда всё делось.
+  const w = videoWrap.clientWidth, h = stage.clientHeight;
+  const maxX = 0, minX = w - w * vz.scale;
+  const maxY = 0, minY = h - h * vz.scale;
+  vz.x = Math.min(maxX, Math.max(minX, vz.x));
+  vz.y = Math.min(maxY, Math.max(minY, vz.y));
+  if (vz.scale === 1) {{ vz.x = 0; vz.y = 0; }}
+  stage.style.transform =
+    `translate(${{vz.x}}px, ${{vz.y}}px) scale(${{vz.scale}})`;
+  zoomLevel.textContent = Math.round(vz.scale * 100) + '%';
+  // Тянуть за кадр можно только когда есть что тянуть и когда мы не
+  // рисуем: в режиме разметки перетаскивание -- это рисование рамки.
+  videoWrap.style.cursor =
+    (vz.scale > 1 && !drawMode) ? (vz.drag ? 'grabbing' : 'grab') : '';
+  renderVisibleObservations();
+}}
+
+function zoomAt(factor, clientX, clientY) {{
+  const before = vz.scale;
+  const next = Math.min(8, Math.max(1, before * factor));
+  if (next === before) return;
+  const r = videoWrap.getBoundingClientRect();
+  // Точка под курсором остаётся на месте -- иначе при увеличении уезжает
+  // ровно то, что человек хотел рассмотреть.
+  const cx = (clientX - r.left - vz.x) / before;
+  const cy = (clientY - r.top - vz.y) / before;
+  vz.scale = next;
+  vz.x = clientX - r.left - cx * next;
+  vz.y = clientY - r.top - cy * next;
+  applyStage();
+}}
+
+function zoomCentre(factor) {{
+  const r = videoWrap.getBoundingClientRect();
+  zoomAt(factor, r.left + r.width / 2, r.top + r.height / 2);
+}}
+
+document.getElementById('zoom-in').addEventListener('click', () => zoomCentre(1.4));
+document.getElementById('zoom-out').addEventListener('click', () => zoomCentre(1 / 1.4));
+zoomLevel.addEventListener('click', () => {{
+  vz.scale = 1; vz.x = 0; vz.y = 0; applyStage();
+}});
+
+videoWrap.addEventListener('wheel', e => {{
+  e.preventDefault();
+  zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX, e.clientY);
+}}, {{ passive: false }});
+
+// Перетаскивание кадра. Слушаем на обёртке, а рисование -- на слое
+// разметки, поэтому в режиме разметки сюда просто не доходит: слой
+// перехватывает событие первым.
+videoWrap.addEventListener('mousedown', e => {{
+  if (e.button !== 0 || vz.scale <= 1 || drawMode) return;
+  if (e.target.closest('.vid-tools')) return;
+  vz.drag = {{ x: e.clientX, y: e.clientY }};
+  applyStage();
+}});
+document.addEventListener('mousemove', e => {{
+  if (!vz.drag) return;
+  vz.x += e.clientX - vz.drag.x;
+  vz.y += e.clientY - vz.drag.y;
+  vz.drag = {{ x: e.clientX, y: e.clientY }};
+  applyStage();
+}});
+document.addEventListener('mouseup', () => {{
+  if (!vz.drag) return;
+  vz.drag = null;
+  applyStage();
+}});
+
+// Щипок на тач-экране.
+videoWrap.addEventListener('touchmove', e => {{
+  if (e.touches.length !== 2) return;
+  e.preventDefault();
+  const dx = e.touches[0].clientX - e.touches[1].clientX;
+  const dy = e.touches[0].clientY - e.touches[1].clientY;
+  const dist = Math.hypot(dx, dy);
+  if (vz.pinch) zoomAt(dist / vz.pinch,
+                        (e.touches[0].clientX + e.touches[1].clientX) / 2,
+                        (e.touches[0].clientY + e.touches[1].clientY) / 2);
+  vz.pinch = dist;
+}}, {{ passive: false }});
+videoWrap.addEventListener('touchend', () => {{ vz.pinch = 0; }});
+
+// --- полный экран ---
+function toggleFullscreen() {{
+  if (document.fullscreenElement) {{
+    document.exitFullscreen();
+  }} else if (videoWrap.requestFullscreen) {{
+    videoWrap.requestFullscreen().catch(err => {{
+      console.warn('полный экран не открылся', err);
+    }});
+  }}
+}}
+document.getElementById('fs-toggle').addEventListener('click', toggleFullscreen);
+
+document.addEventListener('fullscreenchange', () => {{
+  // Подстраховка: controlsList="nofullscreen" понимают не все браузеры.
+  // Если <video> всё-таки ушёл в полный экран сам, слой разметки останется
+  // снаружи -- разворачиваем вместо него обёртку.
+  if (document.fullscreenElement === video) {{
+    document.exitFullscreen().then(() => videoWrap.requestFullscreen())
+      .catch(() => {{}});
+    return;
+  }}
+  // Размер сцены сменился -- пересчитываем рамки, иначе они останутся
+  // нарисованными по старому размеру кадра.
+  vz.scale = 1; vz.x = 0; vz.y = 0;
+  applyStage();
+}});
+
+function overlaySize() {{
+  return {{ w: overlay.clientWidth, h: overlay.clientHeight }};
+}}
+
 function overlayPoint(evt) {{
   const rect = overlay.getBoundingClientRect();
+  const size = overlaySize();
+  // фактический масштаб берём из отношения экранного размера к
+  // собственному -- так он верен и при зуме, и в полном экране, и при
+  // любом будущем преобразовании сцены
+  const kx = rect.width ? size.w / rect.width : 1;
+  const ky = rect.height ? size.h / rect.height : 1;
   return {{
-    x: Math.max(0, Math.min(rect.width, evt.clientX - rect.left)),
-    y: Math.max(0, Math.min(rect.height, evt.clientY - rect.top)),
-    w: rect.width, h: rect.height,
+    x: Math.max(0, Math.min(size.w, (evt.clientX - rect.left) * kx)),
+    y: Math.max(0, Math.min(size.h, (evt.clientY - rect.top) * ky)),
+    w: size.w, h: size.h,
   }};
 }}
 
@@ -4157,7 +4357,8 @@ async function loadAiDetections() {{
 function renderVisibleObservations() {{
   overlay.querySelectorAll('rect.obs-box, text.obs-label, rect.ai-box, text.ai-label').forEach(el => el.remove());
   const t = video.currentTime;
-  const rect = overlay.getBoundingClientRect();
+  // собственные координаты слоя, а не экранные -- см. overlaySize()
+  const rect = overlaySize();
 
   // ручные наблюдения -- bbox уже нормализован (0..1), рисуем как есть
   for (const obs of observations) {{
@@ -4795,8 +4996,10 @@ def report_page(report_id):
         if os.path.exists(report_html_path):
             return send_from_directory(report["out_dir"], "report.html")
         return "Отчёт помечен готовым, но файл report.html не найден", 500
+    rel = (report["rel_path"] or "").replace("\\", "/")
     return PROCESSING_PAGE_HTML.format(
-        name=report["rel_path"], status=report["status"],
+        name=rel.split("/")[-1], status=report["status"],
+        crumbs=material_crumbs(get_db(), report),
         progress=round(report["progress_pct"] or 0), report_id=report_id)
 
 
