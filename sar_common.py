@@ -359,6 +359,12 @@ def operation_findings(conn, operation_id):
                 "WHERE m.operation_id=? ORDER BY p.updated_at DESC",
                 (operation_id,)):
             d = dict(r)
+            # Своё поле kind у записи триажа ('manual' | 'ai_scene') говорит,
+            # НА ЧТО статус поставлен, и его нельзя просто затереть словом
+            # "triage": без него потом не понять, откуда брать картинку --
+            # у ручной пометки это вырезанный кадр, у сцены модели готовый
+            # кроп из отчёта.
+            d["target_kind"] = d.get("kind")
             d["kind"] = "triage"
             out.append(d)
     except Exception:
@@ -995,6 +1001,23 @@ def get_thumbnail_path(data_dir, filename):
     safe_name = re.sub(r"[^a-zA-Zа-яА-Я0-9_-]+", "_", stem)[:80] or "video"
     digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:8]
     return os.path.join(thumbnails_dir, f"{safe_name}__{digest}.jpg")
+
+
+def finding_preview_path(data_dir, observation_id):
+    """Кадр находки с нарисованной рамкой.
+
+    У ручной пометки НЕТ готовой картинки: человек обвёл область прямо на
+    проигрываемом видео, и на диске остались только таймкод и координаты
+    рамки. Поэтому кадр приходится вырезать отдельно -- этим занимается
+    воркер, потому что это обработка видео, а сервер файлы только отдаёт.
+
+    Ключ -- id наблюдения: он уникален сам по себе, и хэш от пути здесь не
+    нужен (в отличие от превью материала, где совпадающие имена файлов в
+    разных папках -- обычное дело).
+    """
+    previews_dir = os.path.join(data_dir, "finding_previews")
+    os.makedirs(previews_dir, exist_ok=True)
+    return os.path.join(previews_dir, f"obs_{int(observation_id)}.jpg")
 
 
 # ---------------------------------------------------------------------------
