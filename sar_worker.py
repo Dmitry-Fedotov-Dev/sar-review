@@ -137,6 +137,106 @@ def _write_thumbnail(cv2, frame, thumb_path, max_width):
         return False
 
 
+# --- превью находок --------------------------------------------------------
+#
+# У ручной пометки нет готовой картинки: человек обвёл область прямо на
+# проигрываемом видео, и на диске остались только таймкод и координаты
+# рамки. Чтобы находку было видно в списке, кадр надо вырезать из видео и
+# нарисовать на нём рамку.
+#
+# Делает это ВОРКЕР, а не сервер. Открыть видео и перемотать к нужной
+# секунде -- обработка, а sar_server.py по устройству проекта только читает
+# готовые файлы. Кроме того, мы только что вложились в скорость списка, и
+# класть в веб-слой распаковку кадров означало бы всё это обнулить.
+#
+# За один проход делаем не больше нескольких штук: цикл наблюдения не
+# должен вставать из-за того, что кто-то за раз наставил полсотни пометок.
+FINDING_PREVIEWS_PER_PASS = 5
+FINDING_PREVIEW_WIDTH = 960
+
+
+def _draw_box(cv2, frame, bbox):
+    """Рамка поверх кадра. bbox нормализован 0..1 от размера кадра -- так он
+    и хранится в базе, чтобы пережить смену разрешения видео."""
+    h, w = frame.shape[:2]
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return frame
+    x1, x2 = sorted((int(x1 * w), int(x2 * w)))
+    y1, y2 = sorted((int(y1 * h), int(y2 * h)))
+    # Толщина от размера кадра: на 4K рамка в 2 пикселя не видна вовсе.
+    thick = max(2, int(round(min(w, h) / 300)))
+    # Две рамки, тёмная под светлой: одноцветная теряется и на снегу, и на
+    # тёмных камнях -- а находки бывают и там, и там.
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), thick + 2)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 220, 255), thick)
+    return frame
+
+
+def _generate_finding_preview(abs_path, seconds, bbox, out_path):
+    try:
+        import cv2
+    except ImportError:
+        return False
+    cap = cv2.VideoCapture(abs_path)
+    try:
+        # Перемотка по миллисекундам, а не по номеру кадра: частота кадров у
+        # разных бортов разная, а таймкод пометки хранится в секундах.
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(seconds)) * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            # перемотка не удалась (битый индекс) -- берём хотя бы первый кадр
+            cap.set(cv2.CAP_PROP_POS_MSEC, 0)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                return False
+        if bbox:
+            frame = _draw_box(cv2, frame, bbox)
+        return _write_thumbnail(cv2, frame, out_path, FINDING_PREVIEW_WIDTH)
+    except Exception as e:
+        print(f"[находки] не удалось вырезать кадр {abs_path} @{seconds}: {e}")
+        return False
+    finally:
+        cap.release()
+
+
+def ensure_finding_previews(conn):
+    """Догенерировать недостающие превью ручных пометок."""
+    try:
+        rows = conn.execute(
+            "SELECT o.id, o.timestamp_sec, o.bbox, r.abs_path, r.kind "
+            "FROM manual_observations o "
+            "JOIN reports r ON r.report_id = o.report_id "
+            "ORDER BY o.id DESC").fetchall()
+    except Exception as e:
+        print(f"[находки] не удалось прочитать пометки: {e}")
+        return 0
+
+    made = 0
+    for row in rows:
+        if made >= FINDING_PREVIEWS_PER_PASS:
+            break
+        out_path = sar_common.finding_preview_path(DATA_DIR, row["id"])
+        if os.path.exists(out_path):
+            continue
+        abs_path = row["abs_path"]
+        if not abs_path or not os.path.exists(abs_path):
+            continue
+        try:
+            bbox = json.loads(row["bbox"]) if row["bbox"] else None
+        except (ValueError, TypeError):
+            bbox = None
+        seconds = row["timestamp_sec"] or 0
+        if row["kind"] == "photo":
+            # у фото таймкода нет -- кадр это сам снимок
+            seconds = 0
+        if _generate_finding_preview(abs_path, seconds, bbox, out_path):
+            made += 1
+            print(f"[находки] превью пометки #{row['id']} готово")
+    return made
+
+
 def _ensure_thumbnail(name, abs_path, kind="video"):
     """Проверка дешёвая (пара os.path вызовов) -- вызывается на каждом
     скане для каждого файла, реальная генерация (cv2) происходит только
@@ -248,6 +348,14 @@ def watcher_loop():
                                       row["duration_sec"] if row is not None else None)
         except Exception as e:
             print(f"[watcher] ошибка сканирования: {e}")
+
+        # Догенерация превью находок -- отдельно от сканирования папки и в
+        # своём try: вырезание кадра из видео может упасть на битом файле, и
+        # это не повод ронять весь проход наблюдения.
+        try:
+            ensure_finding_previews(get_db())
+        except Exception as e:
+            print(f"[находки] проход превью не удался: {e}")
 
         # Отметка "жив" -- ставится ПОСЛЕ обработки ошибки, а не вместо неё:
         # воркер, у которого падает сканирование, всё равно живой процесс,

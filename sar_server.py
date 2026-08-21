@@ -2002,14 +2002,54 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .empty{{color:var(--soft);padding:34px 14px;text-align:center;
   border:1px dashed var(--line);border-radius:9px}}
 .note{{font-size:12px;color:var(--dim);margin:10px 2px}}
-.find{{display:block;padding:11px;border-bottom:1px solid var(--line);
-  text-decoration:none;color:inherit}}
+.find{{display:flex;align-items:center;gap:13px;padding:8px 11px;
+  border-bottom:1px solid var(--line);text-decoration:none;color:inherit}}
 .find:hover{{background:var(--card)}}
+.find-body{{display:flex;flex-direction:column;min-width:0;flex:1}}
 .find .lbl{{font-size:14px}}
-.find .sub{{font-size:12px;color:var(--soft);margin-top:2px}}
+.find .sub{{font-size:12px;color:var(--soft);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .find .when{{color:var(--dim);font-size:11.5px}}
 .tag{{display:inline-block;font-size:11px;padding:1px 7px;border-radius:4px;
   background:var(--card2);color:var(--soft);margin-right:6px}}
+
+/* Кадр находки. Тот же размер, что у превью материалов -- список находок и
+   список материалов стоят на одной странице, и разнобой в размере читался
+   бы как разная важность. */
+.shot{{width:var(--thumb);height:var(--thumb);flex-shrink:0;border-radius:7px;
+  overflow:hidden;background:var(--card2);display:block;position:relative}}
+.shot img{{width:100%;height:100%;object-fit:cover;display:block}}
+/* Пока кадра нет (воркер до пометки не дошёл) -- ровный прямоугольник, а
+   не пустая дыра и не значок битой картинки. */
+.shot.noshot::after{{content:'▭';position:absolute;inset:0;display:flex;
+  align-items:center;justify-content:center;color:var(--dim);
+  font-size:calc(var(--thumb)*.4)}}
+.find:hover .shot{{outline:1px solid var(--accent);outline-offset:-1px}}
+
+/* Окно предпросмотра. Появляется по наведению на кадр, закрывается
+   крестиком или когда курсор ушёл. Зум колесом и щипком. */
+.peek{{position:fixed;z-index:60;background:var(--bg);border:1px solid var(--line);
+  border-radius:10px;box-shadow:0 18px 50px rgba(0,0,0,.55);overflow:hidden;
+  width:20vw;min-width:280px;display:none}}
+.peek.on{{display:block}}
+.peek-view{{position:relative;overflow:hidden;background:#000;
+  touch-action:none;cursor:zoom-in}}
+.peek-view img{{display:block;width:100%;transform-origin:0 0;
+  will-change:transform}}
+.peek-cap{{font-size:12px;color:var(--soft);padding:7px 10px;
+  border-top:1px solid var(--line);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}}
+.peek-x{{position:absolute;top:6px;right:6px;z-index:2;width:26px;height:26px;
+  border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;
+  font-size:15px;line-height:1;cursor:pointer}}
+.peek-x:hover{{background:rgba(0,0,0,.85)}}
+.peek-hint{{position:absolute;left:6px;bottom:6px;z-index:2;font-size:10.5px;
+  color:#e8eeec;background:rgba(0,0,0,.5);padding:2px 6px;border-radius:4px}}
+@media (max-width:760px){{
+  /* На телефоне окно во всю ширину: 20% экрана там -- это ничто. */
+  .peek{{width:100vw;min-width:0;left:0 !important;right:0;
+    top:auto !important;bottom:0;border-radius:12px 12px 0 0}}
+}}
 </style></head><body>
 <div class="wrap">
   <div class="top">
@@ -2161,10 +2201,21 @@ function render() {{
             ? String(Math.floor(f.seconds / 60)).padStart(2,'0') + ':' +
               String(Math.floor(f.seconds % 60)).padStart(2,'0')
             : '';
+          // Кадр находки. Имена файлов с дрона неразличимы, подпись вроде
+          // «резко чёрное» тоже мало что говорит -- узнаётся именно кадр.
+          const cap = esc(f.label || '') + (tc ? ' · ' + tc : '');
+          const shot = f.preview
+            ? `<span class="shot" onmouseenter="showPeek(this,'${{f.preview}}','${{cap}}')">
+                 <img src="${{f.preview}}" alt="" loading="lazy" decoding="async"
+                      onerror="this.parentNode.classList.add('noshot');this.remove()"></span>`
+            : `<span class="shot noshot"></span>`;
           return `<a class="find" href="${{href}}">
-            <div class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}</div>
-            <div class="sub">${{esc(f.file)}}${{tc ? ' · ' + tc : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</div>
-            <div class="sub when">записано ${{fmtStamp(f.created_at)}}</div>
+            ${{shot}}
+            <span class="find-body">
+              <span class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}</span>
+              <span class="sub">${{esc(f.file)}}${{tc ? ' · ' + tc : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</span>
+              <span class="sub when">записано ${{fmtStamp(f.created_at)}}</span>
+            </span>
           </a>`;
         }}).join('')
       : `<div class="empty">Находок пока нет</div>`;
@@ -2177,6 +2228,109 @@ function render() {{
       Соберётся из сводки выше и находок, размеченных людьми.</div>`;
   }}
 }}
+
+// --- окно предпросмотра находки ------------------------------------------
+//
+// Кадр в строке маленький: он нужен, чтобы отличить одну находку от другой
+// в списке. Чтобы РАЗГЛЯДЕТЬ находку, нужен масштаб -- ради этого окно и
+// существует. Открывается по наведению, а не по клику, потому что клик по
+// строке уже занят переходом в плеер на таймкод находки.
+let peekEl = null, peekScale = 1, peekX = 0, peekY = 0, peekPinch = 0;
+
+function peek() {{
+  if (peekEl) return peekEl;
+  peekEl = document.createElement('div');
+  peekEl.className = 'peek';
+  peekEl.innerHTML =
+    `<div class="peek-view">
+       <button class="peek-x" title="Закрыть">×</button>
+       <span class="peek-hint">колесо или щипок — масштаб</span>
+       <img alt="">
+     </div>
+     <div class="peek-cap"></div>`;
+  document.body.appendChild(peekEl);
+
+  peekEl.querySelector('.peek-x').onclick = hidePeek;
+  // Уводя курсор с окна, человек его и закрывает -- отдельного действия
+  // для этого не нужно.
+  peekEl.addEventListener('mouseleave', hidePeek);
+
+  const view = peekEl.querySelector('.peek-view');
+  view.addEventListener('wheel', e => {{
+    e.preventDefault();
+    zoomPeek(e.deltaY < 0 ? 1.25 : 1 / 1.25, e);
+  }}, {{ passive: false }});
+
+  // Щипок на тач-экране. Дистанция между пальцами -> масштаб.
+  view.addEventListener('touchmove', e => {{
+    if (e.touches.length !== 2) return;
+    e.preventDefault();
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    const dist = Math.hypot(dx, dy);
+    if (peekPinch) zoomPeek(dist / peekPinch, {{
+      clientX: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+      clientY: (e.touches[0].clientY + e.touches[1].clientY) / 2,
+    }});
+    peekPinch = dist;
+  }}, {{ passive: false }});
+  view.addEventListener('touchend', () => {{ peekPinch = 0; }});
+  return peekEl;
+}}
+
+function zoomPeek(factor, at) {{
+  const view = peekEl.querySelector('.peek-view');
+  const img = peekEl.querySelector('img');
+  const before = peekScale;
+  peekScale = Math.min(8, Math.max(1, peekScale * factor));
+  if (peekScale === before) return;
+
+  // Точка под курсором должна остаться на месте -- иначе при увеличении
+  // уезжает как раз то, что человек хотел рассмотреть.
+  const r = view.getBoundingClientRect();
+  const cx = (at.clientX - r.left - peekX) / before;
+  const cy = (at.clientY - r.top - peekY) / before;
+  peekX = at.clientX - r.left - cx * peekScale;
+  peekY = at.clientY - r.top - cy * peekScale;
+
+  // Не даём утащить картинку за края окна.
+  const w = r.width, h = view.clientHeight;
+  peekX = Math.min(0, Math.max(peekX, w - w * peekScale));
+  peekY = Math.min(0, Math.max(peekY, h - h * peekScale));
+  img.style.transform = `translate(${{peekX}}px, ${{peekY}}px) scale(${{peekScale}})`;
+  view.style.cursor = peekScale > 1 ? 'zoom-out' : 'zoom-in';
+}}
+
+function showPeek(anchor, src, caption) {{
+  const el = peek();
+  peekScale = 1; peekX = 0; peekY = 0;
+  const img = el.querySelector('img');
+  img.style.transform = '';
+  img.src = src;
+  el.querySelector('.peek-cap').textContent = caption || '';
+  el.classList.add('on');
+
+  // Ставим рядом со строкой, но не за краем экрана.
+  const r = anchor.getBoundingClientRect();
+  const w = el.offsetWidth;
+  let left = r.right + 12;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, r.left - w - 12);
+  el.style.left = left + 'px';
+  const top = Math.min(Math.max(8, r.top - 30),
+                       window.innerHeight - el.offsetHeight - 8);
+  el.style.top = Math.max(8, top) + 'px';
+}}
+
+function hidePeek() {{
+  if (peekEl) peekEl.classList.remove('on');
+}}
+
+// Прокрутка списка уводит строку из-под окна -- закрываем, иначе оно
+// остаётся висеть над другой находкой и вводит в заблуждение.
+window.addEventListener('scroll', hidePeek, {{ passive: true }});
+document.addEventListener('keydown', e => {{
+  if (e.key === 'Escape') hidePeek();
+}});
 
 async function loadFindings() {{
   const r = await fetch(`/api/operations/${{OP}}/findings`);
@@ -2277,6 +2431,72 @@ def api_operation_browse(op_id):
     })
 
 
+@app.route("/api/finding/<int:observation_id>/preview")
+def api_finding_preview(observation_id):
+    """Кадр ручной пометки с рамкой. Сервер только отдаёт готовый файл --
+    вырезает его воркер (см. ensure_finding_previews в sar_worker.py), как
+    и все прочие картинки в проекте."""
+    path = sar_common.finding_preview_path(DATA_DIR, observation_id)
+    if not os.path.exists(path):
+        # воркер ещё не дошёл до этой пометки -- не ошибка
+        return "", 404
+    return send_file(path, mimetype="image/jpeg")
+
+
+def _finding_preview_url(conn, f):
+    """Адрес картинки находки, если она есть.
+
+    Два источника, и оба уже существуют на диске:
+      * ручная пометка -- кадр, вырезанный воркером;
+      * триаж сцены модели -- готовый кроп из отчёта, его и показываем,
+        генерировать ничего не нужно.
+
+    Никогда не поднимает исключение. Картинка -- украшение строки, а список
+    находок -- рабочий инструмент: одна битая запись не должна уносить весь
+    список, как это уже было с отчётом без out_dir, который клал главную
+    страницу целиком.
+    """
+    try:
+        return _finding_preview_url_inner(conn, f)
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _finding_preview_url_inner(conn, f):
+    if f["kind"] == "manual":
+        obs_id = f.get("id")
+    elif f.get("target_kind") == "manual":
+        # триаж, поставленный на ручную пометку -- картинка у них общая
+        obs_id = f.get("ref_key")
+    else:
+        obs_id = None
+
+    if obs_id is not None:
+        try:
+            obs_id = int(obs_id)
+        except (TypeError, ValueError):
+            return None
+        if os.path.exists(sar_common.finding_preview_path(DATA_DIR, obs_id)):
+            return f"/api/finding/{obs_id}/preview"
+        return None
+
+    # Триаж сцены модели: ищем кроп по тому же ref_key, что стоит в базе.
+    ref = f.get("ref_key")
+    if not ref:
+        return None
+    report = get_report_row(f["report_id"])
+    if report is None:
+        return None
+    for scene in _get_ai_scenes_for_report(report):
+        if scene.get("ref_key") != ref:
+            continue
+        crop = scene.get("image_path") or scene.get("full_image_path")
+        if not crop:
+            return None
+        return f"/report/{f['report_id']}/{str(crop).replace(chr(92), '/')}"
+    return None
+
+
 @app.route("/api/operations/<int:op_id>/findings")
 def api_operation_findings(op_id):
     conn = get_db()
@@ -2294,6 +2514,7 @@ def api_operation_findings(op_id):
             "seconds": f.get("timestamp_sec"),
             "lat": f.get("lat"), "lon": f.get("lon"),
             "created_at": f.get("created_at") or f.get("updated_at"),
+            "preview": _finding_preview_url(conn, f),
         })
     return jsonify({"findings": out})
 
@@ -3446,7 +3667,10 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .btn-cancel {{ background:#444; color:#eee; }}
 
 .obs-item {{ background:#1b1b1b; border:1px solid #2a2a2a; border-radius:8px; padding:10px 12px; margin-bottom:8px; }}
-.obs-head {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }}
+/* Слева -- таймкод и автор, справа -- дата и удаление. space-between на
+   четырёх элементах разносил их по всей ширине, и дата зависала посередине. */
+.obs-head {{ display:flex; align-items:center; gap:10px; margin-bottom:4px; }}
+.obs-head .obs-when {{ margin-left:auto; }}
 .obs-time {{ color:#8ecbff; font-weight:bold; cursor:pointer; font-size:14px; }}
 /* когда пометка СДЕЛАНА -- отдельно от таймкода в видео, иначе их путают */
 .obs-when {{ color:#777; font-size:11.5px; margin-left:auto; white-space:nowrap; }}
@@ -3460,6 +3684,16 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .raw-telemetry summary:hover {{ color:#b3d9ff; }}
 .raw-telemetry pre {{ background:#0d0d0d; border:1px solid #2a2a2a; border-radius:5px; padding:8px 10px;
                        margin:6px 0; font-size:11px; color:#9fef9f; white-space:pre-wrap; word-break:break-word; }}
+/* Удаление наблюдения -- в его собственной шапке, рядом с датой.
+   Раньше кнопка стояла ПОСЛЕ блока обсуждения, сразу под полем ввода
+   комментария, и читалась как "удалить комментарий" -- о чём и сообщил
+   пользователь. Место кнопки и есть её подпись: рядом с автором и датой
+   наблюдения понятно, что удаляется наблюдение. */
+.obs-del {{ background:none; border:none; color:#6f7d7a;
+  cursor:pointer; font-size:13px; line-height:1; padding:0 2px;
+  opacity:0; transition:opacity .12s; }}
+.obs-item:hover .obs-del, .obs-del:focus {{ opacity:1; }}
+.obs-del:hover {{ color:#e0776a; }}
 .obs-actions {{ margin-top:6px; display:flex; gap:8px; }}
 .obs-actions button {{ font-size:11px; padding:3px 8px; border-radius:5px; border:1px solid #444;
                         background:#252525; color:#ccc; cursor:pointer; }}
@@ -3867,6 +4101,8 @@ async function loadObservations() {{
           <span class="obs-time" onclick="jumpTo(${{o.timestamp_sec}})">▶ ${{fmtTime(o.timestamp_sec)}}</span>
           <span class="obs-author">${{o.viewer_name}}</span>
           <span class="obs-when">${{fmtStamp(o.created_at)}}</span>
+          <button class="obs-del" onclick="deleteObservation(${{o.id}})"
+            title="Удалить наблюдение целиком">🗑</button>
         </div>
         ${{o.label ? `<div class="obs-label">${{o.label}}</div>` : ''}}
         ${{o.note ? `<div class="obs-note">${{o.note}}</div>` : ''}}
@@ -3875,9 +4111,6 @@ async function loadObservations() {{
         ${{renderRawTelemetryDropdown(o.raw_telemetry)}}
         ${{renderPriorityControl('manual', o.id)}}
         ${{renderComments('manual', o.id)}}
-        <div class="obs-actions">
-          <button onclick="deleteObservation(${{o.id}})">🗑 удалить</button>
-        </div>
       </div>`;
     }}).join(''));
   }}
@@ -4176,7 +4409,10 @@ async function setPriority(kind, refKey, priority) {{
 }})();
 
 async function deleteObservation(id) {{
-  if (!confirm('Удалить эту отметку?')) return;
+  // Явно про наблюдение: кнопка стояла под формой комментария и её путали
+  // с удалением сообщения, поэтому и в вопросе теперь сказано, что именно
+  // исчезнет.
+  if (!confirm('Удалить это наблюдение? Оно исчезнет у всех.')) return;
   await fetch(`/api/report/${{reportId}}/observations/${{id}}`, {{ method: 'DELETE' }});
   loadObservations();
 }}
