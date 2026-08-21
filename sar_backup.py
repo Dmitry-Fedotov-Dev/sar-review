@@ -22,7 +22,7 @@
 "кому угодно". Скрипт печатает это предупреждение каждый раз намеренно.
 
 Запуск:
-    python sar_backup.py                      # в sar_backups/ рядом с проектом
+    python sar_backup.py                      # в sar_backups/ внутри проекта
     python sar_backup.py --out D:\\backups     # в свою папку
     python sar_backup.py --keep 14            # хранить 14 последних
 """
@@ -117,6 +117,21 @@ def prune_old(out_dir, keep):
     return removed
 
 
+def _remove_snapshot(tmp_db):
+    """Убрать временный снимок ЦЕЛИКОМ.
+
+    SQLite кладёт рядом с базой -wal и -shm; удаление одного .db оставляло
+    их в папке копий навсегда. Ничего не ломало, но папка с резервными
+    копиями -- последнее место, где хочется гадать, что за файлы лежат
+    рядом и не часть ли они копии.
+    """
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.remove(tmp_db + suffix)
+        except OSError:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(description="Резервная копия базы SAR Review")
     ap.add_argument("--root", default=".")
@@ -136,7 +151,10 @@ def main():
         print(f"ОШИБКА: база не найдена: {db_path}")
         return 1
 
-    out_dir = args.out or os.path.join(root, "sar_backups")
+    # Та же папка, что проверяет мониторинг (sar_common.backups_dir).
+    # Считать её здесь отдельно нельзя: именно так скрипт и проверка
+    # разъехались, и тревога о протухших копиях горела при свежих копиях.
+    out_dir = args.out or sar_common.backups_dir()
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tmp_db = os.path.join(out_dir, f"_snapshot_{stamp}.db")
@@ -154,7 +172,7 @@ def main():
         print("\nКОПИЯ НЕ ПРОШЛА ПРОВЕРКУ:")
         for p in problems:
             print("   " + p)
-        os.remove(tmp_db)
+        _remove_snapshot(tmp_db)
         return 2
     print("\nпроверка: целостность ok, число строк совпадает с оригиналом")
 
@@ -166,7 +184,7 @@ def main():
         z.writestr("ВОССТАНОВЛЕНИЕ.txt", RESTORE_NOTE.format(
             stamp=stamp,
             counts="\n".join(f"  {t}: {n}" for t, n in got.items())))
-    os.remove(tmp_db)
+    _remove_snapshot(tmp_db)
 
     size = os.path.getsize(zip_path)
     removed = prune_old(out_dir, args.keep)
