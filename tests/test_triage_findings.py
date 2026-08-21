@@ -50,12 +50,35 @@ def add_triage(conn, kind, ref_key, priority, who="Айгуль"):
 # --- собственно баг -------------------------------------------------------
 
 def test_triage_marks_appear_among_findings(db):
-    """Регрессия. До правки здесь было пусто -- всегда."""
+    """Регрессия. До правки статусы триажа не показывались вовсе."""
     db, op = db
-    add_triage(db, "manual", "5", "confirmed_person")
+    add_triage(db, "ai_scene", "person:model:0:120:360", "confirmed_object")
     kinds = [f["kind"] for f in sar_common.operation_findings(db, op)]
     assert "triage" in kinds, (
         "отметок триажа нет в находках -- запрос снова падает молча")
+
+
+def test_triage_on_a_manual_mark_is_its_status_not_a_second_finding(db):
+    """Отдельной строкой он дублировал пометку: одна находка выглядела
+    как две, а счётчик врал вдвое."""
+    db, op = db
+    add_triage(db, "manual", "5", "confirmed_person")
+    fs = sar_common.operation_findings(db, op)
+    assert len(fs) == 1, f"находка задвоилась: {[f['kind'] for f in fs]}"
+    assert fs[0]["kind"] == "manual"
+    assert fs[0]["priority"] == "confirmed_person"
+    assert fs[0]["priority_by"] == "Айгуль"
+
+
+def test_rejected_is_returned_and_filtered_in_the_interface(db):
+    """Отбор по статусу -- дело интерфейса. Прятать отклонённое в данных
+    значило бы лишить человека возможности пересмотреть отбракованное,
+    а в поиске к отвергнутому возвращаются."""
+    db, op = db
+    add_triage(db, "ai_scene", "person:model:0:1:2", "rejected")
+    fs = sar_common.operation_findings(db, op)
+    assert any(f.get("priority") == "rejected" for f in fs), (
+        "отклонённое вырезано на уровне данных -- пересмотреть его нельзя")
 
 
 def test_query_error_is_not_swallowed(db):
@@ -105,17 +128,6 @@ def test_target_kind_is_preserved(db):
     assert t["target_kind"] == "ai_scene"
 
 
-def test_triage_on_a_manual_mark_gets_its_timecode(db):
-    """Иначе находка открывалась бы в начале видео, а не там, где её нашли,
-    и список находок снова стал бы просто перечнем."""
-    db, op = db
-    add_triage(db, "manual", "5", "confirmed_person")
-    t = next(f for f in sar_common.operation_findings(db, op)
-             if f["kind"] == "triage")
-    assert t["obs_seconds"] == pytest.approx(286.6)
-    assert t["obs_label"] == "резко чёрное"
-
-
 def test_triage_on_a_model_scene_has_no_timecode(db):
     """У ключа сцены таймкода нет -- честно оставляем пустым, а не
     подставляем ноль, который выглядел бы как «в начале видео»."""
@@ -123,7 +135,7 @@ def test_triage_on_a_model_scene_has_no_timecode(db):
     add_triage(db, "ai_scene", "person:model:0:120:360", "likely_object")
     t = next(f for f in sar_common.operation_findings(db, op)
              if f["kind"] == "triage")
-    assert t["obs_seconds"] is None
+    assert t.get("timestamp_sec") is None
 
 
 def test_triage_of_another_operation_is_not_included(db):
@@ -143,11 +155,22 @@ def test_priority_key_is_never_shown_raw():
     assert "человек" in label
 
 
-def test_priority_and_manual_label_are_shown_together():
+def test_status_is_a_separate_label_from_the_note():
+    """Подпись говорит, ЧТО человек увидел, статус -- к какому выводу
+    пришли. Склеенные в строку, они теряют и то, и другое."""
     import sar_server
-    label = sar_server._finding_label(
-        {"priority": "confirmed_person", "obs_label": "резко чёрное"})
-    assert "человек" in label and "резко чёрное" in label
+    f = {"label": "резко чёрное", "priority": "confirmed_person"}
+    assert sar_server._finding_label(f) == "резко чёрное"
+    assert "человек" in sar_server._finding_status(f)
+
+
+def test_scene_status_is_not_duplicated():
+    """У сцены модели статус уже стал подписью -- второй раз показывать
+    его незачем."""
+    import sar_server
+    f = {"priority": "confirmed_object"}
+    assert sar_server._finding_label(f)
+    assert sar_server._finding_status(f) == ""
 
 
 def test_manual_label_wins_when_present():

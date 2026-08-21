@@ -333,15 +333,37 @@ def browse_operation(conn, watch_dir, operation_id, subpath=""):
             "outside": outside if not subpath else []}
 
 
+# Статус, означающий "это не находка". Такие отметки в список находок не
+# попадают: человек их как раз ОТКЛОНИЛ.
+PRIORITY_REJECTED = "rejected"
+
+
 def operation_findings(conn, operation_id):
     """Находки операции -- только размеченные ЧЕЛОВЕКОМ.
 
-    Сцены модели сюда не попадают намеренно: их тысячи, и почти всё --
+    Сцены модели сами по себе сюда не попадают: их тысячи, и почти всё --
     камни. Утопить в них десяток настоящих находок значит сделать вкладку
-    бесполезной. Ручная пометка и триаж-статус ставятся человеком, и именно
-    они идут в отчёт заказчику.
+    бесполезной.
+
+    Находка -- это одно из двух:
+      * ручная пометка человека (всегда, со своим статусом триажа, если он
+        поставлен);
+      * сцена модели, которую человек посмотрел и НЕ отклонил.
+
+    Отклонённое отсюда НЕ вырезается: отбор по статусу -- дело интерфейса,
+    там он переключается мгновенно и без новых запросов (находок десятки, а
+    не тысячи). Прятать данные на этом уровне значило бы лишить человека
+    возможности пересмотреть отбракованное, а в поиске к отвергнутому
+    возвращаются.
+
+    А вот одну вещь здесь сделать неправильно легко, и она делала список
+    вдвое длиннее правды: триаж, поставленный НА РУЧНУЮ ПОМЕТКУ, -- это не
+    отдельная находка, а статус той же самой. Отдельной строкой он
+    дублировал пометку: одна находка выглядела как две.
     """
     out = []
+    triage = _triage_by_target(conn, operation_id)
+
     for r in conn.execute(
             "SELECT o.*, rp.rel_path FROM manual_observations o "
             "JOIN operation_materials m ON m.report_id=o.report_id "
@@ -350,6 +372,11 @@ def operation_findings(conn, operation_id):
             (operation_id,)):
         d = dict(r)
         d["kind"] = "manual"
+        # статус подмешивается в саму пометку, а не идёт отдельной строкой
+        status = triage.get(("manual", str(d["id"])))
+        if status is not None:
+            d["priority"] = status["priority"]
+            d["priority_by"] = status["set_by"]
         out.append(d)
     # Столбец называется set_at, а не updated_at.
     #
@@ -363,31 +390,33 @@ def operation_findings(conn, operation_id):
     # Глухого перехвата тут больше нет. Отсутствие таблицы -- законная
     # ситуация (база от старой версии), и она проверяется явно; а вот ошибка
     # в самом запросе обязана быть видна, а не притворяться пустотой.
-    if _table_exists(conn, "detection_priorities"):
-        # Таймкод подтягивается для триажа, поставленного на РУЧНУЮ пометку:
-        # без него находка открывалась бы в начале видео, а не там, где её
-        # нашли -- то есть список находок снова был бы просто перечнем.
-        # У сцен модели таймкода в ключе нет, и для них он останется пустым.
-        for r in conn.execute(
-                "SELECT p.*, rp.rel_path, o.timestamp_sec AS obs_seconds, "
-                "       o.label AS obs_label "
-                "FROM detection_priorities p "
-                "JOIN operation_materials m ON m.report_id=p.report_id "
-                "JOIN reports rp ON rp.report_id=p.report_id "
-                "LEFT JOIN manual_observations o "
-                "  ON p.kind='manual' AND o.report_id=p.report_id "
-                " AND o.id=CAST(p.ref_key AS INTEGER) "
-                "WHERE m.operation_id=? ORDER BY p.set_at DESC",
-                (operation_id,)):
-            d = dict(r)
-            # Своё поле kind у записи триажа ('manual' | 'ai_scene') говорит,
-            # НА ЧТО статус поставлен, и его нельзя просто затереть словом
-            # "triage": без него потом не понять, откуда брать картинку --
-            # у ручной пометки это вырезанный кадр, у сцены модели готовый
-            # кроп из отчёта.
-            d["target_kind"] = d.get("kind")
-            d["kind"] = "triage"
-            out.append(d)
+    # Сцены модели -- только те, что человек посмотрел и не отклонил.
+    for (target, _ref), status in triage.items():
+        if target != "ai_scene":
+            continue
+        d = dict(status)
+        d["target_kind"] = "ai_scene"
+        d["kind"] = "triage"
+        out.append(d)
+    return out
+
+
+def _triage_by_target(conn, operation_id):
+    """Статусы триажа операции: (на что, ключ) -> запись."""
+    if not _table_exists(conn, "detection_priorities"):
+        # база от старой версии -- законная ситуация, а вот ошибку в самом
+        # запросе прятать нельзя, поэтому здесь проверка, а не try/except
+        return {}
+
+    out = {}
+    for r in conn.execute(
+            "SELECT p.*, rp.rel_path FROM detection_priorities p "
+            "JOIN operation_materials m ON m.report_id=p.report_id "
+            "JOIN reports rp ON rp.report_id=p.report_id "
+            "WHERE m.operation_id=? ORDER BY p.set_at DESC",
+            (operation_id,)):
+        d = dict(r)
+        out[(d["kind"], str(d["ref_key"]))] = d
     return out
 
 
