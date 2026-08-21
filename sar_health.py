@@ -320,8 +320,12 @@ def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
     facts["bot_heartbeat_sec"] = sar_common.heartbeat_age_sec(conn, "bot")
 
     facts["disk_free_gb"] = _disk_free_gb(watch_dir)
+    # Папка копий берётся из общей точки правды, а не собирается здесь
+    # заново. Раньше она вычислялась как "на уровень выше watch_dir", тогда
+    # как sar_backup.py кладёт копии ВНУТРЬ проекта: проверка смотрела в
+    # пустую папку и рапортовала "копий нет" сразу после свежей копии.
     facts["backup_age_hours"] = backup_age_hours(
-        backup_dir or os.path.join(os.path.dirname(watch_dir.rstrip(os.sep)), "sar_backups"))
+        backup_dir or sar_common.backups_dir())
 
     # человеческая работа -- это и есть основная ценность в базе
     facts["manual_observations"] = conn.execute(
