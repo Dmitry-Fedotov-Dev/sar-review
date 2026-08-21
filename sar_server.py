@@ -3854,13 +3854,42 @@ h1 {{ font-size:16px; margin:12px 0; }}
    нативным элементам управления видео (play/пауза/перемотка/громкость),
    и ими становится невозможно пользоваться. Включаем перехват кликов
    ТОЛЬКО когда реально идёт рисование рамки. */
-#overlay {{ position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }}
-#overlay.draw-mode {{ cursor:crosshair; pointer-events:auto; }}
+/* Слой разметки НИКОГДА не ловит указатель.
+   Раньше в режиме разметки ему включали pointer-events:auto, и он накрывал
+   собой нативную полосу управления: кнопки плеера переставали нажиматься,
+   пока включена разметка. Ровно эта грабля описана в CLAUDE.md, и она
+   вернулась. Теперь клики ловит ОТДЕЛЬНЫЙ прозрачный слой (#draw-catch),
+   который до полосы управления не достаёт. */
+#overlay {{ position:absolute; top:0; left:0; width:100%; height:100%;
+            pointer-events:none; }}
+
+/* Ловушка кликов для рисования. Отдельный элемент, а не сам #overlay,
+   потому что у #overlay нельзя менять размер: по нему считаются
+   нормализованные координаты рамок, и укоротишь его -- поедут все
+   сохранённые пометки. */
+#draw-catch {{ position:absolute; top:0; left:0; right:0;
+               bottom:var(--controls-h); display:none; cursor:crosshair; }}
+#draw-catch.on {{ display:block; }}
+
+/* Высота нативной полосы управления. Её точного значения браузер не
+   сообщает, поэтому берём с запасом: лучше отдать разметке на несколько
+   пикселей меньше, чем снова перекрыть кнопки. */
+:root {{ --controls-h: 52px; }}
+
+/* Нативная кнопка полного экрана убрана: своя уже есть, а нативная
+   разворачивает ТОЛЬКО <video>, оставляя слой разметки снаружи.
+   controlsList="nofullscreen" понимают не все сборки -- этот способ
+   работает в Chrome, Edge и Safari, а на остальных срабатывает
+   подстраховка в fullscreenchange. Меню "⋮" не трогаем: в нём живёт
+   замедленное воспроизведение, которым реально пользуются. */
+video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
 #overlay rect.obs-box {{ fill:none; stroke:#ff3b3b; stroke-width:2; }}
 #overlay rect.temp-box {{ fill:rgba(255,59,59,0.15); stroke:#ff3b3b; stroke-width:2; stroke-dasharray:5,4; }}
 #overlay text.obs-label {{ fill:#ff3b3b; font-size:14px; font-weight:bold; paint-order:stroke; stroke:#000; stroke-width:3px; }}
 
 .toolbar {{ display:flex; align-items:center; gap:10px; margin:10px 0; flex-wrap:wrap; }}
+.hint.keys {{ color:#8a8a8a; }}
+.hint.keys b {{ color:#c9c9c9; font-weight:600; }}
 .toolbar button {{ background:#1b1b1b; color:#eee; border:1px solid #333; border-radius:6px;
                     padding:7px 12px; cursor:pointer; font-size:13px; }}
 .toolbar button:hover {{ border-color:#555; }}
@@ -4044,6 +4073,10 @@ h1 {{ font-size:16px; margin:12px 0; }}
         <video id="video" controls controlsList="nofullscreen"
                disablePictureInPicture src="/report/{report_id}/video"></video>
         <svg id="overlay"></svg>
+        <!-- Ловушка кликов для рисования. Не достаёт до нативной полосы
+             управления, поэтому кнопки плеера остаются нажимаемыми и при
+             включённой разметке. -->
+        <div id="draw-catch"></div>
       </div>
       <div class="vid-tools">
         <button type="button" id="zoom-out" title="Отдалить">&minus;</button>
@@ -4056,6 +4089,12 @@ h1 {{ font-size:16px; margin:12px 0; }}
     <div class="toolbar">
       <button id="draw-toggle">🖊 Режим разметки: выкл</button>
       <span class="hint">включите режим и потяните мышью по видео, чтобы отметить область</span>
+      <!-- Без подсказки про клавиши о них никто не узнает, и работа
+           окажется впустую. Строка намеренно короткая: место в панели
+           дороже полноты. -->
+      <span class="hint keys"><b>пробел</b> пауза · <b>←/→</b> ±5 с
+        (с Shift ±10) · <b>M</b> разметка · <b>F</b> во весь экран ·
+        <b>+ &minus; 0</b> масштаб</span>
     </div>
     <div class="toolbar">
       <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
@@ -4094,6 +4133,7 @@ const IS_MODERATOR = {is_moderator_js};
 let isProcessing = {is_processing_js};
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
+const drawCatch = document.getElementById('draw-catch');
 const drawToggle = document.getElementById('draw-toggle');
 let drawMode = false;
 let observations = [];
@@ -4103,7 +4143,7 @@ let pendingBox = null; // нормализованный bbox, ждущий со
 // --- режим разметки: включение/выключение ---
 drawToggle.addEventListener('click', () => {{
   drawMode = !drawMode;
-  overlay.classList.toggle('draw-mode', drawMode);
+  drawCatch.classList.toggle('on', drawMode);
   drawToggle.textContent = '🖊 Режим разметки: ' + (drawMode ? 'вкл' : 'выкл');
   drawToggle.classList.toggle('active', drawMode);
 }});
@@ -4114,6 +4154,59 @@ drawToggle.addEventListener('click', () => {{
 // умноженный на масштаб сцены. А SVG рисует в своих непреобразованных
 // единицах. Если смешать одно с другим, при любом зуме рамки уезжают:
 // экранные координаты попадают в SVG как есть.
+// --- клавиатура ----------------------------------------------------------
+//
+// Пробел не работал: нативные горячие клавиши <video> действуют, только
+// когда фокус на самом видео, а человек его туда не ставит -- он кликает
+// по странице, по комментарию, по списку наблюдений. Поэтому слушаем на
+// документе.
+//
+// Главное условие: горячие клавиши НЕ должны срабатывать, когда человек
+// печатает. Пробел посреди комментария обязан ставить пробел, а не паузу.
+function typingNow() {{
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+      || el.isContentEditable;
+}}
+
+function nudge(seconds) {{
+  video.currentTime = Math.max(
+    0, Math.min(video.duration || 0, video.currentTime + seconds));
+}}
+
+document.addEventListener('keydown', e => {{
+  if (typingNow() || e.ctrlKey || e.metaKey || e.altKey) return;
+
+  switch (e.key) {{
+    case ' ':
+      // Пауза/воспроизведение. preventDefault обязателен: иначе браузер
+      // ещё и прокрутит страницу вниз на экран.
+      e.preventDefault();
+      if (video.paused) video.play(); else video.pause();
+      return;
+    case 'ArrowLeft':
+      e.preventDefault(); nudge(e.shiftKey ? -10 : -5); return;
+    case 'ArrowRight':
+      e.preventDefault(); nudge(e.shiftKey ? 10 : 5); return;
+    case 'f': case 'F': case 'а': case 'А':
+      e.preventDefault(); toggleFullscreen(); return;
+    case 'm': case 'M': case 'ь': case 'Ь':
+      e.preventDefault(); drawToggle.click(); return;
+    case '+': case '=':
+      e.preventDefault(); zoomCentre(1.4); return;
+    case '-': case '_':
+      e.preventDefault(); zoomCentre(1 / 1.4); return;
+    case '0':
+      e.preventDefault(); vz.scale = 1; vz.x = 0; vz.y = 0; applyStage(); return;
+    case 'Escape':
+      // Незаконченную рамку бросаем. Из полного экрана браузер выходит сам.
+      if (drawing) {{ drawing.rectEl.remove(); drawing = null; }}
+      return;
+  }}
+}});
+
 // --- масштаб видео и полный экран ----------------------------------------
 //
 // Оба бага, о которых сообщил пользователь, растут из одного места:
@@ -4261,7 +4354,7 @@ function overlayPoint(evt) {{
   }};
 }}
 
-overlay.addEventListener('mousedown', e => {{
+drawCatch.addEventListener('mousedown', e => {{
   if (!drawMode) return;
   video.pause();  // фиксируем таймкод на момент начала разметки, не даём ему уехать
   const p = overlayPoint(e);
@@ -4271,7 +4364,7 @@ overlay.addEventListener('mousedown', e => {{
   drawing = {{ startX: p.x, startY: p.y, rectEl, w: p.w, h: p.h, atTime: video.currentTime }};
 }});
 
-overlay.addEventListener('mousemove', e => {{
+document.addEventListener('mousemove', e => {{
   if (!drawing) return;
   const p = overlayPoint(e);
   const x = Math.min(drawing.startX, p.x), y = Math.min(drawing.startY, p.y);
@@ -4281,7 +4374,7 @@ overlay.addEventListener('mousemove', e => {{
   drawing.lastX = p.x; drawing.lastY = p.y;
 }});
 
-overlay.addEventListener('mouseup', () => {{
+document.addEventListener('mouseup', () => {{
   if (!drawing) return;
   const x1 = Math.min(drawing.startX, drawing.lastX ?? drawing.startX);
   const y1 = Math.min(drawing.startY, drawing.lastY ?? drawing.startY);
