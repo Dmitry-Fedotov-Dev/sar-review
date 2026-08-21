@@ -2347,12 +2347,55 @@ def _tree_cache_key(op_param):
             DB_PATH, op_param)
 
 
-def _tree_cache_get(key):
+# Ключи, по которым пересчёт идёт прямо сейчас.
+#
+# Без этого кэш чинил медиану, но портил худший случай -- и это было
+# измерено. Пока значение свежее, все запросы отвечают за миллисекунды; в
+# момент протухания ВОСЕМЬ запросов промахиваются одновременно и каждый
+# честно считает всё заново. Восемь одновременных обходов диска дерутся за
+# те же ядра, и p95 списка вырос с 1517 до 2079 мс -- хуже, чем было без
+# кэша вообще.
+#
+# Поэтому пересчитывает только ОДИН запрос, а остальные в этот момент
+# получают предыдущий ответ -- сразу, без ожидания. Список опрашивается
+# раз в 5 секунд, и ответ, устаревший на пару секунд, здесь ничем не хуже
+# свежего; а вот ожидание в две секунды человек чувствует.
+_tree_refreshing = set()
+
+
+def _tree_cache_take(key):
+    """Что делать с запросом: (готовый ответ, считать ли самому).
+
+    Ответ и признак возвращаются вместе, потому что решение принимается
+    под одним замком -- иначе два запроса одновременно решат, что считать
+    некому, и мы вернёмся к тому же одновременному пересчёту.
+    """
+    now = time.time()
     with _tree_cache_lock:
         hit = _tree_cache.get(key)
-    if hit and time.time() - hit[0] < TREE_CACHE_TTL_SEC:
-        return hit[1]
-    return None
+        if hit and now - hit[0] < TREE_CACHE_TTL_SEC:
+            return hit[1], False
+        if key in _tree_refreshing:
+            # Пересчёт уже идёт у соседнего запроса.
+            if hit is not None:
+                return hit[1], False       # отдаём предыдущий, не ждём
+            # Холодного ответа нет вовсе -- это бывает только на первом
+            # запросе после старта. Тогда считаем сами: разовая двойная
+            # работа дешевле, чем отдать человеку пустой список.
+            return None, True
+        _tree_refreshing.add(key)
+        return None, True
+
+
+def _tree_refresh_done(key):
+    with _tree_cache_lock:
+        _tree_refreshing.discard(key)
+
+
+class _OperationMissing(Exception):
+    """Запрошена операция, которой нет. Отдельным исключением, а не
+    возвратом ответа: сборка списка вынесена в помощника, и Flask-ответы
+    внутри него мешали бы кэшировать результат."""
 
 
 def _tree_cache_put(key, payload):
@@ -2369,6 +2412,7 @@ def _tree_cache_clear():
     """Сброс. Нужен тестам и на случай ручной правки данных на месте."""
     with _tree_cache_lock:
         _tree_cache.clear()
+        _tree_refreshing.clear()
 
 
 @app.route("/api/tree")
@@ -2382,10 +2426,24 @@ def api_tree():
     # Кэш проверяется ДО обхода диска -- иначе смысла в нём нет: дорого
     # именно сканирование папок и три сотни запросов к базе ниже.
     cache_key = _tree_cache_key(op_param)
-    cached = _tree_cache_get(cache_key)
-    if cached is not None:
+    cached, must_compute = _tree_cache_take(cache_key)
+    if not must_compute:
         return jsonify(cached)
 
+    try:
+        return jsonify(_build_tree_payload(cache_key, op_param))
+    except _OperationMissing:
+        # В кэш не кладём: несуществующая операция -- это ответ про запрос,
+        # а не про данные, и держать его 3 секунды незачем.
+        return jsonify({"items": [], "error": "операции нет"}), 404
+    finally:
+        # Снимать признак обязательно даже при исключении: иначе после
+        # одной ошибки ключ навсегда останется "в пересчёте", и список
+        # застынет на последнем удачном ответе.
+        _tree_refresh_done(cache_key)
+
+
+def _build_tree_payload(cache_key, op_param):
     conn = get_db()
     watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
     # Папки операций обходятся рекурсивно (заказчик раскладывает материал
@@ -2400,7 +2458,7 @@ def api_tree():
     elif op_param.isdigit():
         op = sar_common.get_operation(conn, int(op_param))
         if op is None:
-            return jsonify({"items": [], "error": "операции нет"}), 404
+            raise _OperationMissing()
         only = {r["report_id"]
                 for r in sar_common.materials_of_operation(conn, int(op_param))}
         op_title = op["title"]
@@ -2459,7 +2517,7 @@ def api_tree():
 
     payload = {"items": items, "operation": op_title, "op": op_param or None}
     _tree_cache_put(cache_key, payload)
-    return jsonify(payload)
+    return payload
 
 
 @app.route("/api/thumbnail/<path:filename>")
