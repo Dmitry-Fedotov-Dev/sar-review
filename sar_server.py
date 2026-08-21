@@ -2360,36 +2360,58 @@ def _tree_cache_key(op_param):
 # получают предыдущий ответ -- сразу, без ожидания. Список опрашивается
 # раз в 5 секунд, и ответ, устаревший на пару секунд, здесь ничем не хуже
 # свежего; а вот ожидание в две секунды человек чувствует.
-_tree_refreshing = set()
+# ключ -> событие, которым считающий запрос сообщит остальным, что готово
+_tree_refreshing = {}
+
+# Сколько ждать чужой пересчёт на холодном старте. Больше самого долгого
+# наблюдавшегося обхода с запасом; если не дождались -- считаем сами, чтобы
+# запрос не завис вовсе.
+TREE_COLD_WAIT_SEC = 20.0
 
 
 def _tree_cache_take(key):
-    """Что делать с запросом: (готовый ответ, считать ли самому).
+    """Что делать с запросом: (готовый ответ, считать ли самому, чего ждать).
 
-    Ответ и признак возвращаются вместе, потому что решение принимается
-    под одним замком -- иначе два запроса одновременно решат, что считать
-    некому, и мы вернёмся к тому же одновременному пересчёту.
+    Решение принимается под одним замком -- иначе два запроса одновременно
+    решат, что считать некому, и мы вернёмся к одновременному пересчёту.
     """
     now = time.time()
     with _tree_cache_lock:
         hit = _tree_cache.get(key)
         if hit and now - hit[0] < TREE_CACHE_TTL_SEC:
-            return hit[1], False
-        if key in _tree_refreshing:
+            return hit[1], False, None
+        waiter = _tree_refreshing.get(key)
+        if waiter is not None:
             # Пересчёт уже идёт у соседнего запроса.
             if hit is not None:
-                return hit[1], False       # отдаём предыдущий, не ждём
-            # Холодного ответа нет вовсе -- это бывает только на первом
-            # запросе после старта. Тогда считаем сами: разовая двойная
-            # работа дешевле, чем отдать человеку пустой список.
-            return None, True
-        _tree_refreshing.add(key)
-        return None, True
+                return hit[1], False, None     # отдаём предыдущий, не ждём
+            # Прежнего ответа нет вовсе -- холодный старт. Раньше здесь
+            # каждый считал сам, и это было ошибкой: при восьми
+            # одновременных зрителях восемь обходов диска дрались за одни
+            # ядра, и первые запросы после перезапуска отвечали 12, 10 и
+            # 8.6 секунды (замерено). Ждать чужой пересчёт -- полторы.
+            return None, False, waiter
+        _tree_refreshing[key] = threading.Event()
+        return None, True, None
 
 
 def _tree_refresh_done(key):
     with _tree_cache_lock:
-        _tree_refreshing.discard(key)
+        event = _tree_refreshing.pop(key, None)
+    if event is not None:
+        event.set()
+
+
+def _tree_wait_for_refresh(key, event):
+    """Дождаться чужого пересчёта и забрать результат.
+
+    Возвращает готовый ответ либо None -- тогда вызвавший считает сам:
+    висеть бесконечно из-за чужого сбоя запрос не должен.
+    """
+    event.wait(TREE_COLD_WAIT_SEC)
+    with _tree_cache_lock:
+        hit = _tree_cache.get(key)
+    return hit[1] if hit is not None else None
 
 
 class _OperationMissing(Exception):
@@ -2426,7 +2448,14 @@ def api_tree():
     # Кэш проверяется ДО обхода диска -- иначе смысла в нём нет: дорого
     # именно сканирование папок и три сотни запросов к базе ниже.
     cache_key = _tree_cache_key(op_param)
-    cached, must_compute = _tree_cache_take(cache_key)
+    cached, must_compute, waiter = _tree_cache_take(cache_key)
+    if waiter is not None:
+        cached = _tree_wait_for_refresh(cache_key, waiter)
+        if cached is not None:
+            return jsonify(cached)
+        # Тот, кого ждали, не справился -- считаем сами, но уже без
+        # признака "идёт пересчёт": его снял тот запрос.
+        must_compute = True
     if not must_compute:
         return jsonify(cached)
 
