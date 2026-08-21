@@ -201,7 +201,7 @@ def test_only_one_request_recomputes_when_the_cache_expires(
     # делает первый из восьми запросов) и смотрим, полезут ли остальные
     # считать сами.
     key = sar_server._tree_cache_key("")
-    sar_server._tree_refreshing.add(key)
+    sar_server._tree_refreshing[key] = __import__("threading").Event()
     try:
         for _ in range(7):
             r = client.get("/api/tree")
@@ -230,18 +230,60 @@ def test_refresh_flag_is_released_even_after_an_error(client, monkeypatch):
         "признак пересчёта не снят -- список больше никогда не обновится")
 
 
-def test_cold_start_never_returns_an_empty_list(client, monkeypatch):
-    """Особый случай: кэша нет вовсе, а кто-то уже считает. Ждать нечего,
-    отдавать нечего -- считаем сами. Разовая двойная работа на первом
-    запросе дешевле, чем показать человеку пустую платформу."""
+def test_cold_start_waits_instead_of_duplicating_work(client, counted_scan):
+    """Холодный старт: кэша нет вовсе, а кто-то уже считает.
+
+    Сначала здесь каждый считал сам -- казалось, что разовая двойная работа
+    дешевле ожидания. Замер показал обратное: при восьми зрителях восемь
+    обходов диска дерутся за одни ядра, и первые запросы после перезапуска
+    отвечали 12, 10.4 и 8.6 секунды. Ждать чужой пересчёт -- полторы.
+    """
+    import threading
+
     sar_server._tree_cache_clear()
     key = sar_server._tree_cache_key("")
-    sar_server._tree_refreshing.add(key)
+
+    # первый запрос считает в отдельном потоке
+    done = threading.Event()
+
+    def first():
+        client.get("/api/tree")
+        done.set()
+
+    t = threading.Thread(target=first)
+    t.start()
+    t.join(timeout=30)
+    assert done.is_set()
+    scans_after_first = len(counted_scan)
+
+    # второй запрос при живом признаке пересчёта не должен идти на диск
+    sar_server._tree_refreshing[key] = threading.Event()
+    sar_server._tree_refreshing[key].set()      # как будто пересчёт уже завершён
     try:
         data = client.get("/api/tree").get_json()
     finally:
         sar_server._tree_refresh_done(key)
-    assert len(data["items"]) == 2, "на холодном старте отдан пустой список"
+
+    assert data["items"], "на холодном старте отдан пустой список"
+    assert len(counted_scan) == scans_after_first, (
+        "запрос всё-таки полез считать сам, хотя результат уже был")
+
+
+def test_waiting_request_computes_itself_if_the_other_one_failed(client):
+    """Висеть бесконечно из-за чужого сбоя запрос не должен."""
+    import threading
+
+    sar_server._tree_cache_clear()
+    key = sar_server._tree_cache_key("")
+    event = threading.Event()
+    event.set()                  # «пересчёт закончился», но в кэш ничего не легло
+    sar_server._tree_refreshing[key] = event
+    try:
+        data = client.get("/api/tree").get_json()
+    finally:
+        sar_server._tree_refresh_done(key)
+    assert len(data["items"]) == 2, (
+        "после чужого сбоя запрос не посчитал сам и отдал пустоту")
 
 
 # --- новые файлы всё же появляются ---------------------------------------
