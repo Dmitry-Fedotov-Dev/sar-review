@@ -3854,13 +3854,42 @@ h1 {{ font-size:16px; margin:12px 0; }}
    нативным элементам управления видео (play/пауза/перемотка/громкость),
    и ими становится невозможно пользоваться. Включаем перехват кликов
    ТОЛЬКО когда реально идёт рисование рамки. */
-#overlay {{ position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }}
-#overlay.draw-mode {{ cursor:crosshair; pointer-events:auto; }}
+/* Слой разметки НИКОГДА не ловит указатель.
+   Раньше в режиме разметки ему включали pointer-events:auto, и он накрывал
+   собой нативную полосу управления: кнопки плеера переставали нажиматься,
+   пока включена разметка. Ровно эта грабля описана в CLAUDE.md, и она
+   вернулась. Теперь клики ловит ОТДЕЛЬНЫЙ прозрачный слой (#draw-catch),
+   который до полосы управления не достаёт. */
+#overlay {{ position:absolute; top:0; left:0; width:100%; height:100%;
+            pointer-events:none; }}
+
+/* Ловушка кликов для рисования. Отдельный элемент, а не сам #overlay,
+   потому что у #overlay нельзя менять размер: по нему считаются
+   нормализованные координаты рамок, и укоротишь его -- поедут все
+   сохранённые пометки. */
+#draw-catch {{ position:absolute; top:0; left:0; right:0;
+               bottom:var(--controls-h); display:none; cursor:crosshair; }}
+#draw-catch.on {{ display:block; }}
+
+/* Высота нативной полосы управления. Её точного значения браузер не
+   сообщает, поэтому берём с запасом: лучше отдать разметке на несколько
+   пикселей меньше, чем снова перекрыть кнопки. */
+:root {{ --controls-h: 52px; }}
+
+/* Нативная кнопка полного экрана убрана: своя уже есть, а нативная
+   разворачивает ТОЛЬКО <video>, оставляя слой разметки снаружи.
+   controlsList="nofullscreen" понимают не все сборки -- этот способ
+   работает в Chrome, Edge и Safari, а на остальных срабатывает
+   подстраховка в fullscreenchange. Меню "⋮" не трогаем: в нём живёт
+   замедленное воспроизведение, которым реально пользуются. */
+video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
 #overlay rect.obs-box {{ fill:none; stroke:#ff3b3b; stroke-width:2; }}
 #overlay rect.temp-box {{ fill:rgba(255,59,59,0.15); stroke:#ff3b3b; stroke-width:2; stroke-dasharray:5,4; }}
 #overlay text.obs-label {{ fill:#ff3b3b; font-size:14px; font-weight:bold; paint-order:stroke; stroke:#000; stroke-width:3px; }}
 
 .toolbar {{ display:flex; align-items:center; gap:10px; margin:10px 0; flex-wrap:wrap; }}
+.hint.keys {{ color:#8a8a8a; }}
+.hint.keys b {{ color:#c9c9c9; font-weight:600; }}
 .toolbar button {{ background:#1b1b1b; color:#eee; border:1px solid #333; border-radius:6px;
                     padding:7px 12px; cursor:pointer; font-size:13px; }}
 .toolbar button:hover {{ border-color:#555; }}
@@ -3877,12 +3906,32 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .covseg.on {{ background:#2f9e44; }}
 .cov-stat {{ font-size:12px; color:#999; margin-bottom:14px; }}
 
-.draw-form {{ background:#1b1b1b; border:1px solid #3355aa; border-radius:8px; padding:12px; margin:10px 0; }}
+/* Форма заметки -- рядом с нарисованной рамкой, поверх кадра.
+   Раньше она жила под плеером: в полноэкранном режиме рамку нарисовать
+   можно, а заполнить заметку нечем. Плюс глаз всё равно на кадре, и
+   уводить его вниз страницы незачем.
+
+   Цвета -- как на страницах операций, чтобы плеер не выглядел отдельной
+   программой. */
+#draw-form {{ position:absolute; z-index:5; width:270px; max-width:calc(100% - 24px);
+  background:#161d22; border:1px solid #2b353f; border-radius:9px;
+  padding:11px; box-shadow:0 14px 38px rgba(0,0,0,.55); }}
+#draw-form[hidden] {{ display:none; }}
+#draw-form .ttl {{ font-size:11.5px; letter-spacing:.03em; color:#6f7d7a;
+  margin-bottom:7px; }}
 .draw-form input, .draw-form textarea {{ width:100%; box-sizing:border-box; background:#0d0d0d; color:#eee;
     border:1px solid #333; border-radius:5px; padding:8px; margin-bottom:8px; font-family:inherit; font-size:13px; }}
 .draw-form textarea {{ resize:vertical; min-height:50px; }}
+.draw-form input, .draw-form textarea {{ border-color:#2b353f; border-radius:7px; }}
+.draw-form input:focus, .draw-form textarea:focus {{ outline:none; border-color:#5fb8c7; }}
 .draw-form .row {{ display:flex; gap:8px; }}
-.draw-form button {{ flex:1; padding:8px; border-radius:6px; border:none; cursor:pointer; font-size:13px; }}
+.draw-form button {{ flex:1; padding:7px; border-radius:7px; cursor:pointer;
+  font-size:13px; font-family:inherit; border:1px solid #2b353f;
+  background:transparent; color:#9aa8a5; }}
+.draw-form button:hover {{ border-color:#5fb8c7; color:#e8eeec; }}
+.draw-form .btn-save {{ border-color:#5fb8c7; color:#5fb8c7; }}
+.draw-form .btn-save:hover {{ background:#5fb8c7; color:#101417; }}
+.draw-form .hint {{ font-size:10.5px; color:#6f7d7a; margin-top:6px; display:block; }}
 .btn-save {{ background:#2f9e44; color:#fff; }}
 .btn-cancel {{ background:#444; color:#eee; }}
 
@@ -4044,7 +4093,19 @@ h1 {{ font-size:16px; margin:12px 0; }}
         <video id="video" controls controlsList="nofullscreen"
                disablePictureInPicture src="/report/{report_id}/video"></video>
         <svg id="overlay"></svg>
+        <!-- Ловушка кликов для рисования. Не достаёт до нативной полосы
+             управления, поэтому кнопки плеера остаются нажимаемыми и при
+             включённой разметке. -->
+        <div id="draw-catch"></div>
       </div>
+      <!-- Форма заметки живёт ВНУТРИ обёртки видео, а не под плеером.
+           Под плеером её не видно в полноэкранном режиме: нарисовать рамку
+           можно, а заполнить заметку нечем -- на этом и споткнулся
+           пользователь.
+
+           Снаружи #stage, а не внутри: иначе зум масштабировал бы и саму
+           форму вместе с кадром. -->
+      <div id="draw-form" hidden></div>
       <div class="vid-tools">
         <button type="button" id="zoom-out" title="Отдалить">&minus;</button>
         <button type="button" id="zoom-level" title="Сбросить масштаб">100%</button>
@@ -4056,6 +4117,12 @@ h1 {{ font-size:16px; margin:12px 0; }}
     <div class="toolbar">
       <button id="draw-toggle">🖊 Режим разметки: выкл</button>
       <span class="hint">включите режим и потяните мышью по видео, чтобы отметить область</span>
+      <!-- Без подсказки про клавиши о них никто не узнает, и работа
+           окажется впустую. Строка намеренно короткая: место в панели
+           дороже полноты. -->
+      <span class="hint keys"><b>пробел</b> пауза · <b>←/→</b> ±5 с
+        (с Shift ±10) · <b>M</b> разметка · <b>F</b> во весь экран ·
+        <b>+ &minus; 0</b> масштаб</span>
     </div>
     <div class="toolbar">
       <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
@@ -4065,7 +4132,6 @@ h1 {{ font-size:16px; margin:12px 0; }}
         чтобы смотреть своими глазами, без подсказок модели</span>
     </div>
 
-    <div id="draw-form-slot"></div>
 
     <div class="covbar" id="covbar"></div>
     <div class="cov-stat" id="cov-stat">Загрузка статистики просмотра...</div>
@@ -4094,6 +4160,7 @@ const IS_MODERATOR = {is_moderator_js};
 let isProcessing = {is_processing_js};
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
+const drawCatch = document.getElementById('draw-catch');
 const drawToggle = document.getElementById('draw-toggle');
 let drawMode = false;
 let observations = [];
@@ -4103,7 +4170,10 @@ let pendingBox = null; // нормализованный bbox, ждущий со
 // --- режим разметки: включение/выключение ---
 drawToggle.addEventListener('click', () => {{
   drawMode = !drawMode;
-  overlay.classList.toggle('draw-mode', drawMode);
+  drawCatch.classList.toggle('on', drawMode);
+  // Снимаем фокус с кнопки: иначе она остаётся "нажимаемой пробелом" и
+  // перехватывает его у видео.
+  drawToggle.blur();
   drawToggle.textContent = '🖊 Режим разметки: ' + (drawMode ? 'вкл' : 'выкл');
   drawToggle.classList.toggle('active', drawMode);
 }});
@@ -4114,6 +4184,72 @@ drawToggle.addEventListener('click', () => {{
 // умноженный на масштаб сцены. А SVG рисует в своих непреобразованных
 // единицах. Если смешать одно с другим, при любом зуме рамки уезжают:
 // экранные координаты попадают в SVG как есть.
+// --- клавиатура ----------------------------------------------------------
+//
+// Пробел не работал: нативные горячие клавиши <video> действуют, только
+// когда фокус на самом видео, а человек его туда не ставит -- он кликает
+// по странице, по комментарию, по списку наблюдений. Поэтому слушаем на
+// документе.
+//
+// Главное условие: горячие клавиши НЕ должны срабатывать, когда человек
+// печатает. Пробел посреди комментария обязан ставить пробел, а не паузу.
+function typingNow() {{
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+      || el.isContentEditable;
+}}
+
+function nudge(seconds) {{
+  video.currentTime = Math.max(
+    0, Math.min(video.duration || 0, video.currentTime + seconds));
+}}
+
+// Пробел обрабатывается ОТДЕЛЬНО и в фазе перехвата -- раньше всех
+// остальных. Причина: пробел -- это ещё и "нажать кнопку в фокусе". Нажав
+// кнопку "Режим разметки" мышью, человек оставляет на ней фокус, и
+// следующий пробел переключал режим вместо паузы. То же с любой другой
+// кнопкой панели.
+//
+// Единственное исключение -- когда человек печатает: пробел посреди
+// заметки обязан ставить пробел.
+document.addEventListener('keydown', e => {{
+  if (e.key !== ' ' && e.code !== 'Space') return;
+  if (typingNow() || e.ctrlKey || e.metaKey || e.altKey) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (video.paused) video.play(); else video.pause();
+}}, true);
+
+document.addEventListener('keydown', e => {{
+  if (typingNow() || e.ctrlKey || e.metaKey || e.altKey) return;
+
+  switch (e.key) {{
+    case 'ArrowLeft':
+      e.preventDefault(); nudge(e.shiftKey ? -10 : -5); return;
+    case 'ArrowRight':
+      e.preventDefault(); nudge(e.shiftKey ? 10 : 5); return;
+    case 'f': case 'F': case 'а': case 'А':
+      e.preventDefault(); toggleFullscreen(); return;
+    case 'm': case 'M': case 'ь': case 'Ь':
+      e.preventDefault(); drawToggle.click(); return;
+    case '+': case '=':
+      e.preventDefault(); zoomCentre(1.4); return;
+    case '-': case '_':
+      e.preventDefault(); zoomCentre(1 / 1.4); return;
+    case '0':
+      e.preventDefault(); vz.scale = 1; vz.x = 0; vz.y = 0; applyStage(); return;
+    case 'Escape':
+      // Бросаем и недорисованную рамку, и уже нарисованную с открытой
+      // формой -- фокус мог быть где угодно, а Esc должен работать всегда.
+      // Из полного экрана браузер выходит сам.
+      if (drawing) {{ drawing.rectEl.remove(); drawing = null; }}
+      if (pendingBox) cancelDraw();
+      return;
+  }}
+}});
+
 // --- масштаб видео и полный экран ----------------------------------------
 //
 // Оба бага, о которых сообщил пользователь, растут из одного места:
@@ -4146,6 +4282,9 @@ function applyStage() {{
   videoWrap.style.cursor =
     (vz.scale > 1 && !drawMode) ? (vz.drag ? 'grabbing' : 'grab') : '';
   renderVisibleObservations();
+  // Рамка при зуме едет -- форма должна ехать за ней, иначе она укажет
+  // не на то место.
+  placeDrawForm();
 }}
 
 function zoomAt(factor, clientX, clientY) {{
@@ -4261,7 +4400,7 @@ function overlayPoint(evt) {{
   }};
 }}
 
-overlay.addEventListener('mousedown', e => {{
+drawCatch.addEventListener('mousedown', e => {{
   if (!drawMode) return;
   video.pause();  // фиксируем таймкод на момент начала разметки, не даём ему уехать
   const p = overlayPoint(e);
@@ -4271,7 +4410,7 @@ overlay.addEventListener('mousedown', e => {{
   drawing = {{ startX: p.x, startY: p.y, rectEl, w: p.w, h: p.h, atTime: video.currentTime }};
 }});
 
-overlay.addEventListener('mousemove', e => {{
+document.addEventListener('mousemove', e => {{
   if (!drawing) return;
   const p = overlayPoint(e);
   const x = Math.min(drawing.startX, p.x), y = Math.min(drawing.startY, p.y);
@@ -4281,7 +4420,7 @@ overlay.addEventListener('mousemove', e => {{
   drawing.lastX = p.x; drawing.lastY = p.y;
 }});
 
-overlay.addEventListener('mouseup', () => {{
+document.addEventListener('mouseup', () => {{
   if (!drawing) return;
   const x1 = Math.min(drawing.startX, drawing.lastX ?? drawing.startX);
   const y1 = Math.min(drawing.startY, drawing.lastY ?? drawing.startY);
@@ -4303,40 +4442,106 @@ overlay.addEventListener('mouseup', () => {{
 }});
 
 function showDrawForm() {{
-  const slot = document.getElementById('draw-form-slot');
-  slot.innerHTML = `
+  const form = document.getElementById('draw-form');
+  form.innerHTML = `
     <div class="draw-form">
-      <input id="obs-label-input" placeholder="Что это? (человек, палатка, рюкзак...)" autofocus>
+      <div class="ttl">Новая пометка</div>
+      <input id="obs-label-input" placeholder="Что это? (человек, палатка, рюкзак…)">
       <textarea id="obs-note-input" placeholder="Заметка (необязательно)"></textarea>
       <div class="row">
         <button class="btn-save" onclick="saveObservation()">Сохранить</button>
         <button class="btn-cancel" onclick="cancelDraw()">Отмена</button>
       </div>
+      <span class="hint">Enter — сохранить, Esc — отменить</span>
     </div>`;
-  document.getElementById('obs-label-input').focus();
+  form.hidden = false;
+
+  // Ловушку кликов на время формы выключаем: пока она включена, клики по
+  // полям формы до них не доходят -- прозрачный слой перехватывает всё.
+  drawCatch.classList.remove('on');
+
+  placeDrawForm();
+  const input = document.getElementById('obs-label-input');
+  input.focus();
+
+  // Enter в однострочном поле -- сохранить. В заметке Enter оставляет
+  // перенос строки: пометки бывают в несколько предложений, поэтому там
+  // работает Ctrl+Enter.
+  input.addEventListener('keydown', e => {{
+    if (e.key === 'Enter') {{ e.preventDefault(); saveObservation(); }}
+    if (e.key === 'Escape') {{ e.preventDefault(); cancelDraw(); }}
+  }});
+  document.getElementById('obs-note-input').addEventListener('keydown', e => {{
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {{
+      e.preventDefault(); saveObservation();
+    }}
+    if (e.key === 'Escape') {{ e.preventDefault(); cancelDraw(); }}
+  }});
+}}
+
+function placeDrawForm() {{
+  // Ставим форму рядом с нарисованной рамкой, но так, чтобы она не уехала
+  // за край кадра и не накрыла саму рамку -- иначе человек не видит того,
+  // что описывает.
+  const form = document.getElementById('draw-form');
+  if (form.hidden || !pendingBox) return;
+  const wrap = videoWrap.getBoundingClientRect();
+  const box = pendingBox.rectEl.getBoundingClientRect();
+  const gap = 10;
+
+  let left = box.right - wrap.left + gap;
+  if (left + form.offsetWidth > wrap.width - gap) {{
+    left = box.left - wrap.left - form.offsetWidth - gap;   // слева от рамки
+  }}
+  left = Math.max(gap, Math.min(left, wrap.width - form.offsetWidth - gap));
+
+  let top = box.top - wrap.top;
+  top = Math.max(gap, Math.min(top, wrap.height - form.offsetHeight - gap));
+
+  form.style.left = left + 'px';
+  form.style.top = top + 'px';
+}}
+
+function hideDrawForm() {{
+  const form = document.getElementById('draw-form');
+  form.hidden = true;
+  form.innerHTML = '';
+  // Ловушку возвращаем только если режим разметки всё ещё включён:
+  // человек мог выключить его, пока форма была открыта.
+  drawCatch.classList.toggle('on', drawMode);
 }}
 
 function cancelDraw() {{
   if (pendingBox) pendingBox.rectEl.remove();
   pendingBox = null;
-  document.getElementById('draw-form-slot').innerHTML = '';
+  hideDrawForm();
 }}
 
 async function saveObservation() {{
   if (!pendingBox) return;
   const label = document.getElementById('obs-label-input').value.trim();
   const note = document.getElementById('obs-note-input').value.trim();
+  const btn = document.querySelector('#draw-form .btn-save');
+  if (btn) btn.disabled = true;
   try {{
-    await fetch(`/api/report/${{reportId}}/observations`, {{
+    const res = await fetch(`/api/report/${{reportId}}/observations`, {{
       method: 'POST', headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{
         timestamp_sec: pendingBox.timestamp_sec, bbox: pendingBox.bbox, label, note,
       }}),
     }});
-  }} catch (e) {{}}
+    if (!res.ok) throw new Error('сервер ответил ' + res.status);
+  }} catch (e) {{
+    // НЕ глухой catch: пометка -- это находка, и человек обязан узнать,
+    // что она не сохранилась, а не думать, что отметил.
+    console.warn('пометка не сохранена', e);
+    alert('Не удалось сохранить пометку. Рамка и текст на месте, попробуйте ещё раз.');
+    if (btn) btn.disabled = false;
+    return;
+  }}
   pendingBox.rectEl.remove();
   pendingBox = null;
-  document.getElementById('draw-form-slot').innerHTML = '';
+  hideDrawForm();
   loadObservations();
 }}
 
