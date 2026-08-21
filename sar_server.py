@@ -2012,6 +2012,25 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .find .when{{color:var(--dim);font-size:11.5px}}
 .tag{{display:inline-block;font-size:11px;padding:1px 7px;border-radius:4px;
   background:var(--card2);color:var(--soft);margin-right:6px}}
+/* Статус триажа -- отдельной меткой, а не в подписи. Подпись говорит, ЧТО
+   человек увидел ("резко чёрное"), статус -- к какому выводу пришли
+   ("точно человек"); склеенные в строку, они теряют и то, и другое. */
+.tag.st{{margin-left:7px;margin-right:0}}
+.tag.st.confirmed_person,.tag.st.likely_person{{color:#8fe0b0}}
+.tag.st.confirmed_object,.tag.st.likely_object{{color:#e0c07a}}
+.tag.st.anomaly{{color:#9ec8ff}}
+.tag.st.rejected{{color:var(--dim)}}
+
+/* Отбор по статусу. Считать находки по рубрикам полезно само по себе:
+   видно, сколько разобрано и сколько ещё нет. */
+.chips{{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}}
+.chip{{font-family:inherit;font-size:12px;padding:4px 10px;border-radius:14px;
+  border:1px solid var(--line);background:transparent;color:var(--soft);
+  cursor:pointer;display:inline-flex;align-items:center;gap:6px}}
+.chip:hover{{border-color:var(--accent);color:var(--ink)}}
+.chip.on{{border-color:var(--accent);color:var(--ink);background:var(--card)}}
+.chip .n{{font-size:11px;color:var(--dim)}}
+.chip.on .n{{color:var(--accent)}}
 
 /* Кадр находки. Тот же размер, что у превью материалов -- список находок и
    список материалов стоят на одной странице, и разнобой в размере читался
@@ -2187,11 +2206,14 @@ function render() {{
 
   }} else if (tab === 'find') {{
     if (!findings) {{ b.innerHTML = '<div class="empty">Загружаю…</div>'; loadFindings(); return; }}
-    b.innerHTML = findings.length
-      ? `<div class="note">Только размеченное человеком: ручные пометки и
-           статусы триажа. Сцены модели сюда не попадают — их тысячи, и
-           настоящие находки в них потерялись бы.</div>` +
-        findings.map(f => {{
+    const shown = findings.filter(passesFilter);
+    b.innerHTML =
+      `<div class="note">Только размеченное человеком: ручные пометки и
+         статусы триажа. Сами по себе сцены модели сюда не попадают — их
+         тысячи, и настоящие находки в них потерялись бы.</div>` +
+      findFilters() +
+      (shown.length
+      ? shown.map(f => {{
           // Находка ведёт ТУДА, ГДЕ ОНА НАЙДЕНА: в плеер на её таймкод.
           // Список без переходов бесполезен -- человек видит «верёвка,
           // 66 с» и не может посмотреть, что там на самом деле.
@@ -2209,16 +2231,20 @@ function render() {{
                  <img src="${{f.preview}}" alt="" loading="lazy" decoding="async"
                       onerror="this.parentNode.classList.add('noshot');this.remove()"></span>`
             : `<span class="shot noshot"></span>`;
+          const status = f.status
+            ? `<span class="tag st ${{f.priority}}">${{esc(f.status)}}</span>` : '';
           return `<a class="find" href="${{href}}">
             ${{shot}}
             <span class="find-body">
-              <span class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}</span>
+              <span class="lbl"><span class="tag">${{f.kind === 'manual' ? '✍ пометка' : '🏷 триаж'}}</span>${{esc(f.label) || '—'}}${{status}}</span>
               <span class="sub">${{esc(f.file)}}${{tc ? ' · ' + tc : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</span>
               <span class="sub when">записано ${{fmtStamp(f.created_at)}}</span>
             </span>
           </a>`;
         }}).join('')
-      : `<div class="empty">Находок пока нет</div>`;
+      : `<div class="empty">${{findings.length
+            ? 'В этом отборе находок нет'
+            : 'Находок пока нет'}}</div>`);
 
   }} else if (tab === 'live') {{
     b.innerHTML = `<div class="empty">Эфиры появятся, когда включим трансляции.<br>
@@ -2236,6 +2262,7 @@ function render() {{
 // существует. Открывается по наведению, а не по клику, потому что клик по
 // строке уже занят переходом в плеер на таймкод находки.
 let peekEl = null, peekScale = 1, peekX = 0, peekY = 0, peekPinch = 0;
+let peekDrag = null;      // {{x, y}} последней точки при перетаскивании
 
 function peek() {{
   if (peekEl) return peekEl;
@@ -2244,7 +2271,7 @@ function peek() {{
   peekEl.innerHTML =
     `<div class="peek-view">
        <button class="peek-x" title="Закрыть">×</button>
-       <span class="peek-hint">колесо или щипок — масштаб</span>
+       <span class="peek-hint">колесо — масштаб, перетаскивание — сдвиг</span>
        <img alt="">
      </div>
      <div class="peek-cap"></div>`;
@@ -2252,8 +2279,10 @@ function peek() {{
 
   peekEl.querySelector('.peek-x').onclick = hidePeek;
   // Уводя курсор с окна, человек его и закрывает -- отдельного действия
-  // для этого не нужно.
-  peekEl.addEventListener('mouseleave', hidePeek);
+  // для этого не нужно. Но НЕ во время перетаскивания: при быстром сдвиге
+  // курсор легко выскакивает за край, и окно захлопывалось бы прямо
+  // посреди движения.
+  peekEl.addEventListener('mouseleave', () => {{ if (!peekDrag) hidePeek(); }});
 
   const view = peekEl.querySelector('.peek-view');
   view.addEventListener('wheel', e => {{
@@ -2261,8 +2290,43 @@ function peek() {{
     zoomPeek(e.deltaY < 0 ? 1.25 : 1 / 1.25, e);
   }}, {{ passive: false }});
 
+  // Перетаскивание левой кнопкой. Без него увеличенный кадр можно было
+  // только зумить: край снимка становился недостижим, а находка нередко
+  // как раз с краю.
+  view.addEventListener('mousedown', e => {{
+    if (e.button !== 0 || peekScale <= 1) return;
+    e.preventDefault();
+    peekDrag = {{ x: e.clientX, y: e.clientY }};
+    view.style.cursor = 'grabbing';
+  }});
+  // Слушаем на документе, а не на окне: если курсор при быстром движении
+  // выскочил за край, перетаскивание не должно застревать.
+  document.addEventListener('mousemove', e => {{
+    if (!peekDrag) return;
+    panPeek(e.clientX - peekDrag.x, e.clientY - peekDrag.y);
+    peekDrag = {{ x: e.clientX, y: e.clientY }};
+  }});
+  document.addEventListener('mouseup', () => {{
+    if (!peekDrag) return;
+    peekDrag = null;
+    view.style.cursor = peekScale > 1 ? 'grab' : 'zoom-in';
+  }});
+
+  // Тот же жест одним пальцем на тач-экране.
+  view.addEventListener('touchstart', e => {{
+    if (e.touches.length !== 1 || peekScale <= 1) return;
+    peekDrag = {{ x: e.touches[0].clientX, y: e.touches[0].clientY }};
+  }}, {{ passive: true }});
+
   // Щипок на тач-экране. Дистанция между пальцами -> масштаб.
   view.addEventListener('touchmove', e => {{
+    if (e.touches.length === 1 && peekDrag) {{
+      e.preventDefault();
+      panPeek(e.touches[0].clientX - peekDrag.x,
+              e.touches[0].clientY - peekDrag.y);
+      peekDrag = {{ x: e.touches[0].clientX, y: e.touches[0].clientY }};
+      return;
+    }}
     if (e.touches.length !== 2) return;
     e.preventDefault();
     const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -2274,13 +2338,31 @@ function peek() {{
     }});
     peekPinch = dist;
   }}, {{ passive: false }});
-  view.addEventListener('touchend', () => {{ peekPinch = 0; }});
+  view.addEventListener('touchend', () => {{ peekPinch = 0; peekDrag = null; }});
   return peekEl;
+}}
+
+function applyPeekTransform() {{
+  const view = peekEl.querySelector('.peek-view');
+  const img = peekEl.querySelector('img');
+  // Не даём утащить картинку за края окна: иначе легко "потерять" её и
+  // смотреть в пустоту, не понимая, куда всё делось.
+  const w = view.clientWidth, h = view.clientHeight;
+  peekX = Math.min(0, Math.max(peekX, w - w * peekScale));
+  peekY = Math.min(0, Math.max(peekY, h - h * peekScale));
+  img.style.transform =
+    `translate(${{peekX}}px, ${{peekY}}px) scale(${{peekScale}})`;
+  view.style.cursor = peekScale > 1 ? (peekDrag ? 'grabbing' : 'grab') : 'zoom-in';
+}}
+
+function panPeek(dx, dy) {{
+  peekX += dx;
+  peekY += dy;
+  applyPeekTransform();
 }}
 
 function zoomPeek(factor, at) {{
   const view = peekEl.querySelector('.peek-view');
-  const img = peekEl.querySelector('img');
   const before = peekScale;
   peekScale = Math.min(8, Math.max(1, peekScale * factor));
   if (peekScale === before) return;
@@ -2292,18 +2374,12 @@ function zoomPeek(factor, at) {{
   const cy = (at.clientY - r.top - peekY) / before;
   peekX = at.clientX - r.left - cx * peekScale;
   peekY = at.clientY - r.top - cy * peekScale;
-
-  // Не даём утащить картинку за края окна.
-  const w = r.width, h = view.clientHeight;
-  peekX = Math.min(0, Math.max(peekX, w - w * peekScale));
-  peekY = Math.min(0, Math.max(peekY, h - h * peekScale));
-  img.style.transform = `translate(${{peekX}}px, ${{peekY}}px) scale(${{peekScale}})`;
-  view.style.cursor = peekScale > 1 ? 'zoom-out' : 'zoom-in';
+  applyPeekTransform();
 }}
 
 function showPeek(anchor, src, caption) {{
   const el = peek();
-  peekScale = 1; peekX = 0; peekY = 0;
+  peekScale = 1; peekX = 0; peekY = 0; peekDrag = null;
   const img = el.querySelector('img');
   img.style.transform = '';
   img.src = src;
@@ -2331,6 +2407,62 @@ window.addEventListener('scroll', hidePeek, {{ passive: true }});
 document.addEventListener('keydown', e => {{
   if (e.key === 'Escape') hidePeek();
 }});
+
+// --- отбор находок по статусу --------------------------------------------
+//
+// Отбор живёт в браузере, а не в запросе: находок десятки, а не тысячи,
+// и переключение получается мгновенным, без похода на сервер. Данные при
+// этом приходят ПОЛНЫЕ -- прятать отклонённое на сервере значило бы лишить
+// человека возможности пересмотреть отбракованное, а в поиске к
+// отвергнутому возвращаются.
+//
+// По умолчанию показываем всё, кроме отклонённого: больше половины
+// статусов -- именно "отклонено", и с ними список превращается в перечень
+// того, что находкой НЕ оказалось.
+const FIND_STATUS = {{
+  'confirmed_person': '✅ точно человек',
+  'likely_person': '👤 предположительно человек',
+  'confirmed_object': '🎒 предмет',
+  'likely_object': '🎒 предположительно предмет',
+  'anomaly': '❓ аномалия',
+  'rejected': '❌ отклонено',
+  '': '— без статуса —',
+}};
+let findFilter = 'active';
+
+function passesFilter(f) {{
+  if (findFilter === 'all') return true;
+  if (findFilter === 'active') return f.priority !== 'rejected';
+  return (f.priority || '') === findFilter;
+}}
+
+function findFilters() {{
+  const counts = {{}};
+  findings.forEach(f => {{
+    const k = f.priority || '';
+    counts[k] = (counts[k] || 0) + 1;
+  }});
+  const active = findings.filter(f => f.priority !== 'rejected').length;
+
+  // Кнопки только для статусов, которые реально встречаются: пустые
+  // рубрики создают ощущение, что чего-то не хватает.
+  const chips = [
+    ['active', 'Актуальные', active],
+    ['all', 'Все', findings.length],
+  ].concat(Object.keys(FIND_STATUS)
+    .filter(k => counts[k])
+    .map(k => [k, FIND_STATUS[k], counts[k]]));
+
+  return `<div class="chips">` + chips.map(([key, name, n]) =>
+    `<button class="chip ${{findFilter === key ? 'on' : ''}}"
+       onclick="setFindFilter('${{key}}')">${{name}}<span class="n">${{n}}</span></button>`
+  ).join('') + `</div>`;
+}}
+
+function setFindFilter(key) {{
+  findFilter = key;
+  render();
+}}
 
 async function loadFindings() {{
   const r = await fetch(`/api/operations/${{OP}}/findings`);
@@ -2500,20 +2632,32 @@ def _finding_preview_url_inner(conn, f):
 def _finding_label(f):
     """Подпись находки человеческими словами.
 
-    У ручной пометки это её текст. У триажа в базе лежит служебный ключ
-    вроде "confirmed_person" -- показывать его человеку нельзя, для того и
-    существует PRIORITY_LABELS. Если у триажа была ещё и ручная подпись,
-    она добавляется: "точно человек" и "резко чёрное" вместе говорят
-    больше, чем по отдельности.
+    У ручной пометки это её собственный текст. У сцены модели своей подписи
+    нет -- показываем статус, который ей поставил человек. Служебный ключ
+    вроде "confirmed_person" человеку не показываем никогда, для того и
+    существует PRIORITY_LABELS.
     """
     if f.get("label"):
         return f["label"]
     priority = f.get("priority")
     if not priority:
         return ""
-    name = sar_common.PRIORITY_LABELS.get(priority, priority)
-    obs_label = f.get("obs_label")
-    return f"{name} · {obs_label}" if obs_label else name
+    return sar_common.PRIORITY_LABELS.get(priority, priority)
+
+
+def _finding_status(f):
+    """Статус триажа отдельной подписью.
+
+    У ручной пометки подпись своя ("резко чёрное"), а статус ("точно
+    человек") -- это другое измерение: что именно человек написал и к
+    какому выводу пришли. Склеивать их в одну строку значит терять и то,
+    и другое; поэтому статус идёт отдельной меткой.
+    """
+    priority = f.get("priority")
+    if not priority or not f.get("label"):
+        # у сцены модели статус уже стал подписью -- дублировать не надо
+        return ""
+    return sar_common.PRIORITY_LABELS.get(priority, priority)
 
 
 @app.route("/api/operations/<int:op_id>/findings")
@@ -2529,12 +2673,17 @@ def api_operation_findings(op_id):
             "report_id": f["report_id"],
             "file": rel.split("/")[-1],
             "label": _finding_label(f),
+            "status": _finding_status(f),
+            # служебный ключ статуса -- по нему отбирает интерфейс; человеку
+            # он не показывается никогда, для этого есть label/status
+            "priority": f.get("priority") or "",
             # у ручной пометки автор в viewer_name, у триажа -- в set_by
             "viewer": (f.get("viewer_name") or f.get("author")
                         or f.get("set_by") or ""),
-            # у триажа своего таймкода нет; для поставленного на ручную
-            # пометку он подтягивается из неё (см. operation_findings)
-            "seconds": f.get("timestamp_sec") or f.get("obs_seconds"),
+            # у сцены модели своего таймкода нет: в ключе сцены его не
+            # хранят. Оставляем пустым, а не нулём -- ноль выглядел бы как
+            # "в самом начале видео", то есть врал бы.
+            "seconds": f.get("timestamp_sec"),
             "lat": f.get("lat"), "lon": f.get("lon"),
             # время постановки: created_at у пометки, set_at у триажа
             "created_at": (f.get("created_at") or f.get("set_at")
