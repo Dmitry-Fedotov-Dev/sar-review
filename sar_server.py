@@ -946,9 +946,13 @@ def _health_snapshot():
     watch = os.path.abspath(SERVER_CFG["watch_dir"])
     _, _, db_path, _ = sar_common.resolve_paths(watch)
     data_dir = os.path.dirname(db_path)
+    # Папку копий НЕ передаём: её знает sar_common.backups_dir(), и это
+    # единственное место, где она считается. Здесь стоял третий по счёту
+    # самостоятельный расчёт того же пути ("на уровень выше watch_dir"), и
+    # именно он перебивал общее значение -- проверка докладывала "последняя
+    # копия 56 ч назад" сразу после свежей копии.
     facts = sar_health.collect(
         conn, watch,
-        backup_dir=os.path.join(os.path.dirname(watch.rstrip(os.sep)), "sar_backups"),
         reports_dir=os.path.join(data_dir, "reports"))
     return facts, sar_health.evaluate(facts)
 
