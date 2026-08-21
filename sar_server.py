@@ -3297,15 +3297,41 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .priority-control select {{ font-size:12px; padding:4px 6px; border-radius:5px; border:1px solid #444;
                              background:#0d0d0d; color:#eee; }}
 .priority-who {{ font-size:11px; color:#888; }}
-/* обсуждение находки */
-.discussion {{ margin-top:8px; border-top:1px solid #2a2a2a; padding-top:6px; }}
-.discussion summary {{ cursor:pointer; color:#8ecbff; font-size:12px; user-select:none; }}
-.discussion summary:hover {{ color:#b3d9ff; }}
-.cmt-list {{ margin:8px 0 6px; display:flex; flex-direction:column; gap:6px; }}
-.cmt {{ background:#141414; border:1px solid #2a2a2a; border-radius:6px; padding:6px 8px; }}
-.cmt-head {{ display:flex; align-items:center; gap:8px; margin-bottom:2px; }}
-.cmt-author {{ font-size:11px; font-weight:bold; color:#9fe8b5; }}
-.cmt-time {{ font-size:10px; color:#777; }}
+/* --- Комментарии -----------------------------------------------------
+   Обычный разговор: список реплик, под ним поле ввода.
+
+   Раньше блок жил в СВОЕЙ палитре -- синие ссылки #8ecbff, зелёные имена
+   #9fe8b5, синяя рамка кнопки #3355aa -- на странице, где акцент всей
+   платформы бирюзовый. Три разных акцента на одном экране читаются как
+   чужой виджет, приклеенный сбоку. Вход в обсуждение к тому же выглядел
+   переключателем "💬 обсуждение (2)", то есть элементом управления, а не
+   началом разговора.
+
+   Цвета взяты те же, что на страницах операций, чтобы плеер и операции
+   выглядели одной системой. Объявлены локально для блока: перекрасить
+   плеер целиком -- отдельная работа, и мешать её с этой значит менять
+   всё сразу и вслепую. */
+.discussion {{
+  --c-line:#2b353f; --c-card:#1a2129; --c-ink:#e8eeec;
+  --c-soft:#9aa8a5; --c-dim:#6f7d7a; --c-accent:#5fb8c7;
+  margin-top:10px; border-top:1px solid var(--c-line); padding-top:8px;
+}}
+/* Подпись, а не кнопка. Треугольник-маркер убран намеренно: он делал из
+   раздела орган управления, хотя это просто заголовок разговора. */
+.discussion summary {{ cursor:pointer; list-style:none; user-select:none;
+  font-size:11.5px; letter-spacing:.03em; color:var(--c-dim); padding:1px 0; }}
+.discussion summary::-webkit-details-marker {{ display:none; }}
+.discussion summary:hover {{ color:var(--c-soft); }}
+.discussion[open] summary {{ margin-bottom:9px; }}
+
+/* Реплики без рамок и подложек: разделяет их воздух, а не border. Десяток
+   реплик в рамочках рябит и читается как стопка карточек, а не как
+   разговор. */
+.cmt-list {{ display:flex; flex-direction:column; gap:10px; margin-bottom:11px; }}
+.cmt {{ display:flex; flex-direction:column; gap:2px; }}
+.cmt-head {{ display:flex; align-items:baseline; gap:8px; }}
+.cmt-author {{ font-size:12px; font-weight:650; color:var(--c-soft); }}
+.cmt-time {{ font-size:11px; color:var(--c-dim); }}
 .crumbs {{ font-size:13px; color:#888; margin:0; min-width:0;
            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
 .crumbs a {{ color:#6bb; text-decoration:none; }}
@@ -3327,21 +3353,37 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .howto a:hover {{ text-decoration:underline; }}
 .howto .pts {{ display:flex; flex-wrap:wrap; gap:4px 18px; }}
 .howto .pts span {{ white-space:nowrap; }}
-.cmt-del {{ margin-left:auto; background:none; border:none; color:#777; cursor:pointer;
-            font-size:15px; line-height:1; padding:0 2px; }}
-.cmt-del:hover {{ color:#ff6666; }}
-.cmt-text {{ font-size:12.5px; color:#ddd; white-space:pre-wrap; word-break:break-word; }}
-.cmt-form {{ display:flex; gap:6px; align-items:flex-start; }}
-.cmt-form textarea {{ flex:1; background:#0d0d0d; color:#eee; border:1px solid #333;
-                       border-radius:5px; padding:6px; font-family:inherit; font-size:12.5px;
-                       resize:vertical; min-height:34px; }}
-.cmt-form textarea:focus {{ outline:none; border-color:#3355aa; }}
-.cmt-form button {{ font-size:12px; padding:6px 10px; border-radius:5px; border:1px solid #3355aa;
-                     background:#252525; color:#8ecbff; cursor:pointer; white-space:nowrap; }}
-.cmt-form button:hover {{ background:#3355aa; color:#fff; }}
-.cmt-form button:disabled {{ opacity:0.5; cursor:default; }}
-.cmt-locked {{ font-size:11.5px; color:#888; background:#141414; border:1px dashed #333;
-                border-radius:6px; padding:7px 9px; line-height:1.5; }}
+/* Крестик удаления виден только при наведении на саму реплику: ряд
+   постоянных крестиков превращает разговор в панель управления. */
+.cmt-del {{ margin-left:auto; background:none; border:none; color:var(--c-dim);
+  cursor:pointer; font-size:14px; line-height:1; padding:0 2px;
+  opacity:0; transition:opacity .12s; }}
+.cmt:hover .cmt-del, .cmt-del:focus {{ opacity:1; }}
+.cmt-del:hover {{ color:#e0776a; }}
+.cmt-text {{ font-size:13px; line-height:1.5; color:var(--c-ink);
+  white-space:pre-wrap; word-break:break-word; }}
+
+/* Поле ввода неяркое по умолчанию: акцентом рамка загорается только
+   когда человек в него встал. */
+.cmt-form {{ display:flex; flex-direction:column; align-items:stretch; gap:7px; }}
+.cmt-form textarea {{ background:var(--c-card); color:var(--c-ink);
+  border:1px solid var(--c-line); border-radius:7px; padding:8px 10px;
+  font-family:inherit; font-size:13px; line-height:1.45;
+  resize:vertical; min-height:38px; }}
+.cmt-form textarea::placeholder {{ color:var(--c-dim); }}
+.cmt-form textarea:focus {{ outline:none; border-color:var(--c-accent); }}
+.cmt-actions {{ display:flex; align-items:center; gap:11px; }}
+/* Кнопка тихая, и пока писать нечего -- неактивна, а не молча
+   проглатывает пустую отправку. */
+.cmt-form button {{ font-size:12px; padding:5px 13px; border-radius:6px;
+  border:1px solid var(--c-line); background:transparent; color:var(--c-soft);
+  cursor:pointer; font-family:inherit; white-space:nowrap; }}
+.cmt-form button:hover:not(:disabled) {{ border-color:var(--c-accent);
+  color:var(--c-accent); }}
+.cmt-form button:disabled {{ opacity:.4; cursor:default; }}
+.cmt-hint {{ font-size:11px; color:var(--c-dim); }}
+.cmt-locked {{ font-size:12px; color:var(--c-dim); line-height:1.5;
+  border-left:2px solid var(--c-line); padding:2px 0 2px 10px; }}
 .empty {{ color:#777; font-size:13px; }}
 .ai-scene-badge {{ font-size:10px; padding:2px 6px; border-radius:4px; color:#fff; white-space:nowrap; }}
 .ai-scene-badge.model {{ background:#5533aa; }}
@@ -3639,9 +3681,9 @@ async function loadObservations() {{
   document.getElementById('obs-count').textContent = observations.length;
   const list = document.getElementById('obs-list');
   if (observations.length === 0) {{
-    list.innerHTML = '<div class="empty">Пока нет отметок. Включите режим разметки и выделите область на видео.</div>';
+    setCardsHtml(list, '<div class="empty">Пока нет отметок. Включите режим разметки и выделите область на видео.</div>');
   }} else {{
-    list.innerHTML = observations.map(o => {{
+    setCardsHtml(list, observations.map(o => {{
       const gps = (o.lat !== null && o.lat !== undefined)
         ? `<div class="obs-gps">📍 дрон: ${{o.lat.toFixed(6)}}, ${{o.lon.toFixed(6)}}
            <a href="https://www.google.com/maps?q=${{o.lat}},${{o.lon}}" target="_blank" rel="noopener">🗺 карта</a></div>` : '';
@@ -3666,7 +3708,7 @@ async function loadObservations() {{
           <button onclick="deleteObservation(${{o.id}})">🗑 удалить</button>
         </div>
       </div>`;
-    }}).join('');
+    }}).join(''));
   }}
   renderVisibleObservations();
 }}
@@ -3683,10 +3725,10 @@ async function loadAiScenes() {{
   const list = document.getElementById('ai-scenes-list');
   document.getElementById('ai-scenes-count').textContent = scenes.length;
   if (!scenes.length) {{
-    list.innerHTML = '<div class="empty">Модель пока ничего не нашла.</div>';
+    setCardsHtml(list, '<div class="empty">Модель пока ничего не нашла.</div>');
     return;
   }}
-  list.innerHTML = scenes.map(s => {{
+  setCardsHtml(list, scenes.map(s => {{
     const droneLine = (s.drone_lat !== null && s.drone_lat !== undefined)
       ? `<div class="obs-gps">📍 дрон: ${{s.drone_lat.toFixed(6)}}, ${{s.drone_lon.toFixed(6)}} `
         + `<a href="https://www.google.com/maps?q=${{s.drone_lat}},${{s.drone_lon}}" target="_blank" rel="noopener">🗺 карта</a></div>`
@@ -3709,7 +3751,7 @@ async function loadAiScenes() {{
       ${{renderPriorityControl('ai_scene', s.ref_key)}}
       ${{renderComments('ai_scene', s.ref_key)}}
     </div>`;
-  }}).join('');
+  }}).join(''));
 }}
 
 function jumpTo(sec) {{
@@ -3815,17 +3857,92 @@ function renderComments(kind, refKey) {{
   // id завязан на пару (kind, ref_key) -- на странице одновременно живут
   // десятки карточек, и поле ввода каждой должно быть своим
   const inputId = `cmt-input-${{kind}}-${{refKey}}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+  // Недописанный текст переживает перерисовку списка -- см. commentDrafts.
+  const draft = commentDrafts[inputId] || '';
+  // Подпись говорит, что внутри, а не предлагает нажать: если разговор уже
+  // есть, раздел и так раскрыт.
+  const label = list.length ? `Комментарии · ${{list.length}}`
+                            : 'Добавить комментарий';
+  const open = list.length || draft || openDiscussions[inputId] ? 'open' : '';
   return `
-    <details class="discussion" ${{list.length ? 'open' : ''}}>
-      <summary>💬 обсуждение${{list.length ? ` (${{list.length}})` : ''}}</summary>
+    <details class="discussion" ${{open}} ontoggle="rememberDiscussion('${{inputId}}', this.open)">
+      <summary>${{label}}</summary>
       <div class="cmt-list">${{items}}</div>
       ${{CAN_COMMENT ? `
       <div class="cmt-form">
-        <textarea id="${{inputId}}" rows="2" placeholder="Написать сообщение…"></textarea>
-        <button onclick="addComment('${{kind}}', '${{refKey}}', '${{inputId}}', this)">Отправить</button>
+        <textarea id="${{inputId}}" rows="2" placeholder="Ваш комментарий"
+          oninput="onCommentInput(this)"
+          onkeydown="onCommentKey(event, this)">${{escapeHtml(draft)}}</textarea>
+        <div class="cmt-actions">
+          <button ${{draft.trim() ? '' : 'disabled'}}
+            onclick="addComment('${{kind}}', '${{refKey}}', '${{inputId}}', this)">Отправить</button>
+          <span class="cmt-hint">Ctrl+Enter</span>
+        </div>
       </div>` : `<div class="cmt-locked">${{COMMENT_LOCK_REASON}}</div>`}}
     </details>`;
 }}
+
+// --- недописанный текст не должен пропадать -------------------------------
+//
+// Список наблюдений и список сцен перерисовываются целиком через innerHTML
+// каждые 15 секунд (см. loadObservations/loadAiScenes). Поле ввода живёт
+// ВНУТРИ этих списков, поэтому набранный комментарий, фокус и позиция
+// курсора исчезали ровно посреди фразы. Дописать длинную мысль было почти
+// невозможно -- именно это и делало обсуждение неудобным.
+//
+// Защита двойная, и обе половины нужны:
+//   * пока человек печатает, перерисовку откладываем (фокус и курсор
+//     сохранить восстановлением значения нельзя);
+//   * набранное всё равно помним, потому что можно отвлечься на видео --
+//     фокус уйдёт, и тогда перерисовка законна, а текст терять всё равно
+//     нельзя.
+let commentDrafts = {{}};
+let openDiscussions = {{}};
+let pendingCardRerender = false;
+
+function onCommentInput(ta) {{
+  commentDrafts[ta.id] = ta.value;
+  const btn = ta.parentNode.querySelector('button');
+  if (btn) btn.disabled = !ta.value.trim();
+}}
+
+function onCommentKey(event, ta) {{
+  // Ctrl+Enter -- привычная отправка; обычный Enter оставляет перенос
+  // строки, потому что пометки бывают в несколько предложений.
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {{
+    const btn = ta.parentNode.querySelector('button');
+    if (btn && !btn.disabled) btn.click();
+  }}
+}}
+
+function rememberDiscussion(inputId, isOpen) {{
+  openDiscussions[inputId] = isOpen;
+}}
+
+function isTypingComment() {{
+  const el = document.activeElement;
+  return !!(el && el.closest && el.closest('.cmt-form'));
+}}
+
+// Ставится вместо прямого innerHTML в местах, где перерисовывается карточка
+// с обсуждением внутри.
+function setCardsHtml(el, html) {{
+  if (isTypingComment()) {{ pendingCardRerender = true; return false; }}
+  el.innerHTML = html;
+  return true;
+}}
+
+// Как только человек ушёл из поля -- догоняем отложенную перерисовку, иначе
+// список останется устаревшим до следующего тика.
+document.addEventListener('focusout', () => {{
+  setTimeout(() => {{
+    if (pendingCardRerender && !isTypingComment()) {{
+      pendingCardRerender = false;
+      loadObservations();
+      loadAiScenes();
+    }}
+  }}, 0);
+}});
 
 async function addComment(kind, refKey, inputId, btn) {{
   const ta = document.getElementById(inputId);
@@ -3833,16 +3950,25 @@ async function addComment(kind, refKey, inputId, btn) {{
   if (!text) return;
   btn.disabled = true;
   try {{
-    await fetch(`/api/report/${{reportId}}/comments`, {{
+    const res = await fetch(`/api/report/${{reportId}}/comments`, {{
       method: 'POST', headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{ kind, ref_key: refKey, text }}),
     }});
+    if (!res.ok) throw new Error('сервер ответил ' + res.status);
+    // Черновик стираем ТОЛЬКО после успешной отправки: если запрос не
+    // прошёл, текст должен остаться в поле, а не пропасть.
     ta.value = '';
+    delete commentDrafts[inputId];
     await loadComments();
     loadObservations();
     loadAiScenes();
-  }} catch (e) {{}}
-  btn.disabled = false;
+  }} catch (e) {{
+    // Не глухой catch: молча проглоченная ошибка здесь означает, что
+    // человек считает сообщение отправленным, а его нет.
+    console.warn('комментарий не отправлен', e);
+    alert('Не удалось отправить комментарий. Текст сохранён, попробуйте ещё раз.');
+    btn.disabled = false;
+  }}
 }}
 
 async function deleteComment(id) {{
