@@ -101,9 +101,31 @@ def test_space_toggles_playback():
 
 
 def test_space_does_not_also_scroll_the_page():
-    body = PLAYER[PLAYER.index("case ' ':"):]
-    body = body[:body.index("case 'ArrowLeft'")]
+    body = PLAYER[PLAYER.index("if (e.key !== ' ' && e.code !== 'Space') return;"):]
+    body = body[:body.index("}}, true);")]
     assert "e.preventDefault()" in body, "страница уедет вниз на экран"
+
+
+def test_space_is_intercepted_before_anything_else():
+    """Пробел -- это ещё и «нажать кнопку в фокусе». Нажав кнопку «Режим
+    разметки» мышью, человек оставляет на ней фокус, и следующий пробел
+    переключал режим вместо паузы. Перехват в фазе capture отдаёт пробел
+    видео раньше, чем до него доберётся кнопка."""
+    body = PLAYER[PLAYER.index("if (e.key !== ' ' && e.code !== 'Space') return;"):]
+    body = body[:body.index("}}, true);")]
+    assert "e.stopPropagation()" in body, "кнопка в фокусе перехватит пробел"
+    assert "}}, true);" in PLAYER, "обработчик не в фазе перехвата"
+
+
+def test_space_works_in_draw_mode():
+    """Отдельно оговорено пользователем: пробел обязан управлять видео
+    ВСЕГДА, в том числе при включённой разметке."""
+    body = PLAYER[PLAYER.index("if (e.key !== ' ' && e.code !== 'Space') return;"):]
+    body = body[:body.index("}}, true);")]
+    assert "drawMode" not in body, (
+        "пробел завязан на режим разметки -- он должен работать всегда")
+    assert "drawToggle.blur();" in PLAYER, (
+        "фокус остаётся на кнопке разметки, и пробел будет нажимать её")
 
 
 def test_shortcuts_do_not_fire_while_typing():
