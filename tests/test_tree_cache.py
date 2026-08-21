@@ -177,6 +177,73 @@ def test_cache_does_not_leak_between_data_sets(tmp_path, monkeypatch, client):
         f"кэш отдал список от другой папки: {names}")
 
 
+# --- одновременное протухание не должно класть платформу -----------------
+
+def test_only_one_request_recomputes_when_the_cache_expires(
+        client, counted_scan, monkeypatch):
+    """Кэш чинил медиану, но портил худший случай -- это было измерено.
+
+    Пока значение свежее, все отвечают за миллисекунды. В момент протухания
+    восемь запросов промахивались ОДНОВРЕМЕННО и каждый честно считал всё
+    заново; восемь обходов диска дрались за те же ядра, и p95 списка вырос
+    с 1517 до 2079 мс -- хуже, чем без кэша вообще.
+
+    Теперь пересчитывает один, остальные получают предыдущий ответ сразу.
+    """
+    client.get("/api/tree")
+    assert len(counted_scan) == 1
+
+    real_time = time.time
+    monkeypatch.setattr(sar_server.time, "time",
+                        lambda: real_time() + sar_server.TREE_CACHE_TTL_SEC + 1)
+
+    # Имитируем одновременность: помечаем ключ как пересчитываемый (это и
+    # делает первый из восьми запросов) и смотрим, полезут ли остальные
+    # считать сами.
+    key = sar_server._tree_cache_key("")
+    sar_server._tree_refreshing.add(key)
+    try:
+        for _ in range(7):
+            r = client.get("/api/tree")
+            assert r.status_code == 200
+            assert r.get_json()["items"], "отдан пустой список вместо прежнего"
+    finally:
+        sar_server._tree_refresh_done(key)
+
+    assert len(counted_scan) == 1, (
+        f"пока один пересчитывал, остальные обошли диск ещё "
+        f"{len(counted_scan) - 1} раз -- это и есть тот самый затор")
+
+
+def test_refresh_flag_is_released_even_after_an_error(client, monkeypatch):
+    """Иначе после одной ошибки ключ навсегда останется «в пересчёте», и
+    список застынет на последнем удачном ответе."""
+    def boom(*a, **kw):
+        raise RuntimeError("сканирование упало")
+
+    monkeypatch.setattr(sar_common, "scan_all_materials", boom)
+    with pytest.raises(RuntimeError):
+        client.get("/api/tree")
+
+    key = sar_server._tree_cache_key("")
+    assert key not in sar_server._tree_refreshing, (
+        "признак пересчёта не снят -- список больше никогда не обновится")
+
+
+def test_cold_start_never_returns_an_empty_list(client, monkeypatch):
+    """Особый случай: кэша нет вовсе, а кто-то уже считает. Ждать нечего,
+    отдавать нечего -- считаем сами. Разовая двойная работа на первом
+    запросе дешевле, чем показать человеку пустую платформу."""
+    sar_server._tree_cache_clear()
+    key = sar_server._tree_cache_key("")
+    sar_server._tree_refreshing.add(key)
+    try:
+        data = client.get("/api/tree").get_json()
+    finally:
+        sar_server._tree_refresh_done(key)
+    assert len(data["items"]) == 2, "на холодном старте отдан пустой список"
+
+
 # --- новые файлы всё же появляются ---------------------------------------
 
 def test_new_file_shows_up_after_the_cache_expires(client, monkeypatch):
