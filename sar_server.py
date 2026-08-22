@@ -3922,14 +3922,16 @@ h1 {{ font-size:16px; margin:12px 0; }}
    пикселей меньше, чем снова перекрыть кнопки. */
 :root {{ --controls-h: 52px; }}
 
-/* Нативную кнопку полного экрана НЕ прячем.
-   Своя, поставленная на её место абсолютными координатами, уезжала: у
-   полосы управления нет обещанной геометрии, и подгонка пикселями ломается
-   при первом же изменении браузера. Штатная кнопка стоит там, где человек
-   её и ищет.
-   Она разворачивает только <video>, теряя слой разметки -- это чинится
-   подстраховкой в fullscreenchange: как только такое случилось, выходим и
-   разворачиваем обёртку целиком. */
+/* Нативная кнопка полного экрана убрана.
+   Она разворачивает САМ <video>, а слой разметки -- его сосед, и в
+   полноэкранном видео его просто не существует. Обойти это нельзя:
+   попытка "выйти и развернуть обёртку" не работает, потому что
+   requestFullscreen требует свежего действия пользователя, а после
+   асинхронного выхода оно уже истекло -- запрос отклоняется, и кнопка
+   выглядит сломанной.
+   Своя кнопка стоит в строке под видео: там у неё честная геометрия и
+   она ничего не перекрывает. */
+video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
 /* Толщина линии и размер подписи НЕ масштабируются вместе с кадром.
    При восьмикратном увеличении обводка в 2px превращалась в 16px и
    закрывала собой то, что обводит, -- а закрывать находку рамкой на
@@ -3952,6 +3954,13 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .legend {{ display:flex; flex-wrap:wrap; gap:4px 16px; margin:8px 0 2px;
   font-size:11.5px; color:#7d8a87; }}
 .legend b {{ color:#b9c4c1; font-weight:600; }}
+/* Кнопка полного экрана -- обычный элемент строки, а не наложение на
+   полосу управления браузера. Там у неё нет обещанной геометрии: прошлая
+   попытка встать "на место нативной" уехала под полосу. */
+.fs-btn {{ font-family:inherit; font-size:11.5px; padding:2px 9px;
+  border-radius:6px; border:1px solid #2b353f; background:transparent;
+  color:#9aa8a5; cursor:pointer; }}
+.fs-btn:hover {{ border-color:#5fb8c7; color:#e8eeec; }}
 .src-switch {{ display:inline-flex; align-items:center; gap:5px; cursor:pointer;
   color:#8d9a97; }}
 .src-switch input {{ margin:0; cursor:pointer; }}
@@ -4160,8 +4169,8 @@ h1 {{ font-size:16px; margin:12px 0; }}
            оставался в обычном документе, поэтому в полном экране рамки
            пропадали, а рисовать было нечем. -->
       <div id="stage">
-        <video id="video" controls disablePictureInPicture
-               src="/report/{report_id}/video"></video>
+        <video id="video" controls controlsList="nofullscreen"
+               disablePictureInPicture src="/report/{report_id}/video"></video>
         <svg id="overlay"></svg>
         <!-- Ловушка кликов для рисования. Не достаёт до нативной полосы
              управления, поэтому кнопки плеера остаются нажимаемыми и при
@@ -4196,6 +4205,8 @@ h1 {{ font-size:16px; margin:12px 0; }}
       <!-- Плеер по умолчанию играет лёгкую копию. Человек должен видеть,
            что смотрит именно её, и уметь переключиться на оригинал --
            иначе сжатие превращается в тихое ухудшение инструмента. -->
+      <button type="button" id="fs-toggle" class="fs-btn"
+        title="Во весь экран (F, двойной клик по кадру)">⛶ во весь экран</button>
       <label class="src-switch" id="src-switch" hidden>
         <input type="checkbox" id="use-original"> оригинал
         <span class="src-note" id="src-note"></span>
@@ -4574,6 +4585,8 @@ function toggleFullscreen() {{
 // и двойной клик легко получается случайно. Ловушка кликов перекрывает
 // кадр и до этого обработчика событие просто не доходит, но проверку
 // оставляем явной -- она объясняет намерение.
+document.getElementById('fs-toggle').addEventListener('click', toggleFullscreen);
+
 stage.addEventListener('dblclick', e => {{
   if (drawMode) return;
   e.preventDefault();
@@ -4585,8 +4598,13 @@ document.addEventListener('fullscreenchange', () => {{
   // его сосед, и он остаётся в обычном документе: рамки пропадают, рисовать
   // нечем. Поэтому ловим момент и разворачиваем обёртку целиком.
   if (document.fullscreenElement === video) {{
-    document.exitFullscreen().then(() => videoWrap.requestFullscreen())
-      .catch(() => {{}});
+    // Сюда попадаем, только если браузер всё-таки развернул само видео
+    // мимо нашей кнопки. Чинить это на лету нельзя: requestFullscreen
+    // требует свежего действия пользователя, а оно к этому моменту уже
+    // истекло, и запрос молча отклоняется. Поэтому просто выходим и
+    // говорим вслух -- молчаливый отказ выглядит как сломанная кнопка.
+    console.warn('видео развернулось без слоя разметки, выхожу из полного экрана');
+    document.exitFullscreen().catch(e => console.warn('выход не удался', e));
     return;
   }}
   // Размер сцены сменился -- пересчитываем рамки, иначе они останутся

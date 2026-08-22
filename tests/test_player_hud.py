@@ -45,13 +45,37 @@ def test_zoom_still_works_by_wheel_and_keys():
     assert "'touchmove'" in PLAYER
 
 
-def test_fullscreen_uses_the_native_button():
-    """Своя кнопка ставилась на место нативной абсолютными координатами и
-    уехала ниже полосы управления: у полосы нет обещанной геометрии, и
-    подгонка пикселями ломается. Возвращена штатная -- она всегда там, где
-    человек её ищет."""
-    assert 'id="fs-toggle"' not in PLAYER
-    assert "media-controls-fullscreen-button" not in PLAYER
+def test_native_fullscreen_button_is_hidden():
+    """Нативная кнопка разворачивает САМ <video>, а слой разметки -- его
+    сосед, и в полноэкранном видео его не существует.
+
+    Обойти это нельзя: попытка «выйти и развернуть обёртку» не работает,
+    потому что requestFullscreen требует свежего действия пользователя, а
+    после асинхронного выхода оно уже истекло. Запрос отклонялся, отказ
+    проглатывался пустым catch -- и кнопка выглядела сломанной и на
+    включение, и на выключение.
+    """
+    assert "media-controls-fullscreen-button" in PLAYER
+    assert 'controlsList="nofullscreen"' in PLAYER
+
+
+def test_own_fullscreen_button_has_honest_geometry():
+    """Прошлая своя кнопка ставилась поверх полосы управления абсолютными
+    координатами и уехала под неё: у полосы нет обещанной геометрии.
+    Теперь это обычный элемент строки под видео."""
+    assert 'id="fs-toggle"' in PLAYER
+    m = re.search(r"\.fs-btn \{\{([^}]*)\}\}", PLAYER)
+    assert m, "правило кнопки не найдено"
+    assert "position:absolute" not in m.group(1)
+
+
+def test_fullscreen_failures_are_not_silent():
+    """Молчаливый отказ неотличим от сломанной кнопки -- на этом и
+    обожглись."""
+    body = PLAYER[PLAYER.index("document.addEventListener('fullscreenchange'"):]
+    body = body[:body.index("}});")]
+    assert "catch(() => {{}})" not in body
+    assert "console.warn" in body
 
 
 def test_double_click_also_opens_fullscreen():
