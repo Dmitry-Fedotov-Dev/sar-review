@@ -3929,9 +3929,7 @@ h1 {{ font-size:16px; margin:12px 0; }}
    requestFullscreen требует свежего действия пользователя, а после
    асинхронного выхода оно уже истекло -- запрос отклоняется, и кнопка
    выглядит сломанной.
-   Своя кнопка стоит в строке под видео: там у неё честная геометрия и
-   она ничего не перекрывает. */
-video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
+   Свои элементы управления стоят на её месте -- см. .vbar ниже. */
 /* Толщина линии и размер подписи НЕ масштабируются вместе с кадром.
    При восьмикратном увеличении обводка в 2px превращалась в 16px и
    закрывала собой то, что обводит, -- а закрывать находку рамкой на
@@ -3954,13 +3952,31 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
 .legend {{ display:flex; flex-wrap:wrap; gap:4px 16px; margin:8px 0 2px;
   font-size:11.5px; color:#7d8a87; }}
 .legend b {{ color:#b9c4c1; font-weight:600; }}
-/* Кнопка полного экрана -- обычный элемент строки, а не наложение на
-   полосу управления браузера. Там у неё нет обещанной геометрии: прошлая
-   попытка встать "на место нативной" уехала под полосу. */
-.fs-btn {{ font-family:inherit; font-size:11.5px; padding:2px 9px;
-  border-radius:6px; border:1px solid #2b353f; background:transparent;
-  color:#9aa8a5; cursor:pointer; }}
-.fs-btn:hover {{ border-color:#5fb8c7; color:#e8eeec; }}
+/* Свои элементы управления в полосе браузера, справа внизу.
+   Полоса не сообщает своей высоты, поэтому не подгоняем кнопку пикселями,
+   а растягиваем полосу-контейнер на всю ширину и выравниваем содержимое
+   по правому краю: даже если высота полосы у другого браузера иная,
+   элементы останутся вместе и на своём краю. Прошлая попытка задать
+   кнопке absolute-координаты уехала под полосу. */
+.vbar {{ position:absolute; right:8px; bottom:0; height:48px; z-index:3;
+  display:flex; align-items:center; gap:6px;
+  opacity:0; transition:opacity .15s; pointer-events:none; }}
+.video-wrap:hover .vbar, .video-wrap.paused .vbar {{ opacity:1;
+  pointer-events:auto; }}
+.vbar button, .vbar select {{ font-family:inherit; cursor:pointer;
+  border:none; background:transparent; color:#fff; }}
+.vbar button {{ width:34px; height:34px; padding:0; font-size:17px;
+  line-height:1; border-radius:6px; }}
+.vbar button:hover {{ background:rgba(255,255,255,.16); }}
+.vbar select {{ font-size:12px; padding:3px 4px; border-radius:6px;
+  background:rgba(0,0,0,.45); }}
+.vbar select:hover {{ background:rgba(0,0,0,.75); }}
+.vbar :focus-visible {{ outline:2px solid #5fb8c7; }}
+
+/* Нативные кнопка полного экрана и меню "⋮" убраны -- см. комментарий в
+   разметке. Остальная полоса (пуск, перемотка, звук) остаётся штатной. */
+video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
+video::-webkit-media-controls-overflow-button {{ display:none !important; }}
 .src-switch {{ display:inline-flex; align-items:center; gap:5px; cursor:pointer;
   color:#8d9a97; }}
 .src-switch input {{ margin:0; cursor:pointer; }}
@@ -4177,6 +4193,22 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
              включённой разметке. -->
         <div id="draw-catch"></div>
       </div>
+      <!-- Свои элементы управления НА МЕСТЕ нативных, справа внизу.
+           Нативная кнопка полного экрана убрана: она разворачивает сам
+           <video>, а слой разметки -- его сосед, и в полноэкранном видео
+           его не существует. Починить это на лету нельзя, requestFullscreen
+           требует свежего действия пользователя.
+           Меню "⋮" тоже убрано, а скорость перенесена сюда: иначе пришлось
+           бы угадывать, где это меню кончается, чтобы не наехать на него. -->
+      <div class="vbar" id="vbar">
+        <select id="speed" title="Скорость воспроизведения">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option>
+        </select>
+        <button type="button" id="fs-toggle" title="Во весь экран (F)">⛶</button>
+      </div>
       <!-- Форма заметки живёт ВНУТРИ обёртки видео, а не под плеером.
            Под плеером её не видно в полноэкранном режиме: нарисовать рамку
            можно, а заполнить заметку нечем -- на этом и споткнулся
@@ -4205,8 +4237,6 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
       <!-- Плеер по умолчанию играет лёгкую копию. Человек должен видеть,
            что смотрит именно её, и уметь переключиться на оригинал --
            иначе сжатие превращается в тихое ухудшение инструмента. -->
-      <button type="button" id="fs-toggle" class="fs-btn"
-        title="Во весь экран (F, двойной клик по кадру)">⛶ во весь экран</button>
       <label class="src-switch" id="src-switch" hidden>
         <input type="checkbox" id="use-original"> оригинал
         <span class="src-note" id="src-note"></span>
@@ -4586,6 +4616,24 @@ function toggleFullscreen() {{
 // кадр и до этого обработчика событие просто не доходит, но проверку
 // оставляем явной -- она объясняет намерение.
 document.getElementById('fs-toggle').addEventListener('click', toggleFullscreen);
+
+// Скорость. Переехала из меню "⋮", которое пришлось убрать: иначе
+// невозможно предсказать, где оно кончается, и своя кнопка на него
+// наезжала.
+const speedSel = document.getElementById('speed');
+speedSel.addEventListener('change', () => {{
+  video.playbackRate = parseFloat(speedSel.value) || 1;
+  // Фокус не оставляем на списке: иначе стрелки начнут перебирать
+  // скорости вместо перемотки видео.
+  speedSel.blur();
+}});
+
+// Нативная полоса видна на паузе и при наведении -- наши кнопки ведут
+// себя так же, иначе они висели бы поверх кадра, когда всё прочее скрыто.
+function syncPaused() {{ videoWrap.classList.toggle('paused', video.paused); }}
+video.addEventListener('play', syncPaused);
+video.addEventListener('pause', syncPaused);
+syncPaused();
 
 stage.addEventListener('dblclick', e => {{
   if (drawMode) return;

@@ -59,14 +59,46 @@ def test_native_fullscreen_button_is_hidden():
     assert 'controlsList="nofullscreen"' in PLAYER
 
 
-def test_own_fullscreen_button_has_honest_geometry():
-    """Прошлая своя кнопка ставилась поверх полосы управления абсолютными
-    координатами и уехала под неё: у полосы нет обещанной геометрии.
-    Теперь это обычный элемент строки под видео."""
-    assert 'id="fs-toggle"' in PLAYER
-    m = re.search(r"\.fs-btn \{\{([^}]*)\}\}", PLAYER)
-    assert m, "правило кнопки не найдено"
-    assert "position:absolute" not in m.group(1)
+def test_controls_sit_in_the_players_own_bar():
+    """Кнопка вернулась на привычное место -- справа внизу, в полосе
+    управления.
+
+    Полоса не сообщает своей высоты, поэтому кнопка не подгоняется
+    пикселями: контейнер занимает всю высоту полосы и прижимает
+    содержимое к правому краю. Предыдущая попытка задать координаты
+    уехала под полосу.
+    """
+    assert 'id="vbar"' in PLAYER
+    m = re.search(r"\.vbar \{\{([^}]*)\}\}", PLAYER)
+    assert m, "правило полосы не найдено"
+    rule = m.group(1)
+    assert "display:flex" in rule and "align-items:center" in rule
+    assert "bottom:0" in rule
+
+
+def test_controls_appear_like_native_ones():
+    """Иначе они висели бы поверх кадра, когда вся остальная полоса
+    скрыта."""
+    assert ".video-wrap:hover .vbar" in PLAYER
+    assert ".video-wrap.paused .vbar" in PLAYER
+    assert "function syncPaused" in PLAYER
+
+
+def test_speed_moved_next_to_the_button():
+    """Меню «⋮» убрано, потому что нельзя предсказать, где оно кончается,
+    и своя кнопка на него наезжала. Скорость нужна по методике, поэтому
+    переехала сюда."""
+    assert 'id="speed"' in PLAYER
+    assert "media-controls-overflow-button" in PLAYER
+    assert "video.playbackRate = parseFloat" in PLAYER
+    for value in ("0.25", "0.5", "0.75"):
+        assert f'value="{value}"' in PLAYER, f"нет скорости {value}"
+
+
+def test_speed_does_not_steal_the_arrow_keys():
+    """Фокус на списке -- и стрелки начнут перебирать скорости вместо
+    перемотки видео."""
+    assert "speedSel.blur()" in PLAYER
 
 
 def test_fullscreen_failures_are_not_silent():
