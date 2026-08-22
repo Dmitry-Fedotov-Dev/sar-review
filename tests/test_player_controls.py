@@ -31,24 +31,28 @@ def rendered():
 
 # --- 1. одна кнопка полного экрана ---------------------------------------
 
-def test_only_the_native_fullscreen_button_is_left():
-    """Своя кнопка, поставленная на место нативной абсолютными
-    координатами, уехала ниже полосы управления: у неё нет обещанной
-    геометрии, и подгонка пикселями ломается. Штатная кнопка стоит там,
-    где человек её и ищет, а двух кнопок больше нет."""
-    assert 'id="fs-toggle"' not in PLAYER, "своя кнопка вернулась"
-    assert "media-controls-fullscreen-button" not in PLAYER, (
-        "нативная кнопка снова спрятана -- полный экран станет недоступен "
-        "мышью")
-    assert 'controlsList="nofullscreen"' not in PLAYER, (
-        "нативная кнопка снова отключена атрибутом")
+def test_only_one_fullscreen_button_is_left():
+    """Кнопок полного экрана должна быть ровно одна -- своя.
+
+    Нативная развернула бы САМ <video>, потеряв слой разметки, а починить
+    это на лету нельзя: requestFullscreen требует свежего действия
+    пользователя, и после асинхронного выхода запрос отклоняется.
+    """
+    assert 'id="fs-toggle"' in PLAYER, "своей кнопки нет"
+    assert "media-controls-fullscreen-button" in PLAYER, "нативная не скрыта"
+    assert 'controlsList="nofullscreen"' in PLAYER
 
 
-def test_native_button_still_expands_the_whole_wrapper():
-    """Нативная кнопка разворачивает только <video> и теряет слой разметки.
-    Подстраховка обязана это ловить."""
-    assert "document.fullscreenElement === video" in PLAYER
+def test_fullscreen_expands_the_whole_wrapper():
+    """Разворачивается обёртка, внутри которой и видео, и слой разметки."""
     assert "videoWrap.requestFullscreen" in PLAYER
+
+
+def test_video_going_fullscreen_alone_is_caught_and_reported():
+    """Если браузер всё-таки развернул само видео мимо нашей кнопки --
+    выходим и говорим вслух, а не молчим."""
+    assert "document.fullscreenElement === video" in PLAYER
+    assert "развернулось без слоя разметки" in PLAYER
 
 
 def test_speed_menu_is_not_touched():

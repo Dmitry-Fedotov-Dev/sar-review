@@ -51,13 +51,13 @@ def test_fullscreen_goes_to_the_wrapper_not_the_video():
         "разворачивается сам <video> -- слой разметки останется снаружи")
 
 
-def test_native_fullscreen_button_is_left_in_place():
-    """Сначала её прятали, чтобы человек не получил видео без слоя
-    разметки. Замена -- своя кнопка на её месте -- уехала: у полосы
-    управления нет обещанной геометрии. Штатная кнопка возвращена, а
-    потерю слоя ловит подстраховка в fullscreenchange."""
-    assert 'controlsList="nofullscreen"' not in PLAYER
-    assert "document.fullscreenElement === video" in PLAYER
+def test_native_fullscreen_button_is_disabled():
+    """Штатную кнопку пробовали оставить -- она разворачивает только
+    <video>, а «выйти и развернуть обёртку» не срабатывает: к моменту
+    повторного запроса действие пользователя уже истекло. Кнопка
+    выглядела сломанной. Прячем её, свою ставим строкой ниже."""
+    assert 'controlsList="nofullscreen"' in PLAYER
+    assert "media-controls-fullscreen-button" in PLAYER
 
 
 def test_there_is_a_fallback_if_the_browser_ignores_controlslist():
