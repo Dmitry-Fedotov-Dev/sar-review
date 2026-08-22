@@ -3648,14 +3648,30 @@ def api_observations(report_id):
         if estimate:
             est_lat, est_lon, est_distance_m = estimate
 
-    conn.execute(
+    now = datetime.now().isoformat()
+    cur = conn.execute(
         "INSERT INTO manual_observations (report_id, viewer_name, timestamp_sec, bbox, label, "
         "note, lat, lon, est_lat, est_lon, est_distance_m, raw_telemetry, created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (report_id, viewer_name, float(timestamp_sec), json.dumps(bbox), label, note, lat, lon,
-         est_lat, est_lon, est_distance_m, raw_telemetry, datetime.now().isoformat()))
+         est_lat, est_lon, est_distance_m, raw_telemetry, now))
+    obs_id = cur.lastrowid
+
+    # Статус ставится ТУТ ЖЕ, одной операцией с самой пометкой.
+    #
+    # Иначе пришлось бы делать второй запрос из браузера, а между ними
+    # существует промежуток, в котором находка уже есть, а её статус ещё
+    # нет: оборвётся связь -- и пометка "точно человек" останется
+    # неразмеченной, причём человек будет уверен, что отметил.
+    priority = (data.get("priority") or "").strip()
+    if priority and priority in sar_common.VALID_PRIORITIES:
+        conn.execute(
+            "INSERT OR REPLACE INTO detection_priorities "
+            "(report_id, kind, ref_key, priority, set_by, set_at) "
+            "VALUES (?, 'manual', ?, ?, ?, ?)",
+            (report_id, str(obs_id), priority, viewer_name, now))
     conn.commit()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "id": obs_id})
 
 
 @app.route("/api/report/<report_id>/observations/<int:obs_id>", methods=["DELETE"])
@@ -3840,16 +3856,21 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .video-wrap:fullscreen #stage {{ width:100%; }}
 .video-wrap:fullscreen #stage video {{ max-height:100vh; object-fit:contain; }}
 
-/* Кнопки масштаба и полного экрана. Поверх видео, но выше нативных
-   элементов управления не лезут -- те снизу, эти сверху справа. */
-.vid-tools {{ position:absolute; top:8px; right:8px; display:flex; gap:5px;
-              z-index:3; }}
-.vid-tools button {{ min-width:30px; height:28px; padding:0 7px; cursor:pointer;
-  border-radius:6px; border:1px solid rgba(255,255,255,.22);
-  background:rgba(0,0,0,.55); color:#eee; font-family:inherit; font-size:13px;
-  line-height:1; }}
-.vid-tools button:hover {{ background:rgba(0,0,0,.85); border-color:#5fb8c7; }}
-#zoom-level {{ font-variant-numeric:tabular-nums; }}
+/* Кнопка полного экрана -- на месте нативной, справа внизу.
+   Нативную мы прячем (она разворачивает только <video> и теряет слой
+   разметки), а эта занимает освободившееся место. Отступ справа оставлен
+   под меню "⋮" -- в нём живёт замедленное воспроизведение, и налезать на
+   него нельзя. Величина подобрана под Chrome; если меню нет, кнопка
+   просто стоит чуть левее края, и это не мешает. */
+#fs-toggle {{ position:absolute; right:46px; bottom:7px; z-index:3;
+  width:32px; height:32px; padding:0; cursor:pointer; border:none;
+  background:transparent; color:#fff; font-size:17px; line-height:1;
+  opacity:0; transition:opacity .15s; }}
+/* Появляется вместе с нативной полосой -- по наведению на кадр или на
+   паузе, как ведут себя все остальные кнопки плеера. */
+.video-wrap:hover #fs-toggle, .video-wrap.paused #fs-toggle {{ opacity:.85; }}
+#fs-toggle:hover {{ opacity:1; }}
+#fs-toggle:focus-visible {{ opacity:1; outline:2px solid #5fb8c7; }}
 /* pointer-events:none по умолчанию -- иначе оверлей перехватывает клики по
    нативным элементам управления видео (play/пауза/перемотка/громкость),
    и ими становится невозможно пользоваться. Включаем перехват кликов
@@ -3888,8 +3909,11 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
 #overlay text.obs-label {{ fill:#ff3b3b; font-size:14px; font-weight:bold; paint-order:stroke; stroke:#000; stroke-width:3px; }}
 
 .toolbar {{ display:flex; align-items:center; gap:10px; margin:10px 0; flex-wrap:wrap; }}
-.hint.keys {{ color:#8a8a8a; }}
-.hint.keys b {{ color:#c9c9c9; font-weight:600; }}
+/* Легенда управления. Тихая: она справочная, читается один раз и дальше
+   не должна тянуть взгляд с кадра. */
+.legend {{ display:flex; flex-wrap:wrap; gap:4px 16px; margin:8px 0 2px;
+  font-size:11.5px; color:#7d8a87; }}
+.legend b {{ color:#b9c4c1; font-weight:600; }}
 .toolbar button {{ background:#1b1b1b; color:#eee; border:1px solid #333; border-radius:6px;
                     padding:7px 12px; cursor:pointer; font-size:13px; }}
 .toolbar button:hover {{ border-color:#555; }}
@@ -3923,6 +3947,10 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
     border:1px solid #333; border-radius:5px; padding:8px; margin-bottom:8px; font-family:inherit; font-size:13px; }}
 .draw-form textarea {{ resize:vertical; min-height:50px; }}
 .draw-form input, .draw-form textarea {{ border-color:#2b353f; border-radius:7px; }}
+.draw-form select {{ width:100%; box-sizing:border-box; margin-bottom:8px;
+  background:#0d0d0d; color:#eee; border:1px solid #2b353f; border-radius:7px;
+  padding:7px; font-family:inherit; font-size:13px; }}
+.draw-form select:focus {{ outline:none; border-color:#5fb8c7; }}
 .draw-form input:focus, .draw-form textarea:focus {{ outline:none; border-color:#5fb8c7; }}
 .draw-form .row {{ display:flex; gap:8px; }}
 .draw-form button {{ flex:1; padding:7px; border-radius:7px; cursor:pointer;
@@ -4106,23 +4134,32 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
            Снаружи #stage, а не внутри: иначе зум масштабировал бы и саму
            форму вместе с кадром. -->
       <div id="draw-form" hidden></div>
-      <div class="vid-tools">
-        <button type="button" id="zoom-out" title="Отдалить">&minus;</button>
-        <button type="button" id="zoom-level" title="Сбросить масштаб">100%</button>
-        <button type="button" id="zoom-in" title="Приблизить">+</button>
-        <button type="button" id="fs-toggle" title="Во весь экран">⛶</button>
-      </div>
+      <!-- Кнопки масштаба убраны с кадра: масштаб делается колесом и
+           клавишами, а постоянный блок поверх видео отнимает у кадра угол
+           и мешает смотреть -- ради чего плеер и существует.
+           Полный экран остаётся кнопкой: без неё он был бы доступен только
+           с клавиатуры. Стоит на месте нативной, справа внизу. -->
+      <button type="button" id="fs-toggle" title="Во весь экран (F)">⛶</button>
+    </div>
+
+    <!-- Легенда под видео, а не поверх кадра. Кнопки масштаба убраны с
+         самого кадра: они отнимали угол картинки, ради которой всё и
+         затевалось. Значит про масштаб и клавиши надо сказать здесь,
+         иначе о них никто не узнает. -->
+    <div class="legend">
+      <span><b>колесо мыши</b> — масштаб</span>
+      <span><b>тянуть мышью</b> — двигать увеличенный кадр</span>
+      <span><b>пробел</b> — пауза</span>
+      <span><b>←/→</b> — ±5 с, с Shift ±10</span>
+      <span><b>+ &minus; 0</b> — масштаб с клавиатуры</span>
+      <span><b>M</b> — разметка</span>
+      <span><b>F</b> — во весь экран</span>
+      <span><b>Esc</b> — отменить рамку</span>
     </div>
 
     <div class="toolbar">
       <button id="draw-toggle">🖊 Режим разметки: выкл</button>
       <span class="hint">включите режим и потяните мышью по видео, чтобы отметить область</span>
-      <!-- Без подсказки про клавиши о них никто не узнает, и работа
-           окажется впустую. Строка намеренно короткая: место в панели
-           дороже полноты. -->
-      <span class="hint keys"><b>пробел</b> пауза · <b>←/→</b> ±5 с
-        (с Shift ±10) · <b>M</b> разметка · <b>F</b> во весь экран ·
-        <b>+ &minus; 0</b> масштаб</span>
     </div>
     <div class="toolbar">
       <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
@@ -4262,7 +4299,6 @@ document.addEventListener('keydown', e => {{
 // сцена целиком, а в полный экран уходит ОБЁРТКА, внутри которой оба.
 const videoWrap = document.getElementById('video-wrap');
 const stage = document.getElementById('stage');
-const zoomLevel = document.getElementById('zoom-level');
 let vz = {{ scale: 1, x: 0, y: 0, drag: null, pinch: 0 }};
 
 function applyStage() {{
@@ -4276,7 +4312,6 @@ function applyStage() {{
   if (vz.scale === 1) {{ vz.x = 0; vz.y = 0; }}
   stage.style.transform =
     `translate(${{vz.x}}px, ${{vz.y}}px) scale(${{vz.scale}})`;
-  zoomLevel.textContent = Math.round(vz.scale * 100) + '%';
   // Тянуть за кадр можно только когда есть что тянуть и когда мы не
   // рисуем: в режиме разметки перетаскивание -- это рисование рамки.
   videoWrap.style.cursor =
@@ -4306,12 +4341,6 @@ function zoomCentre(factor) {{
   const r = videoWrap.getBoundingClientRect();
   zoomAt(factor, r.left + r.width / 2, r.top + r.height / 2);
 }}
-
-document.getElementById('zoom-in').addEventListener('click', () => zoomCentre(1.4));
-document.getElementById('zoom-out').addEventListener('click', () => zoomCentre(1 / 1.4));
-zoomLevel.addEventListener('click', () => {{
-  vz.scale = 1; vz.x = 0; vz.y = 0; applyStage();
-}});
 
 videoWrap.addEventListener('wheel', e => {{
   e.preventDefault();
@@ -4365,6 +4394,13 @@ function toggleFullscreen() {{
   }}
 }}
 document.getElementById('fs-toggle').addEventListener('click', toggleFullscreen);
+
+// Нативная полоса управления видна на паузе -- наша кнопка должна вести
+// себя так же, иначе на паузе она пропадала бы одна.
+function syncPaused() {{ videoWrap.classList.toggle('paused', video.paused); }}
+video.addEventListener('play', syncPaused);
+video.addEventListener('pause', syncPaused);
+syncPaused();
 
 document.addEventListener('fullscreenchange', () => {{
   // Подстраховка: controlsList="nofullscreen" понимают не все браузеры.
@@ -4441,6 +4477,18 @@ document.addEventListener('mouseup', () => {{
   showDrawForm();
 }});
 
+// Варианты статуса берём из того же словаря, что и остальной интерфейс:
+// свой список тут неминуемо разошёлся бы с серверным при первой правке.
+//
+// Считается ПРИ ОТКРЫТИИ формы, а не один раз при загрузке: PRIORITY_LABELS
+// объявлен ниже по файлу, и обращение к нему на верхнем уровне падает
+// с ReferenceError -- const в temporal dead zone. Уронило бы весь скрипт
+// плеера целиком.
+function priorityOptions() {{
+  return Object.keys(PRIORITY_LABELS)
+    .map(v => `<option value="${{v}}">${{PRIORITY_LABELS[v]}}</option>`).join('');
+}}
+
 function showDrawForm() {{
   const form = document.getElementById('draw-form');
   form.innerHTML = `
@@ -4448,6 +4496,11 @@ function showDrawForm() {{
       <div class="ttl">Новая пометка</div>
       <input id="obs-label-input" placeholder="Что это? (человек, палатка, рюкзак…)">
       <textarea id="obs-note-input" placeholder="Заметка (необязательно)"></textarea>
+      <!-- Статус ставится сразу, а не отдельным заходом в список пометок.
+           Человек в момент разметки уже знает, насколько он уверен: заставлять
+           его возвращаться к этому позже значит терять оценку -- именно так
+           половина пометок и оставалась без статуса. -->
+      <select id="obs-priority-input">${{priorityOptions()}}</select>
       <div class="row">
         <button class="btn-save" onclick="saveObservation()">Сохранить</button>
         <button class="btn-cancel" onclick="cancelDraw()">Отмена</button>
@@ -4528,6 +4581,7 @@ async function saveObservation() {{
       method: 'POST', headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{
         timestamp_sec: pendingBox.timestamp_sec, bbox: pendingBox.bbox, label, note,
+        priority: document.getElementById('obs-priority-input').value,
       }}),
     }});
     if (!res.ok) throw new Error('сервер ответил ' + res.status);
@@ -4542,6 +4596,7 @@ async function saveObservation() {{
   pendingBox.rectEl.remove();
   pendingBox = null;
   hideDrawForm();
+  await loadPriorities();
   loadObservations();
 }}
 

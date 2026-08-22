@@ -71,8 +71,11 @@ def test_own_fullscreen_button_exists():
 # --- масштаб --------------------------------------------------------------
 
 def test_zoom_exists_at_all():
-    """Раньше зума в плеере не было вовсе."""
-    for needle in ("function zoomAt", 'id="zoom-in"', 'id="zoom-out"'):
+    """Раньше зума в плеере не было вовсе.
+
+    Кнопки масштаба с кадра убраны по просьбе пользователя: они отнимали у
+    картинки угол. Сам масштаб остался -- колесом, щипком и с клавиатуры."""
+    for needle in ("function zoomAt", "zoomCentre(1.4)", "'wheel'"):
         assert needle in PLAYER, f"нет {needle}"
 
 
