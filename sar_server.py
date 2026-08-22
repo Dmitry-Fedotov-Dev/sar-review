@@ -4347,12 +4347,41 @@ const VIDEO_FPS = {fps_js} || 30;
 const FRAME_SEC = 1 / VIDEO_FPS;
 
 function stepFrame(direction) {{
-  // Стоим на паузе: шагать покадрово во время воспроизведения бессмысленно
-  // -- видео тут же уедет дальше само.
+  // Пока идёт предыдущая перемотка, новую не начинаем.
+  //
+  // Иначе быстрые нажатия ставят перемотки одну на другую, и <video>
+  // может застрять в состоянии seeking: тогда перестают работать не
+  // только шаги, но и пауза с воспроизведением -- элемент не отвечает
+  // ни нам, ни собственным кнопкам браузера. Именно так это и выглядело.
+  if (video.seeking) return;
+
+  // Без загруженных метаданных перематывать некуда: длительность ещё
+  // не известна, и любое значение будет наугад.
+  if (!video.duration || !isFinite(video.duration)) return;
+
   video.pause();
-  const at = Math.max(0, Math.min(video.duration || 0,
-                                   video.currentTime + direction * FRAME_SEC));
-  video.currentTime = at;
+
+  let at = video.currentTime + direction * FRAME_SEC;
+  at = Math.max(0, Math.min(video.duration, at));
+  if (!isFinite(at)) return;
+
+  // Не выходим за пределы того, что браузер вообще может перемотать:
+  // у частично загруженного файла это не весь ролик.
+  if (video.seekable && video.seekable.length) {{
+    const lo = video.seekable.start(0);
+    const hi = video.seekable.end(video.seekable.length - 1);
+    at = Math.max(lo, Math.min(hi, at));
+  }}
+
+  try {{
+    video.currentTime = at;
+  }} catch (e) {{
+    // Не глухой catch: если перемотка не удалась, это надо видеть, а не
+    // гадать, почему кнопка "не работает".
+    console.warn('покадровый шаг не удался', e);
+    return;
+  }}
+
   // На паузе timeupdate не приходит, а рамки рисуются по нему -- без
   // явной перерисовки они застынут на прежнем кадре.
   video.addEventListener('seeked', renderVisibleObservations, {{ once: true }});
@@ -4376,8 +4405,19 @@ document.addEventListener('keydown', e => {{
   if (typingNow() || e.ctrlKey || e.metaKey || e.altKey) return;
   e.preventDefault();
   e.stopPropagation();
-  if (video.paused) video.play(); else video.pause();
+  togglePlayback();
 }}, true);
+
+function togglePlayback() {{
+  if (!video.paused) {{ video.pause(); return; }}
+  // play() возвращает обещание, которое браузер может отклонить -- чаще
+  // всего когда элемент занят перемоткой. Без обработки отказ уходит в
+  // никуда, и со стороны это выглядит как "кнопка не работает".
+  const started = video.play();
+  if (started && started.catch) {{
+    started.catch(err => console.warn('воспроизведение не началось', err));
+  }}
+}}
 
 document.addEventListener('keydown', e => {{
   if (typingNow()) return;

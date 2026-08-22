@@ -103,7 +103,12 @@ def test_drag_can_be_finished_below_the_catcher():
 # --- 3. клавиатура --------------------------------------------------------
 
 def test_space_toggles_playback():
-    assert "if (video.paused) video.play(); else video.pause();" in PLAYER
+    """Переключение вынесено в togglePlayback: там же обрабатывается отказ
+    браузера начать воспроизведение."""
+    assert "togglePlayback();" in PLAYER
+    body = PLAYER[PLAYER.index("function togglePlayback"):]
+    body = body[:body.index(chr(10) + "}}")]
+    assert "video.pause()" in body and "video.play()" in body
 
 
 def test_space_does_not_also_scroll_the_page():
