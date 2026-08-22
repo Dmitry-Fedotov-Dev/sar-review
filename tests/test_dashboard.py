@@ -256,3 +256,26 @@ def test_panels_fit_the_grid(dash):
     for p in dash["panels"]:
         g = p["gridPos"]
         assert g["x"] + g["w"] <= 24, f"«{p['title']}» выходит за сетку"
+
+
+def test_dashboard_opens_on_the_current_state(dash):
+    """Дашборд открывается на коротком окне: его смотрят, чтобы понять,
+    что происходит СЕЙЧАС -- жив ли воркер, идёт ли нагрузка, кто
+    онлайн."""
+    assert dash["time"]["from"] == "now-5m"
+    assert dash["time"]["to"] == "now"
+
+
+def test_refresh_is_not_slower_than_the_window(dash):
+    """На пятиминутном окне обновление раз в минуту означало бы, что треть
+    экрана всегда устарела."""
+    assert dash["refresh"] in ("5s", "10s", "30s")
+
+
+def test_longer_ranges_are_one_click_away(dash):
+    """Половина панелей -- про сутки: сколько отсмотрено, как менялись
+    статусы файлов. Без быстрого возврата короткое окно из удобства
+    превращается в ловушку."""
+    options = dash.get("timepicker", {}).get("time_options", [])
+    assert "24h" in options, "нет быстрого возврата к суткам"
+    assert "1h" in options
