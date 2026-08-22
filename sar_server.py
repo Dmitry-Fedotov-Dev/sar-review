@@ -4188,6 +4188,7 @@ h1 {{ font-size:16px; margin:12px 0; }}
       <span><b>тянуть мышью</b> — двигать увеличенный кадр</span>
       <span><b>пробел</b> — пауза</span>
       <span><b>←/→</b> — ±5 с, с Shift ±10</span>
+      <span><b>Ctrl+←/→</b> — на кадр назад/вперёд</span>
       <span><b>+ &minus; 0</b> — масштаб с клавиатуры</span>
       <span><b>M</b> — разметка</span>
       <span><b>F</b> или <b>двойной клик</b> — во весь экран</span>
@@ -4340,6 +4341,23 @@ function typingNow() {{
   return TEXT_INPUT_TYPES.has((el.type || 'text').toLowerCase());
 }}
 
+// Длительность одного кадра. Покадровый шаг -- это перемотка ровно на
+// неё: отдельного "шага" у <video> нет.
+const VIDEO_FPS = {fps_js} || 30;
+const FRAME_SEC = 1 / VIDEO_FPS;
+
+function stepFrame(direction) {{
+  // Стоим на паузе: шагать покадрово во время воспроизведения бессмысленно
+  // -- видео тут же уедет дальше само.
+  video.pause();
+  const at = Math.max(0, Math.min(video.duration || 0,
+                                   video.currentTime + direction * FRAME_SEC));
+  video.currentTime = at;
+  // На паузе timeupdate не приходит, а рамки рисуются по нему -- без
+  // явной перерисовки они застынут на прежнем кадре.
+  video.addEventListener('seeked', renderVisibleObservations, {{ once: true }});
+}}
+
 function nudge(seconds) {{
   video.currentTime = Math.max(
     0, Math.min(video.duration || 0, video.currentTime + seconds));
@@ -4362,7 +4380,18 @@ document.addEventListener('keydown', e => {{
 }}, true);
 
 document.addEventListener('keydown', e => {{
-  if (typingNow() || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (typingNow()) return;
+
+  // Покадрово -- Ctrl со стрелками. Обрабатывается ДО общей проверки
+  // модификаторов: она отсекает сочетания браузера, а это как раз
+  // сочетание, и без отдельной ветки оно бы туда не дошло.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey &&
+      (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {{
+    e.preventDefault();
+    stepFrame(e.key === 'ArrowRight' ? 1 : -1);
+    return;
+  }}
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
 
   switch (e.key) {{
     case 'ArrowLeft':
@@ -5372,6 +5401,10 @@ def player_page(report_id):
         # json.dumps -- корректно экранирует кавычки/юникод в имени, которое
         # человек вводит сам при входе
         viewer_name_js=json.dumps(session.get("viewer_name", "аноним")),
+        # Частота кадров нужна для покадровой перемотки. У необработанного
+        # видео её ещё нет -- тогда 30 -- разумное приближение для съёмки с
+        # дрона; ошибка в доли процента на один шаг незаметна.
+        fps_js=json.dumps(report["fps"] or 30),
         can_comment_js="true" if can_comment() else "false",
         is_moderator_js="true" if is_moderator() else "false",
         comment_lock_js=json.dumps(
