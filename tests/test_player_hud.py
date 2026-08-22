@@ -230,4 +230,25 @@ def test_boxes_are_redrawn_after_the_jump():
     явной перерисовки пометка не появится, пока видео не тронут."""
     body = PLAYER[PLAYER.index("function jumpTo(sec)"):]
     body = body[:body.index(chr(10) + "}}")]
-    assert "renderVisibleObservations()" in body
+    assert "renderVisibleObservations" in body
+
+
+def test_redraw_waits_for_the_seek_to_finish():
+    """Регрессия: после перехода к находке рамка пропадала.
+
+    Сразу после присваивания currentTime видео ещё может стоять на прежнем
+    месте. Перерисовка начинается с ОЧИСТКИ всех рамок -- она стирала их и
+    не рисовала новую, а следующего timeupdate на паузе не будет.
+    """
+    body = PLAYER[PLAYER.index("function jumpTo(sec)"):]
+    body = body[:body.index(chr(10) + "}}")]
+    assert "'seeked'" in body, "перерисовка не ждёт завершения перемотки"
+    assert "once: true" in body
+
+
+def test_redraw_also_happens_without_a_seek():
+    """Если перематывать некуда -- уже на этом месте -- события seeked не
+    будет вовсе, и рамка не появилась бы."""
+    body = PLAYER[PLAYER.index("function jumpTo(sec)"):]
+    body = body[:body.index(chr(10) + "}}")]
+    assert body.count("renderVisibleObservations") >= 2
