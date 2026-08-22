@@ -4527,7 +4527,15 @@ document.addEventListener('fullscreenchange', () => {{
 }});
 
 function overlaySize() {{
-  return {{ w: overlay.clientWidth, h: overlay.clientHeight }};
+  // Поля называются width/height НЕ случайно: эта функция заменила собой
+  // overlay.getBoundingClientRect(), и весь код отрисовки читает именно
+  // rect.width / rect.height.
+  //
+  // Первая версия возвращала {{w, h}} -- и отрисовка молча получала
+  // undefined, координата становилась NaN, а рамка не появлялась ВООБЩЕ
+  // НИКОГДА. Ошибка не бросается и в консоль не пишет: setAttribute
+  // спокойно принимает "NaN".
+  return {{ width: overlay.clientWidth, height: overlay.clientHeight }};
 }}
 
 function overlayPoint(evt) {{
@@ -4536,12 +4544,12 @@ function overlayPoint(evt) {{
   // фактический масштаб берём из отношения экранного размера к
   // собственному -- так он верен и при зуме, и в полном экране, и при
   // любом будущем преобразовании сцены
-  const kx = rect.width ? size.w / rect.width : 1;
-  const ky = rect.height ? size.h / rect.height : 1;
+  const kx = rect.width ? size.width / rect.width : 1;
+  const ky = rect.height ? size.height / rect.height : 1;
   return {{
-    x: Math.max(0, Math.min(size.w, (evt.clientX - rect.left) * kx)),
-    y: Math.max(0, Math.min(size.h, (evt.clientY - rect.top) * ky)),
-    w: size.w, h: size.h,
+    x: Math.max(0, Math.min(size.width, (evt.clientX - rect.left) * kx)),
+    y: Math.max(0, Math.min(size.height, (evt.clientY - rect.top) * ky)),
+    w: size.width, h: size.height,
   }};
 }}
 
