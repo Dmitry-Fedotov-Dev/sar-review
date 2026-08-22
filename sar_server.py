@@ -3913,6 +3913,12 @@ h1 {{ font-size:16px; margin:12px 0; }}
    потому что у #overlay нельзя менять размер: по нему считаются
    нормализованные координаты рамок, и укоротишь его -- поедут все
    сохранённые пометки. */
+/* Тот же приём, что и у ловушки разметки: не достаём до нативной полосы
+   управления, иначе перехватим нажатия на её кнопки. */
+#click-catch {{ position:absolute; top:0; left:0; right:0;
+                bottom:var(--controls-h); }}
+#click-catch.off {{ display:none; }}
+
 #draw-catch {{ position:absolute; top:0; left:0; right:0;
                bottom:var(--controls-h); display:none; cursor:crosshair; }}
 #draw-catch.on {{ display:block; }}
@@ -4167,6 +4173,12 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
         <!-- Ловушка кликов для рисования. Не достаёт до нативной полосы
              управления, поэтому кнопки плеера остаются нажимаемыми и при
              включённой разметке. -->
+        <!-- Слой для кликов по кадру: клик -- пауза, двойной -- полный
+             экран. Отдельный слой, а не сам <video>, потому что клики по
+             нативной полосе управления приходят на тот же элемент, и
+             нажатие на громкость заодно ставило бы видео на паузу.
+             Этот слой до полосы не достаёт. -->
+        <div id="click-catch"></div>
         <div id="draw-catch"></div>
       </div>
       <!-- Форма заметки живёт ВНУТРИ обёртки видео, а не под плеером.
@@ -4254,6 +4266,7 @@ let pendingBox = null; // нормализованный bbox, ждущий со
 drawToggle.addEventListener('click', () => {{
   drawMode = !drawMode;
   drawCatch.classList.toggle('on', drawMode);
+  syncClickCatch();
   // Снимаем фокус с кнопки: иначе она остаётся "нажимаемой пробелом" и
   // перехватывает его у видео.
   drawToggle.blur();
@@ -4575,14 +4588,35 @@ function toggleFullscreen() {{
 // и двойной клик легко получается случайно. Ловушка кликов перекрывает
 // кадр и до этого обработчика событие просто не доходит, но проверку
 // оставляем явной -- она объясняет намерение.
-// Полный экран открывается двойным кликом по кадру и клавишей F.
-// Своей кнопки нет: попытки поставить её в полосу управления браузера
-// упирались в то, что полоса не сообщает своей геометрии.
-stage.addEventListener('dblclick', e => {{
-  if (drawMode) return;
+// Клик по кадру -- пауза, двойной -- полный экран.
+//
+// Chrome не переключает воспроизведение по клику на встроенное в страницу
+// видео: это делают своими руками все плееры, где такое поведение есть.
+// Ожидание при этом совершенно естественное, поэтому делаем и мы.
+//
+// Одиночное действие откладывается на четверть секунды и отменяется, если
+// пришёл двойной клик. Иначе двойной клик успевал бы дважды дёрнуть
+// воспроизведение по дороге к полному экрану -- заметно и раздражает.
+const clickCatch = document.getElementById('click-catch');
+let clickTimer = null;
+
+clickCatch.addEventListener('click', () => {{
+  if (clickTimer) return;                 // второй клик пары -- ждём dblclick
+  clickTimer = setTimeout(() => {{
+    clickTimer = null;
+    togglePlayback();
+  }}, 250);
+}});
+
+clickCatch.addEventListener('dblclick', e => {{
   e.preventDefault();
+  if (clickTimer) {{ clearTimeout(clickTimer); clickTimer = null; }}
   toggleFullscreen();
 }});
+
+// В режиме разметки слой кликов убираем: там протягивание мышью рисует
+// рамку, и ловушка разметки должна получать события первой.
+function syncClickCatch() {{ clickCatch.classList.toggle('off', drawMode); }}
 
 document.addEventListener('fullscreenchange', () => {{
   // Штатная кнопка плеера разворачивает САМ <video>, а слой разметки --

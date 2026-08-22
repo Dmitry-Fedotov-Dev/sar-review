@@ -90,14 +90,41 @@ def test_fullscreen_failures_are_not_silent():
     assert "console.warn" in body
 
 
-def test_double_click_also_opens_fullscreen():
-    """Привычный жест, и целиться в маленькую кнопку не нужно."""
-    assert "stage.addEventListener('dblclick'" in PLAYER
-    body = PLAYER[PLAYER.index("stage.addEventListener('dblclick'"):]
+def test_click_toggles_playback():
+    """Chrome не переключает воспроизведение по клику на встроенное в
+    страницу видео -- это делают своими руками все плееры, где такое
+    поведение есть. Ожидание при этом естественное."""
+    assert 'id="click-catch"' in PLAYER
+    body = PLAYER[PLAYER.index("clickCatch.addEventListener('click'"):]
     body = body[:body.index("}});")]
-    assert "if (drawMode) return;" in body, (
-        "двойной клик сработает в режиме разметки, где он получается "
-        "случайно при рисовании")
+    assert "togglePlayback()" in body
+
+
+def test_click_layer_does_not_cover_the_controls():
+    """Клики по нативной полосе приходят на тот же элемент: нажатие на
+    громкость заодно ставило бы видео на паузу."""
+    import re as _re
+    m = _re.search(r"#click-catch \{\{([^}]*)\}\}", PLAYER)
+    assert m, "правило слоя кликов не найдено"
+    assert "bottom:var(--controls-h)" in m.group(1)
+
+
+def test_double_click_opens_fullscreen_and_cancels_the_single_one():
+    """Иначе двойной клик дважды дёрнет воспроизведение по дороге к
+    полному экрану."""
+    body = PLAYER[PLAYER.index("clickCatch.addEventListener('dblclick'"):]
+    body = body[:body.index("}});")]
+    assert "toggleFullscreen()" in body
+    assert "clearTimeout(clickTimer)" in body
+
+
+def test_click_layer_is_off_while_drawing():
+    """Там протягивание мышью рисует рамку, и ловушка разметки должна
+    получать события первой."""
+    assert "function syncClickCatch" in PLAYER
+    body = PLAYER[PLAYER.index("drawToggle.addEventListener('click'"):]
+    body = body[:body.index("}});")]
+    assert "syncClickCatch()" in body
 
 
 def test_legend_mentions_double_click():
