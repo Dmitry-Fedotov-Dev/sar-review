@@ -35,10 +35,17 @@ def test_folder_does_not_depend_on_watch_dir():
 
 
 def test_fresh_backup_is_seen_as_fresh(tmp_path):
-    """Прямая проверка того, что докладывала проверка здоровья."""
+    """Прямая проверка того, что докладывала проверка здоровья.
+
+    Имя файла берём от ТЕКУЩЕГО времени: возраст копии считается по её
+    имени, и вписанная жёстко дата делает тест протухающим -- он проходил
+    в момент написания и падал через полтора часа.
+    """
+    from datetime import datetime
     d = tmp_path / "sar_backups"
     d.mkdir()
-    (d / "sar_backup_20260822_050922.zip").write_bytes(b"x")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    (d / f"sar_backup_{stamp}.zip").write_bytes(b"x")
     age = sar_health.backup_age_hours(str(d))
     assert age is not None and age < 1, f"свежая копия выглядит старой: {age}"
 

@@ -201,6 +201,125 @@ def _generate_finding_preview(abs_path, seconds, bbox, out_path):
         cap.release()
 
 
+# --- лёгкая копия видео для плеера -----------------------------------------
+#
+# Съёмка идёт на 30 Мбит/с: чтобы смотреть её в реальном времени, столько же
+# нужно КАЖДОМУ зрителю через один канал наружу. Копия при том же разрешении
+# весит примерно вчетверо меньше.
+#
+# Разрешение не понижается намеренно -- см. proxy_video в sar_common.
+# Оригинал не трогаем: по нему работает детектор, и он же доступен в плеере,
+# когда нужно разглядеть вплотную.
+#
+# Делает это воркер, а не сервер: перекодирование -- обработка, а
+# sar_server.py по устройству проекта только отдаёт готовые файлы.
+PROXIES_PER_PASS = 1        # одна копия за проход: каждая занимает минуты
+
+
+def _ffmpeg_available():
+    from shutil import which
+    return which("ffmpeg") is not None
+
+
+def _build_proxy(abs_path, out_path, crf, preset, threads):
+    """Собрать лёгкую копию. Возвращает True, если получилось."""
+    tmp = out_path + ".tmp.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", abs_path,
+        # ТОЛЬКО основной видеопоток: в файлах с дрона рядом лежат
+        # служебный поток и мелкая mjpeg-превьюшка, и без явного выбора
+        # ffmpeg тащит их за собой.
+        "-map", "0:v:0",
+        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+        "-pix_fmt", "yuv420p",
+        "-threads", str(threads),
+        # Индекс в НАЧАЛО файла. У исходников с дрона он в конце, и браузер
+        # вынужден сначала тянуть хвост, прежде чем сможет начать играть.
+        "-movflags", "+faststart",
+        # звука в этих файлах нет вовсе -- проверено ffprobe
+        "-an",
+        tmp,
+    ]
+    # Ждём НЕ блокирующим subprocess.run, а опросом.
+    #
+    # Кодирование занимает минуты, а отметка "воркер жив" ставится в конце
+    # прохода цикла наблюдения. Простое ожидание означало бы многоминутную
+    # паузу в отметках -- и мониторинг честно доложил бы, что воркер умер,
+    # хотя он занят делом. Поэтому пока ffmpeg работает, продолжаем
+    # отмечаться.
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                **_low_priority_kwargs())
+    except Exception as e:                                  # noqa: BLE001
+        print(f"[копия] не удалось запустить ffmpeg: {e}")
+        _remove_quietly(tmp)
+        return False
+
+    deadline = time.time() + 3 * 3600
+    while proc.poll() is None:
+        if time.time() > deadline:
+            proc.kill()
+            print("[копия] ffmpeg не уложился в отведённое время, прерываю")
+            _remove_quietly(tmp)
+            return False
+        try:
+            sar_common.touch_heartbeat(get_db(), "worker")
+        except Exception:                                   # noqa: BLE001
+            pass
+        time.sleep(5)
+
+    if proc.returncode != 0 or not os.path.exists(tmp):
+        err = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()[:300]
+        print(f"[копия] ffmpeg вернул {proc.returncode}: {err}")
+        _remove_quietly(tmp)
+        return False
+    # Готовый файл появляется одним движением: пока идёт кодирование, его
+    # не должно быть видно ни серверу, ни этой же функции на следующем
+    # проходе -- иначе отдадим зрителю обрубок.
+    os.replace(tmp, out_path)
+    return True
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def ensure_video_proxies(conn):
+    """Догенерировать недостающие лёгкие копии."""
+    if not CFG.get("proxy_video", True):
+        return 0
+    if not _ffmpeg_available():
+        return 0
+
+    crf = int(CFG.get("proxy_crf", 26))
+    preset = str(CFG.get("proxy_preset", "veryfast"))
+    threads = int(CFG.get("proxy_threads", 4))
+
+    made = 0
+    for name, abs_path, kind in sar_common.scan_all_materials(WATCH_DIR):
+        if made >= PROXIES_PER_PASS:
+            break
+        if kind != "video" or not os.path.exists(abs_path):
+            continue
+        out_path = sar_common.proxy_video_path(DATA_DIR, name)
+        if os.path.exists(out_path):
+            continue
+        short = os.path.basename(name)
+        print(f"[копия] делаю лёгкую копию {short} (crf {crf}, {preset})")
+        if _build_proxy(abs_path, out_path, crf, preset, threads):
+            was = os.path.getsize(abs_path) / 1e6
+            now = os.path.getsize(out_path) / 1e6
+            print(f"[копия] {short}: {was:.0f} МБ -> {now:.0f} МБ "
+                  f"(в {was / max(now, 0.1):.1f} раза меньше)")
+            made += 1
+    return made
+
+
 def ensure_finding_previews(conn):
     """Догенерировать недостающие превью ручных пометок."""
     try:
@@ -356,6 +475,14 @@ def watcher_loop():
             ensure_finding_previews(get_db())
         except Exception as e:
             print(f"[находки] проход превью не удался: {e}")
+
+        # Лёгкие копии -- последними в проходе и по одной за раз: это самая
+        # долгая из фоновых работ, и она не должна задерживать ни постановку
+        # новых файлов в очередь, ни отметку "воркер жив".
+        try:
+            ensure_video_proxies(get_db())
+        except Exception as e:
+            print(f"[копия] проход не удался: {e}")
 
         # Отметка "жив" -- ставится ПОСЛЕ обработки ошибки, а не вместо неё:
         # воркер, у которого падает сканирование, всё равно живой процесс,

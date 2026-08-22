@@ -3236,9 +3236,42 @@ def report_video(report_id):
         return "Отчёт не найден", 404
     if not os.path.exists(report["abs_path"]):
         return "Исходный видеофайл больше не найден на диске", 404
+
+    # По умолчанию отдаём лёгкую копию: оригинал идёт на 30 Мбит/с, и
+    # столько нужно КАЖДОМУ зрителю через один канал наружу. Копия того же
+    # разрешения весит в разы меньше -- см. proxy_video в sar_common.
+    #
+    # ?original=1 -- когда надо разглядеть вплотную. Копию всегда можно
+    # обойти, поэтому сжатие не отнимает у человека ничего, а только
+    # ускоряет обычный просмотр.
+    path = report["abs_path"]
+    if request.args.get("original") != "1":
+        proxy = sar_common.proxy_video_path(DATA_DIR, report["rel_path"])
+        if os.path.exists(proxy):
+            path = proxy
+
     # conditional=True -> Flask/Werkzeug сам обрабатывает Range-заголовки,
     # это и даёт перемотку в <video> без ручной реализации потоковой отдачи
-    return send_file(report["abs_path"], conditional=True)
+    return send_file(path, conditional=True)
+
+
+@app.route("/api/report/<report_id>/video_info")
+def api_video_info(report_id):
+    """Есть ли лёгкая копия и насколько она легче. Нужно плееру, чтобы
+    честно показать, что именно человек сейчас смотрит."""
+    report = get_report_row(report_id)
+    if report is None or report["kind"] != "video":
+        return jsonify({"proxy": False})
+    proxy = sar_common.proxy_video_path(DATA_DIR, report["rel_path"])
+    if not os.path.exists(proxy):
+        return jsonify({"proxy": False})
+    try:
+        orig_mb = os.path.getsize(report["abs_path"]) / 1e6
+        proxy_mb = os.path.getsize(proxy) / 1e6
+    except OSError:
+        return jsonify({"proxy": False})
+    return jsonify({"proxy": True, "original_mb": round(orig_mb),
+                     "proxy_mb": round(proxy_mb)})
 
 
 @app.route("/report/<report_id>/photo")
@@ -3914,6 +3947,10 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
 .legend {{ display:flex; flex-wrap:wrap; gap:4px 16px; margin:8px 0 2px;
   font-size:11.5px; color:#7d8a87; }}
 .legend b {{ color:#b9c4c1; font-weight:600; }}
+.src-switch {{ display:inline-flex; align-items:center; gap:5px; cursor:pointer;
+  color:#8d9a97; }}
+.src-switch input {{ margin:0; cursor:pointer; }}
+.src-note {{ color:#6f7d7a; }}
 .toolbar button {{ background:#1b1b1b; color:#eee; border:1px solid #333; border-radius:6px;
                     padding:7px 12px; cursor:pointer; font-size:13px; }}
 .toolbar button:hover {{ border-color:#555; }}
@@ -4155,6 +4192,13 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
       <span><b>M</b> — разметка</span>
       <span><b>F</b> — во весь экран</span>
       <span><b>Esc</b> — отменить рамку</span>
+      <!-- Плеер по умолчанию играет лёгкую копию. Человек должен видеть,
+           что смотрит именно её, и уметь переключиться на оригинал --
+           иначе сжатие превращается в тихое ухудшение инструмента. -->
+      <label class="src-switch" id="src-switch" hidden>
+        <input type="checkbox" id="use-original"> оригинал
+        <span class="src-note" id="src-note"></span>
+      </label>
     </div>
 
     <div class="toolbar">
@@ -4221,6 +4265,45 @@ drawToggle.addEventListener('click', () => {{
 // умноженный на масштаб сцены. А SVG рисует в своих непреобразованных
 // единицах. Если смешать одно с другим, при любом зуме рамки уезжают:
 // экранные координаты попадают в SVG как есть.
+// --- лёгкая копия или оригинал -------------------------------------------
+//
+// Плеер по умолчанию играет лёгкую копию: оригинал идёт на 30 Мбит/с, и
+// столько нужно каждому зрителю через один канал наружу.
+//
+// Переключатель обязателен. Сжатие, которое нельзя обойти, -- это тихое
+// ухудшение инструмента: человек не знает, что смотрит копию, и не может
+// проверить сомнительное место на оригинале.
+async function initVideoSource() {{
+  let info;
+  try {{
+    const res = await fetch(`/api/report/${{reportId}}/video_info`);
+    info = await res.json();
+  }} catch (e) {{
+    console.warn('не удалось узнать про лёгкую копию', e);
+    return;
+  }}
+  if (!info.proxy) return;      // копии ещё нет -- играет оригинал, молчим
+
+  const box = document.getElementById('src-switch');
+  const note = document.getElementById('src-note');
+  const cb = document.getElementById('use-original');
+  note.textContent = `(копия ${{info.proxy_mb}} МБ вместо ${{info.original_mb}} МБ)`;
+  box.hidden = false;
+
+  cb.addEventListener('change', () => {{
+    // Место в видео сохраняем: переключение источника не должно
+    // отбрасывать человека в начало -- он смотрит конкретный момент.
+    const at = video.currentTime;
+    const wasPlaying = !video.paused;
+    video.src = `/report/${{reportId}}/video` + (cb.checked ? '?original=1' : '');
+    video.addEventListener('loadedmetadata', () => {{
+      video.currentTime = at;
+      if (wasPlaying) video.play();
+    }}, {{ once: true }});
+  }});
+}}
+initVideoSource();
+
 // --- клавиатура ----------------------------------------------------------
 //
 // Пробел не работал: нативные горячие клавиши <video> действуют, только
