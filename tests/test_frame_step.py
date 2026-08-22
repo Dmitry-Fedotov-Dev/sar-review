@@ -38,7 +38,48 @@ def test_step_pauses_first():
     же уедет дальше само."""
     body = step_body()
     assert "video.pause()" in body
-    assert body.index("video.pause()") < body.index("video.currentTime")
+    assert body.index("video.pause()") < body.index("video.currentTime = at")
+
+
+def test_step_is_skipped_while_a_seek_is_running():
+    """Регрессия: после Ctrl+стрелки переставали работать и пауза, и
+    воспроизведение.
+
+    Быстрые нажатия ставили перемотки одну на другую, и <video> застревал
+    в состоянии seeking -- переставая отвечать и нам, и собственным
+    кнопкам браузера.
+    """
+    body = step_body()
+    assert "if (video.seeking) return;" in body, (
+        "новая перемотка начинается поверх незаконченной")
+
+
+def test_step_needs_loaded_metadata():
+    """Без длительности любое значение -- наугад."""
+    body = step_body()
+    assert "!isFinite(video.duration)" in body
+
+
+def test_step_stays_inside_what_the_browser_can_seek():
+    """У частично загруженного файла перемотать можно не весь ролик."""
+    body = step_body()
+    assert "video.seekable" in body
+
+
+def test_failed_seek_is_visible():
+    body = step_body()
+    assert "console.warn" in body, "неудачная перемотка молчит"
+
+
+def test_rejected_playback_is_visible():
+    """play() возвращает обещание, которое браузер может отклонить. Без
+    обработки отказ уходит в никуда, и это выглядит как «кнопка не
+    работает»."""
+    assert "function togglePlayback" in PLAYER
+    body = PLAYER[PLAYER.index("function togglePlayback"):]
+    body = body[:body.index(chr(10) + "}}")]
+    assert "started.catch" in body
+    assert "console.warn" in body
 
 
 def test_step_stays_inside_the_video():
