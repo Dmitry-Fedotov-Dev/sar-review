@@ -42,7 +42,8 @@ def test_no_fullscreen_button_at_all():
     """
     assert 'id="fs-toggle"' not in PLAYER
     assert "media-controls-fullscreen-button" in PLAYER, "нативная не скрыта"
-    assert "stage.addEventListener('dblclick'" in PLAYER
+    assert "clickCatch.addEventListener('dblclick'" in PLAYER, (
+        "полный экран стал недоступен мышью")
 
 
 def test_fullscreen_expands_the_whole_wrapper():
