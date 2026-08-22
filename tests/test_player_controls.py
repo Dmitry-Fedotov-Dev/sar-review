@@ -166,10 +166,14 @@ def test_escape_drops_an_unfinished_box():
 
 def test_keys_are_documented_on_screen():
     """Без подсказки о клавишах никто не узнает, и работа окажется
-    впустую."""
+    впустую.
+
+    Подсказка переехала из панели разметки в легенду ПОД видео -- вместе с
+    описанием масштаба, когда кнопки масштаба убрали с кадра."""
     html = rendered()
-    assert "пробел</b> пауза" in html
-    assert "разметка" in html
+    assert 'class="legend"' in html, "легенда управления пропала"
+    for needle in ("пробел", "разметка", "во весь экран"):
+        assert needle in html, f"в легенде нет про «{needle}»"
 
 
 def test_page_still_renders():
