@@ -31,17 +31,23 @@ def rendered():
 
 # --- 1. одна кнопка полного экрана ---------------------------------------
 
-def test_native_fullscreen_button_is_hidden():
-    """controlsList="nofullscreen" этот браузер проигнорировал, и кнопок
-    стало две. Псевдоэлемент убирает её в Chrome, Edge и Safari."""
-    assert "video::-webkit-media-controls-fullscreen-button" in PLAYER
-    assert "display:none" in PLAYER
+def test_only_the_native_fullscreen_button_is_left():
+    """Своя кнопка, поставленная на место нативной абсолютными
+    координатами, уехала ниже полосы управления: у неё нет обещанной
+    геометрии, и подгонка пикселями ломается. Штатная кнопка стоит там,
+    где человек её и ищет, а двух кнопок больше нет."""
+    assert 'id="fs-toggle"' not in PLAYER, "своя кнопка вернулась"
+    assert "media-controls-fullscreen-button" not in PLAYER, (
+        "нативная кнопка снова спрятана -- полный экран станет недоступен "
+        "мышью")
+    assert 'controlsList="nofullscreen"' not in PLAYER, (
+        "нативная кнопка снова отключена атрибутом")
 
 
-def test_own_fullscreen_button_remains():
-    """Она нужна: нативная разворачивает ТОЛЬКО <video> и оставляет слой
-    разметки снаружи."""
-    assert 'id="fs-toggle"' in PLAYER
+def test_native_button_still_expands_the_whole_wrapper():
+    """Нативная кнопка разворачивает только <video> и теряет слой разметки.
+    Подстраховка обязана это ловить."""
+    assert "document.fullscreenElement === video" in PLAYER
     assert "videoWrap.requestFullscreen" in PLAYER
 
 

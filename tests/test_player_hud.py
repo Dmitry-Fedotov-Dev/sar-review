@@ -45,28 +45,27 @@ def test_zoom_still_works_by_wheel_and_keys():
     assert "'touchmove'" in PLAYER
 
 
-def test_fullscreen_button_stays_where_the_native_one_was():
-    """Просьба пользователя: как в обычном плеере, справа внизу."""
-    m = re.search(r"#fs-toggle \{\{([^}]*)\}\}", PLAYER)
-    assert m, "правило кнопки полного экрана не найдено"
-    rule = m.group(1)
-    assert "bottom:" in rule and "right:" in rule
-    assert "top:" not in rule, "кнопка снова наверху"
+def test_fullscreen_uses_the_native_button():
+    """Своя кнопка ставилась на место нативной абсолютными координатами и
+    уехала ниже полосы управления: у полосы нет обещанной геометрии, и
+    подгонка пикселями ломается. Возвращена штатная -- она всегда там, где
+    человек её ищет."""
+    assert 'id="fs-toggle"' not in PLAYER
+    assert "media-controls-fullscreen-button" not in PLAYER
 
 
-def test_fullscreen_button_does_not_cover_the_speed_menu():
-    """В меню «⋮» живёт замедленное воспроизведение -- налезать нельзя."""
-    m = re.search(r"#fs-toggle \{\{([^}]*)\}\}", PLAYER)
-    assert "right:46px" in m.group(1), (
-        "кнопка прижата к краю и накроет меню со скоростью")
+def test_double_click_also_opens_fullscreen():
+    """Привычный жест, и целиться в маленькую кнопку не нужно."""
+    assert "stage.addEventListener('dblclick'" in PLAYER
+    body = PLAYER[PLAYER.index("stage.addEventListener('dblclick'"):]
+    body = body[:body.index("}});")]
+    assert "if (drawMode) return;" in body, (
+        "двойной клик сработает в режиме разметки, где он получается "
+        "случайно при рисовании")
 
 
-def test_fullscreen_button_behaves_like_native_controls():
-    """Иначе она одна висела бы поверх кадра, когда все прочие кнопки
-    спрятаны."""
-    assert ".video-wrap:hover #fs-toggle" in PLAYER
-    assert ".video-wrap.paused #fs-toggle" in PLAYER
-    assert "function syncPaused" in PLAYER
+def test_legend_mentions_double_click():
+    assert "двойной клик" in rendered()
 
 
 # --- легенда --------------------------------------------------------------
@@ -205,3 +204,30 @@ def test_observation_is_saved_even_without_priority_field(client):
     n = conn.execute("SELECT COUNT(*) FROM manual_observations").fetchone()[0]
     conn.close()
     assert n == 1
+
+
+# --- переход к находке ----------------------------------------------------
+
+def test_jumping_to_a_finding_pauses_the_video():
+    """Человек открывает находку, чтобы её разглядеть. Если видео продолжит
+    играть, момент тут же уедет, и отматывать придётся каждый раз."""
+    body = PLAYER[PLAYER.index("function jumpTo(sec)"):]
+    body = body[:body.index(chr(10) + "}}")]
+    assert "video.pause()" in body
+    assert "video.play()" not in body, "видео снова уезжает от находки"
+
+
+def test_pause_happens_before_the_seek():
+    """Иначе между перемоткой и паузой успевает проиграться несколько
+    кадров, и на экране оказывается не тот момент."""
+    body = PLAYER[PLAYER.index("function jumpTo(sec)"):]
+    body = body[:body.index(chr(10) + "}}")]
+    assert body.index("video.pause()") < body.index("video.currentTime = sec")
+
+
+def test_boxes_are_redrawn_after_the_jump():
+    """Рамки рисуются по timeupdate, а на паузе оно не приходит -- без
+    явной перерисовки пометка не появится, пока видео не тронут."""
+    body = PLAYER[PLAYER.index("function jumpTo(sec)"):]
+    body = body[:body.index(chr(10) + "}}")]
+    assert "renderVisibleObservations()" in body

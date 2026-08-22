@@ -51,10 +51,13 @@ def test_fullscreen_goes_to_the_wrapper_not_the_video():
         "разворачивается сам <video> -- слой разметки останется снаружи")
 
 
-def test_native_fullscreen_button_is_disabled():
-    """Иначе человек нажмёт её по привычке и снова получит видео без
-    слоя разметки."""
-    assert 'controlsList="nofullscreen"' in PLAYER
+def test_native_fullscreen_button_is_left_in_place():
+    """Сначала её прятали, чтобы человек не получил видео без слоя
+    разметки. Замена -- своя кнопка на её месте -- уехала: у полосы
+    управления нет обещанной геометрии. Штатная кнопка возвращена, а
+    потерю слоя ловит подстраховка в fullscreenchange."""
+    assert 'controlsList="nofullscreen"' not in PLAYER
+    assert "document.fullscreenElement === video" in PLAYER
 
 
 def test_there_is_a_fallback_if_the_browser_ignores_controlslist():
@@ -64,8 +67,11 @@ def test_there_is_a_fallback_if_the_browser_ignores_controlslist():
     assert "exitFullscreen" in PLAYER
 
 
-def test_own_fullscreen_button_exists():
-    assert 'id="fs-toggle"' in PLAYER
+def test_fullscreen_is_reachable_by_mouse():
+    """Своя кнопка убрана -- полный экран открывается штатной кнопкой
+    плеера и двойным кликом по кадру."""
+    assert "'dblclick'" in PLAYER
+    assert "toggleFullscreen()" in PLAYER
 
 
 # --- масштаб --------------------------------------------------------------
