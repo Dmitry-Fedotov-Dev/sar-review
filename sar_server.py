@@ -3877,7 +3877,13 @@ h1 {{ font-size:16px; margin:12px 0; }}
                overflow:hidden; }}
 /* Сцена -- то, что масштабируется. Видео и слой разметки внутри неё, поэтому
    при зуме рамки едут вместе с картинкой, а не отстают от неё. */
-#stage {{ transform-origin:0 0; will-change:transform; }}
+/* will-change:transform здесь БЫЛО и это оказалось вредно.
+   Оно поднимает сцену в отдельный слой, который браузер растрирует ОДИН
+   раз, а потом просто увеличивает получившуюся картинку. Видео -- растр,
+   ему всё равно, а вот рамки разметки -- вектор, и они превращались в
+   лесенку при первом же зуме. Без will-change браузер перерисовывает
+   вектор в текущем масштабе, и линии остаются чистыми. */
+#stage {{ transform-origin:0 0; }}
 #stage video {{ width:100%; display:block; }}
 
 /* В полном экране разворачивается ОБЁРТКА, а не <video>: иначе слой
@@ -3924,9 +3930,21 @@ h1 {{ font-size:16px; margin:12px 0; }}
    Она разворачивает только <video>, теряя слой разметки -- это чинится
    подстраховкой в fullscreenchange: как только такое случилось, выходим и
    разворачиваем обёртку целиком. */
+/* Толщина линии и размер подписи НЕ масштабируются вместе с кадром.
+   При восьмикратном увеличении обводка в 2px превращалась в 16px и
+   закрывала собой то, что обводит, -- а закрывать находку рамкой на
+   поисковом инструменте нельзя.
+
+   vector-effect:non-scaling-stroke -- штатное средство SVG ровно для
+   этого: линия остаётся заданной толщины в экранных пикселях при любом
+   преобразовании. У текста такого свойства нет, поэтому размер шрифта
+   делим на текущий масштаб (--zoom ставит applyStage). */
+#overlay rect {{ vector-effect:non-scaling-stroke; }}
+#overlay text {{ font-size:calc(14px / var(--zoom, 1));
+                 stroke-width:calc(3px / var(--zoom, 1)); }}
 #overlay rect.obs-box {{ fill:none; stroke:#ff3b3b; stroke-width:2; }}
 #overlay rect.temp-box {{ fill:rgba(255,59,59,0.15); stroke:#ff3b3b; stroke-width:2; stroke-dasharray:5,4; }}
-#overlay text.obs-label {{ fill:#ff3b3b; font-size:14px; font-weight:bold; paint-order:stroke; stroke:#000; stroke-width:3px; }}
+#overlay text.obs-label {{ fill:#ff3b3b; font-weight:bold; paint-order:stroke; stroke:#000; }}
 
 .toolbar {{ display:flex; align-items:center; gap:10px; margin:10px 0; flex-wrap:wrap; }}
 /* Легенда управления. Тихая: она справочная, читается один раз и дальше
@@ -4396,6 +4414,9 @@ function applyStage() {{
   if (vz.scale === 1) {{ vz.x = 0; vz.y = 0; }}
   stage.style.transform =
     `translate(${{vz.x}}px, ${{vz.y}}px) scale(${{vz.scale}})`;
+  // Слой разметки узнаёт масштаб, чтобы делить на него размер подписей:
+  // иначе при 8x шрифт в 14px становится 112px и закрывает пол-кадра.
+  overlay.style.setProperty('--zoom', vz.scale);
   // Тянуть за кадр можно только когда есть что тянуть и когда мы не
   // рисуем: в режиме разметки перетаскивание -- это рисование рамки.
   videoWrap.style.cursor =
@@ -4741,13 +4762,13 @@ function renderVisibleObservations() {{
       r.setAttribute('class', 'ai-box');
       r.setAttribute('x', fx1 * rect.width); r.setAttribute('y', fy1 * rect.height);
       r.setAttribute('width', (fx2 - fx1) * rect.width); r.setAttribute('height', (fy2 - fy1) * rect.height);
-      r.setAttribute('style', `fill:none; stroke:${{color}}; stroke-width:2; stroke-dasharray:3,3;`);
+      r.setAttribute('style', `fill:none; stroke:${{color}}; stroke-width:2; stroke-dasharray:3,3; vector-effect:non-scaling-stroke;`);
       overlay.appendChild(r);
       const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       txt.setAttribute('class', 'ai-label');
       txt.setAttribute('x', fx1 * rect.width);
       txt.setAttribute('y', Math.max(14, fy1 * rect.height - 6));
-      txt.setAttribute('style', `fill:${{color}}; font-size:12px; font-weight:bold; paint-order:stroke; stroke:#000; stroke-width:3px;`);
+      txt.setAttribute('style', `fill:${{color}}; font-size:calc(12px / var(--zoom, 1)); font-weight:bold; paint-order:stroke; stroke:#000; stroke-width:calc(3px / var(--zoom, 1));`);
       txt.textContent = `${{det.object_class}} ${{(det.confidence*100).toFixed(0)}}%`;
       overlay.appendChild(txt);
     }}
@@ -4895,8 +4916,18 @@ function jumpTo(sec) {{
   // на который перешли.
   video.pause();
   video.currentTime = sec;
-  // Рамки рисуются по событию timeupdate, а на паузе оно не приходит --
-  // без явной перерисовки пометка не появится, пока видео не тронут.
+
+  // Рамки рисуются по timeupdate, а на паузе оно не приходит: без явной
+  // перерисовки пометка не появится, пока видео не тронут.
+  //
+  // Перерисовываем ПОСЛЕ завершения перемотки. Сразу после присваивания
+  // currentTime видео ещё может стоять на прежнем месте, и тогда
+  // перерисовка стирает все рамки (она начинается с очистки) и не рисует
+  // новую -- именно так рамка и пропадала при переходе к находке.
+  //
+  // Вызываем и сразу тоже: если перематывать было некуда (уже на этом
+  // месте), события seeked не будет вовсе.
+  video.addEventListener('seeked', renderVisibleObservations, {{ once: true }});
   renderVisibleObservations();
 }}
 
