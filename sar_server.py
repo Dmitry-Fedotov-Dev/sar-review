@@ -3889,21 +3889,7 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .video-wrap:fullscreen #stage {{ width:100%; }}
 .video-wrap:fullscreen #stage video {{ max-height:100vh; object-fit:contain; }}
 
-/* Кнопка полного экрана -- на месте нативной, справа внизу.
-   Нативную мы прячем (она разворачивает только <video> и теряет слой
-   разметки), а эта занимает освободившееся место. Отступ справа оставлен
-   под меню "⋮" -- в нём живёт замедленное воспроизведение, и налезать на
-   него нельзя. Величина подобрана под Chrome; если меню нет, кнопка
-   просто стоит чуть левее края, и это не мешает. */
-#fs-toggle {{ position:absolute; right:46px; bottom:7px; z-index:3;
-  width:32px; height:32px; padding:0; cursor:pointer; border:none;
-  background:transparent; color:#fff; font-size:17px; line-height:1;
-  opacity:0; transition:opacity .15s; }}
-/* Появляется вместе с нативной полосой -- по наведению на кадр или на
-   паузе, как ведут себя все остальные кнопки плеера. */
-.video-wrap:hover #fs-toggle, .video-wrap.paused #fs-toggle {{ opacity:.85; }}
-#fs-toggle:hover {{ opacity:1; }}
-#fs-toggle:focus-visible {{ opacity:1; outline:2px solid #5fb8c7; }}
+
 /* pointer-events:none по умолчанию -- иначе оверлей перехватывает клики по
    нативным элементам управления видео (play/пауза/перемотка/громкость),
    и ими становится невозможно пользоваться. Включаем перехват кликов
@@ -3930,13 +3916,14 @@ h1 {{ font-size:16px; margin:12px 0; }}
    пикселей меньше, чем снова перекрыть кнопки. */
 :root {{ --controls-h: 52px; }}
 
-/* Нативная кнопка полного экрана убрана: своя уже есть, а нативная
-   разворачивает ТОЛЬКО <video>, оставляя слой разметки снаружи.
-   controlsList="nofullscreen" понимают не все сборки -- этот способ
-   работает в Chrome, Edge и Safari, а на остальных срабатывает
-   подстраховка в fullscreenchange. Меню "⋮" не трогаем: в нём живёт
-   замедленное воспроизведение, которым реально пользуются. */
-video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
+/* Нативную кнопку полного экрана НЕ прячем.
+   Своя, поставленная на её место абсолютными координатами, уезжала: у
+   полосы управления нет обещанной геометрии, и подгонка пикселями ломается
+   при первом же изменении браузера. Штатная кнопка стоит там, где человек
+   её и ищет.
+   Она разворачивает только <video>, теряя слой разметки -- это чинится
+   подстраховкой в fullscreenchange: как только такое случилось, выходим и
+   разворачиваем обёртку целиком. */
 #overlay rect.obs-box {{ fill:none; stroke:#ff3b3b; stroke-width:2; }}
 #overlay rect.temp-box {{ fill:rgba(255,59,59,0.15); stroke:#ff3b3b; stroke-width:2; stroke-dasharray:5,4; }}
 #overlay text.obs-label {{ fill:#ff3b3b; font-size:14px; font-weight:bold; paint-order:stroke; stroke:#000; stroke-width:3px; }}
@@ -4155,8 +4142,8 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
            оставался в обычном документе, поэтому в полном экране рамки
            пропадали, а рисовать было нечем. -->
       <div id="stage">
-        <video id="video" controls controlsList="nofullscreen"
-               disablePictureInPicture src="/report/{report_id}/video"></video>
+        <video id="video" controls disablePictureInPicture
+               src="/report/{report_id}/video"></video>
         <svg id="overlay"></svg>
         <!-- Ловушка кликов для рисования. Не достаёт до нативной полосы
              управления, поэтому кнопки плеера остаются нажимаемыми и при
@@ -4171,12 +4158,7 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
            Снаружи #stage, а не внутри: иначе зум масштабировал бы и саму
            форму вместе с кадром. -->
       <div id="draw-form" hidden></div>
-      <!-- Кнопки масштаба убраны с кадра: масштаб делается колесом и
-           клавишами, а постоянный блок поверх видео отнимает у кадра угол
-           и мешает смотреть -- ради чего плеер и существует.
-           Полный экран остаётся кнопкой: без неё он был бы доступен только
-           с клавиатуры. Стоит на месте нативной, справа внизу. -->
-      <button type="button" id="fs-toggle" title="Во весь экран (F)">⛶</button>
+
     </div>
 
     <!-- Легенда под видео, а не поверх кадра. Кнопки масштаба убраны с
@@ -4190,7 +4172,7 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
       <span><b>←/→</b> — ±5 с, с Shift ±10</span>
       <span><b>+ &minus; 0</b> — масштаб с клавиатуры</span>
       <span><b>M</b> — разметка</span>
-      <span><b>F</b> — во весь экран</span>
+      <span><b>F</b> или <b>двойной клик</b> — во весь экран</span>
       <span><b>Esc</b> — отменить рамку</span>
       <!-- Плеер по умолчанию играет лёгкую копию. Человек должен видеть,
            что смотрит именно её, и уметь переключиться на оригинал --
@@ -4313,12 +4295,31 @@ initVideoSource();
 //
 // Главное условие: горячие клавиши НЕ должны срабатывать, когда человек
 // печатает. Пробел посреди комментария обязан ставить пробел, а не паузу.
+// Поля, где НЕЛЬЗЯ перехватывать клавиши: там человек набирает текст.
+//
+// Проверять просто "это INPUT" оказалось неверно. Флажок "оригинал" --
+// тоже <input>, и после клика по нему фокус остаётся на флажке; все
+// горячие клавиши разом переставали работать, включая M и пробел.
+// Симптом выглядел как "разметка по M не работает", хотя дело было
+// в фокусе.
+//
+// Набирают текст только текстовые поля. У флажка, переключателя, ползунка
+// и кнопки свои клавиши (пробел, стрелки), но они не текст, и отбирать у
+// плеера управление из-за них незачем.
+const TEXT_INPUT_TYPES = new Set([
+  'text', 'search', 'url', 'tel', 'email', 'password', 'number',
+  'date', 'time', 'datetime-local', 'month', 'week',
+]);
+
 function typingNow() {{
   const el = document.activeElement;
   if (!el) return false;
+  if (el.isContentEditable) return true;
   const tag = el.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
-      || el.isContentEditable;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag !== 'INPUT') return false;
+  // у <input> без type по умолчанию text
+  return TEXT_INPUT_TYPES.has((el.type || 'text').toLowerCase());
 }}
 
 function nudge(seconds) {{
@@ -4476,19 +4477,23 @@ function toggleFullscreen() {{
     }});
   }}
 }}
-document.getElementById('fs-toggle').addEventListener('click', toggleFullscreen);
-
-// Нативная полоса управления видна на паузе -- наша кнопка должна вести
-// себя так же, иначе на паузе она пропадала бы одна.
-function syncPaused() {{ videoWrap.classList.toggle('paused', video.paused); }}
-video.addEventListener('play', syncPaused);
-video.addEventListener('pause', syncPaused);
-syncPaused();
+// Двойной клик по кадру -- во весь экран и обратно. Привычный жест, и он
+// не требует целиться в маленькую кнопку.
+//
+// В режиме разметки не срабатывает: там протягивание мышью рисует рамку,
+// и двойной клик легко получается случайно. Ловушка кликов перекрывает
+// кадр и до этого обработчика событие просто не доходит, но проверку
+// оставляем явной -- она объясняет намерение.
+stage.addEventListener('dblclick', e => {{
+  if (drawMode) return;
+  e.preventDefault();
+  toggleFullscreen();
+}});
 
 document.addEventListener('fullscreenchange', () => {{
-  // Подстраховка: controlsList="nofullscreen" понимают не все браузеры.
-  // Если <video> всё-таки ушёл в полный экран сам, слой разметки останется
-  // снаружи -- разворачиваем вместо него обёртку.
+  // Штатная кнопка плеера разворачивает САМ <video>, а слой разметки --
+  // его сосед, и он остаётся в обычном документе: рамки пропадают, рисовать
+  // нечем. Поэтому ловим момент и разворачиваем обёртку целиком.
   if (document.fullscreenElement === video) {{
     document.exitFullscreen().then(() => videoWrap.requestFullscreen())
       .catch(() => {{}});
@@ -4881,8 +4886,18 @@ async function loadAiScenes() {{
 }}
 
 function jumpTo(sec) {{
+  // Переходим и ОСТАНАВЛИВАЕМСЯ. Человек открывает находку, чтобы её
+  // разглядеть; если видео продолжит играть, момент тут же уедет, и
+  // придётся отматывать назад -- каждый раз.
+  //
+  // Пауза ставится до перемотки: иначе между seek и pause успевает
+  // проиграться несколько кадров, и на экране оказывается не тот момент,
+  // на который перешли.
+  video.pause();
   video.currentTime = sec;
-  video.play();
+  // Рамки рисуются по событию timeupdate, а на паузе оно не приходит --
+  // без явной перерисовки пометка не появится, пока видео не тронут.
+  renderVisibleObservations();
 }}
 
 // --- ранжирование детекций (точно человек/предположительно/предмет/отклонено) --
