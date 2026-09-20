@@ -19,9 +19,12 @@ presentation_url. Пароль отдельно не хранится -- бер�
 server.shared_password (см. sar_common.load_telegram_bot_config).
 """
 import asyncio
+import io
+import json
 import logging
 import os
 import sqlite3
+import urllib.parse
 from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -33,6 +36,20 @@ import sar_common
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+# ТОКЕН БОТА НЕ ДОЛЖЕН ПОПАДАТЬ В ЖУРНАЛ.
+#
+# httpx на уровне INFO пишет полный URL каждого запроса, а у Telegram токен
+# лежит прямо в пути: api.telegram.org/bot<ТОКЕН>/getUpdates. То есть журнал
+# набирал по строке с секретом на каждое обращение -- а журнал это ровно то,
+# что человек пересылает, когда что-то сломалось.
+#
+# Токен по устройству проекта живёт только в sar_config.json и не попадает ни
+# в репозиторий, ни в архив обновлений. Утечка через собственный журнал
+# обходила всю эту осторожность.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 log = logging.getLogger("sar_telegram_bot")
 
 CFG = {}
@@ -141,9 +158,84 @@ def ensure_token(chat_id):
         conn.close()
 
 
-def personal_link(chat_id):
+def personal_link(chat_id, next_path=None):
+    """Личная ссылка входа. next_path -- куда попасть сразу после входа.
+
+    Нужен именно параметр, а не отдельная ссылка: человек, пришедший по
+    вечной ссылке на находку, должен оказаться на этой находке, а не на
+    общем экране, откуда её ещё надо искать.
+    """
     base = (CFG.get("service_url") or "").rstrip("/")
-    return f"{base}/login?key={ensure_token(chat_id)}"
+    url = f"{base}/login?key={ensure_token(chat_id)}"
+    if next_path:
+        url += "&next=" + urllib.parse.quote(next_path, safe="")
+    return url
+
+
+def deep_link(payload):
+    """Вечная ссылка на бота. t.me не меняется, в отличие от туннеля."""
+    name = (CFG.get("bot_username") or "").lstrip("@")
+    if not name:
+        return ""
+    return f"https://t.me/{name}?start={payload}"
+
+
+def remember_target(chat_id, next_path):
+    """Запоминает, куда вести человека после одобрения.
+
+    Он мог прийти по вечной ссылке на находку и ждать доступа часами.
+    Держать это в памяти процесса нельзя: сторож туннеля перезапускает
+    бота при каждом обрыве канала, и цель терялась бы чаще, чем
+    срабатывала.
+    """
+    if not next_path:
+        return
+    conn = _db()
+    try:
+        conn.execute(
+            "UPDATE telegram_access_requests SET pending_target=? WHERE chat_id=?",
+            (next_path, chat_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def take_target(chat_id):
+    """Отдаёт запомненную цель и сразу забывает её: она одноразовая."""
+    conn = _db()
+    try:
+        row = conn.execute(
+            "SELECT pending_target FROM telegram_access_requests WHERE chat_id=?",
+            (chat_id,)).fetchone()
+        target = row["pending_target"] if row else None
+        if target:
+            conn.execute(
+                "UPDATE telegram_access_requests SET pending_target=NULL WHERE chat_id=?",
+                (chat_id,))
+            conn.commit()
+        return target
+    except sqlite3.OperationalError:
+        # база от старой версии, без колонки -- не повод ронять выдачу доступа
+        return None
+    finally:
+        conn.close()
+
+
+def parse_start_payload(args):
+    """Разбирает параметр /start. Пока умеет только finding_<id>.
+
+    Возвращает путь внутри платформы либо None. Мусор в параметре -- не
+    ошибка: человек мог поделиться чем угодно, и бот должен просто выдать
+    обычный доступ, а не ругаться.
+    """
+    if not args:
+        return None
+    raw = str(args[0]).strip()
+    if raw.startswith("finding_"):
+        tail = raw[len("finding_"):]
+        if tail.isdigit():
+            return f"/finding/{int(tail)}/"
+    return None
 
 
 def find_person(identifier):
@@ -196,7 +288,7 @@ def link_ttl():
         return 3
 
 
-def link_message(chat_id):
+def link_message(chat_id, next_path=None):
     """Отдельное сообщение только со ссылкой -- его бот потом удалит.
 
     Отдельным оно сделано именно ради удаления: стереть можно только всё
@@ -206,8 +298,10 @@ def link_message(chat_id):
     note = (f"\n\n⏳ Это сообщение исчезнет через {ttl} сек. "
             f"Успейте нажать на ссылку или сохранить её.\n"
             f"Пропало — просто напишите /help ещё раз." if ttl > 0 else "")
-    return (f"\U0001F517 Ваша личная ссылка (никому не передавайте):\n"
-            f"{personal_link(chat_id)}{note}")
+    head = ("\U0001F517 Ваша личная ссылка на находку (никому не передавайте):"
+            if next_path else
+            "\U0001F517 Ваша личная ссылка (никому не передавайте):")
+    return f"{head}\n{personal_link(chat_id, next_path)}{note}"
 
 
 async def _delete_after(bot_obj, chat_id, message_id, delay):
@@ -224,13 +318,13 @@ async def _delete_after(bot_obj, chat_id, message_id, delay):
         log.debug("не удалось удалить сообщение со ссылкой у %s", chat_id, exc_info=True)
 
 
-async def send_access(bot_obj, chat_id):
+async def send_access(bot_obj, chat_id, next_path=None):
     """Инструкция и ссылка -- ДВУМЯ сообщениями: инструкция остаётся в
     переписке, ссылка самоуничтожается."""
     await bot_obj.send_message(chat_id, access_message())
     if not (CFG.get("service_url") or ""):
         return
-    msg = await bot_obj.send_message(chat_id, link_message(chat_id),
+    msg = await bot_obj.send_message(chat_id, link_message(chat_id, next_path),
                                      disable_web_page_preview=True)
     ttl = link_ttl()
     if ttl > 0:
@@ -270,6 +364,18 @@ DECLINE_MESSAGE = "Доступ пока закрыт. Если это ошиб�
 # git-истории -- туда попадают и внутренние правки, которые пользователю
 # ничего не говорят.
 CHANGELOG = """📋 Что нового в SAR Review
+
+━━ 18 сентября ━━
+☁️ Материал с Google Диска открывается прямо в платформе,
+   скачивать себе не нужно. Для Курумды готовы 81 видео из 82
+🗺 Карта находок: расчётная точка объекта и позиция борта —
+   разными значками, между ними линия. Треки вылетов,
+   свои отметки на местности
+📊 Отчёт по операции: сколько разобрано по каждому файлу,
+   второй проход, отбор по датам, обезличивание имён
+🖼 Превью у материала с диска появляются до скачивания
+✅ Исправлено: полоса покрытия показывала больше, чем
+   разобрано на самом деле
 
 ━━ 22 августа ━━
 🔍 Масштаб в плеере — колесо мыши, кадр двигается мышью
@@ -330,9 +436,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
     row, is_new = upsert_request(chat_id, user.username, user.first_name)
+    # Вечная ссылка на находку приходит сюда как /start finding_<id>.
+    next_path = parse_start_payload(context.args)
 
     if row["status"] == "approved":
-        await send_access(context.bot, chat_id)
+        await send_access(context.bot, chat_id, next_path)
         return
     if row["status"] == "denied":
         await update.message.reply_text(DECLINE_MESSAGE)
@@ -343,7 +451,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # чтобы утром видеть, кто зашёл
     if auto_approve_active():
         set_status(chat_id, "approved", 0)
-        await send_access(context.bot, chat_id)
+        await send_access(context.bot, chat_id, next_path)
         text = (f"Доступ выдан АВТОМАТИЧЕСКИ (включено окно автовыдачи):\n"
                 f"{requester_label(row)}")
         for admin_id in CFG["admin_chat_ids"]:
@@ -352,6 +460,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("не удалось уведомить админа %s", admin_id)
         return
+
+    remember_target(chat_id, next_path)
 
     if is_new:
         await update.message.reply_text(
@@ -509,7 +619,7 @@ async def on_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if status == "approved":
-            await send_access(context.bot, chat_id)
+            await send_access(context.bot, chat_id, take_target(chat_id))
         else:
             await context.bot.send_message(chat_id, DECLINE_MESSAGE)
     except Exception:
@@ -701,8 +811,41 @@ ADMIN_COMMANDS = BASE_COMMANDS + [
 ]
 
 
+def _save_bot_username(username):
+    """Дописывает имя бота в sar_config.json, не трогая остальное.
+
+    Читаем-меняем-пишем целиком: конфиг маленький, а частичная запись
+    JSON невозможна. Ошибку глушим намеренно -- без имени бота перестанут
+    работать только вечные ссылки, а сам бот обязан подняться в любом
+    случае.
+    """
+    path = os.path.join(SCRIPT_DIR, "sar_config.json")
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        cfg.setdefault("telegram_bot", {})["bot_username"] = username
+        with io.open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except Exception:
+        log.warning("не удалось записать имя бота в конфиг", exc_info=True)
+
+
 async def _post_init(app):
     from telegram import BotCommandScopeChat
+
+    # Своё имя бот узнаёт у Telegram и запоминает в конфиге: из него
+    # sar_server.py строит вечные ссылки на находки. Спрашивать имя у
+    # сервера негде -- токен бота ему намеренно недоступен.
+    try:
+        me = await app.bot.get_me()
+        if me.username and CFG.get("bot_username") != me.username:
+            CFG["bot_username"] = me.username
+            _save_bot_username(me.username)
+            log.info("имя бота записано в конфиг: @%s", me.username)
+    except Exception:
+        log.warning("не удалось узнать имя бота -- вечные ссылки не заработают",
+                    exc_info=True)
 
     await app.bot.set_my_commands(BASE_COMMANDS)
 
@@ -755,7 +898,8 @@ def main():
         raise SystemExit(
             "sar_config.json -> telegram_bot.admin_chat_ids пуст -- одобрять заявки будет некому.")
 
-    _, _, db_path, _ = sar_common.resolve_paths(server_cfg["watch_dir"])
+    _, _, db_path, _ = sar_common.resolve_paths(
+        server_cfg["watch_dir"], server_cfg.get("data_dir"))
     DB_PATH = db_path
     sar_common.init_db(DB_PATH)
 
