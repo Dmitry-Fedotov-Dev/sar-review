@@ -186,7 +186,10 @@ def test_every_table_with_human_work_is_verified(tmp_path):
         "AND name NOT LIKE 'sqlite_%'")}
     c.close()
 
-    RECOVERABLE = {"logs", "presence", "alert_state", "service_heartbeat"}
+    # telemetry_tracks -- РАЗБОР SRT, а не работа человека: потеряется
+    # -- воркер перечитает файлы телеметрии и соберёт заново.
+    RECOVERABLE = {"logs", "presence", "alert_state", "service_heartbeat",
+                   "telemetry_tracks"}
     must_verify = tables - RECOVERABLE
     missing = must_verify - set(sb.CRITICAL_TABLES)
     assert not missing, (

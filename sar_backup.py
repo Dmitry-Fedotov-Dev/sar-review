@@ -46,7 +46,21 @@ import sar_common
 CRITICAL_TABLES = ("manual_observations", "detection_priorities",
                    "detection_comments", "telegram_access_requests",
                    "watch_segments", "reports",
-                   "operations", "operation_materials")
+                   "operations", "operation_materials",
+                   # Настройки -- тоже работа человека: выставленные
+                   # ограничения расхода канала и места. Потерять их значит
+                   # вернуть платформу к умолчаниям, и заметит это тот, у
+                   # кого внезапно кончится диск или квота облака.
+                   "settings",
+                   # Подключённые хранилища: потерять значит идти заново
+                   # получать токены у Google и Яндекса -- посреди операции
+                   # это последнее, чем хочется заниматься.
+                   "cloud_accounts",
+                   # Отметки, поставленные людьми прямо на карте: «сюда идёт
+                   # группа», «это ущелье не облетали», «свидетель указал
+                   # сюда». Из материала их не пересчитать -- это чужое
+                   # знание, попавшее в платформу только через человека.
+                   "map_marks")
 
 
 def table_counts(conn):
@@ -146,7 +160,7 @@ def main():
     watch = cfg["watch_dir"]
     if not os.path.isabs(watch):
         watch = os.path.abspath(os.path.join(root, watch))
-    _, _, db_path, _ = sar_common.resolve_paths(watch)
+    _, _, db_path, _ = sar_common.resolve_paths(watch, cfg.get("data_dir"))
     if not os.path.exists(db_path):
         print(f"ОШИБКА: база не найдена: {db_path}")
         return 1
