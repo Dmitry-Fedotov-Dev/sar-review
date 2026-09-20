@@ -289,7 +289,8 @@ def main():
     config_path = os.path.join(script_dir, "sar_config.json")
     cfg = load_config(config_path if os.path.exists(config_path) else None)
     server_cfg, _ = sar_common.load_server_config(script_dir)
-    watch_dir, data_dir, db_path, reports_dir = sar_common.resolve_paths(server_cfg["watch_dir"])
+    watch_dir, data_dir, db_path, reports_dir = sar_common.resolve_paths(
+        server_cfg["watch_dir"], server_cfg.get("data_dir"))
     # идемпотентно -- та же миграция схемы, что применяется при старте
     # sar_worker.py/sar_server.py. Без этого вызова здесь backfill,
     # запущенный до первого перезапуска воркера/сервера после добавления

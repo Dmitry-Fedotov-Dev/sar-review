@@ -65,7 +65,7 @@ def main():
     watch = cfg["watch_dir"]
     if not os.path.isabs(watch):
         watch = os.path.abspath(os.path.join(root, watch))
-    _, _, db_path, _ = sar_common.resolve_paths(watch)
+    _, _, db_path, _ = sar_common.resolve_paths(watch, cfg.get("data_dir"))
     data_dir = os.path.dirname(db_path)
 
     conn = sar_common.get_db_connection(db_path)

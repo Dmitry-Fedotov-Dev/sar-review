@@ -237,7 +237,7 @@ def main():
     watch = cfg["watch_dir"]
     if not os.path.isabs(watch):
         watch = os.path.abspath(os.path.join(args.root, watch))
-    _, _, db_path, _ = sar_common.resolve_paths(watch)
+    _, _, db_path, _ = sar_common.resolve_paths(watch, cfg.get("data_dir"))
     reports_root = os.path.join(os.path.dirname(db_path), "reports")
     busy = busy_report_ids(db_path)
     if busy:

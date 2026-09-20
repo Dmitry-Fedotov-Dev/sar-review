@@ -105,7 +105,8 @@ def main():
     cfg_path = os.path.join(script_dir, "sar_config.json")
     load_config(cfg_path if os.path.exists(cfg_path) else None)
     server_cfg, _ = sar_common.load_server_config(script_dir)
-    watch_dir, data_dir, db_path, reports_dir = sar_common.resolve_paths(server_cfg["watch_dir"])
+    watch_dir, data_dir, db_path, reports_dir = sar_common.resolve_paths(
+        server_cfg["watch_dir"], server_cfg.get("data_dir"))
     sar_common.init_db(db_path)
     api_base = f"http://127.0.0.1:{server_cfg['port']}"
 
