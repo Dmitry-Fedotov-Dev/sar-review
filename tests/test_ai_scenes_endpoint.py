@@ -3,6 +3,8 @@ AI-детекции (detections.json) в сцены на лету, чтобы п
 в правом блоке как кликабельные моменты с таймкодом (раньше рамки модели
 были видны ТОЛЬКО как оверлей на видео, без списка)."""
 import json
+import os
+import pathlib
 import sqlite3
 
 import sar_common
@@ -10,8 +12,13 @@ import sar_server
 
 
 def _make_report_with_detections(tmp_path, hits, status="done"):
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
+    # Папка отчёта ВЫЧИСЛЯЕТСЯ сервером из reports_dir и report_id, а не
+    # берётся из столбца out_dir -- иначе база была бы привязана к машине,
+    # на которой файл впервые увидели. Тест кладёт detections.json туда,
+    # куда сервер и пойдёт смотреть.
+    _, _, _, reports_dir = sar_common.resolve_paths(str(tmp_path))
+    out_dir = pathlib.Path(reports_dir) / "rep1"
+    out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "detections.json").write_text(json.dumps(hits, ensure_ascii=False), encoding="utf-8")
 
     db_path = tmp_path / "sar_data.db"
@@ -43,6 +50,11 @@ def _client(app, db_path, monkeypatch):
     # main(); в тестовом процессе main() не запускается, поэтому атрибута
     # ещё не существует -- raising=False создаёт его вместо ошибки
     monkeypatch.setattr(sar_server, "DB_PATH", db_path, raising=False)
+    # watch_dir нужен, чтобы сервер вычислил пути к материалу и к папке
+    # отчёта: они больше не читаются из базы
+    monkeypatch.setattr(sar_server, "SERVER_CFG",
+                        {"watch_dir": os.path.dirname(db_path)}, raising=False)
+    monkeypatch.setattr(sar_server, "_PATH_ROOTS_CACHE", {}, raising=False)
     monkeypatch.setattr(sar_server, "SCRIPT_DIR", "/no/such/config/dir")
     monkeypatch.setattr(sar_server, "_ai_scenes_cache", {})
     app.secret_key = "test-secret"

@@ -837,6 +837,26 @@ def group_hits_into_scenes(hits, max_frame_gap=360, distance_multiplier=2.5):
     return groups
 
 
+# Сколько кадров сцены встраивается в report.html. Он же -- порог для
+# кропов на диске: хранить больше, чем отчёт способен показать, смысла
+# нет. Объявлено ЗДЕСЬ, а не ниже по файлу, потому что используется как
+# значение по умолчанию в сигнатуре process_video, а оно вычисляется в
+# момент объявления функции.
+# Допуск на недобор кадров. Ноль ставить нельзя: у части контейнеров
+# счётчик в заголовке приблизительный, и строгое равенство давало бы
+# ложные отказы на исправных файлах -- а ложная тревога в поле хуже
+# отсутствующей, её быстро научаются игнорировать.
+FRAME_SHORTFALL_TOLERANCE = 0.01      # один процент
+MIN_FRAME_SLACK = 2                   # или два кадра, что больше
+
+
+class IncompleteReadError(RuntimeError):
+    """Видео кончилось раньше, чем обещал заголовок контейнера."""
+
+
+MAX_HITS_PER_SCENE_IN_REPORT = 80
+
+
 def apply_representative_full_frame_mode(groups, out_dir):
     """Оставляет на диске только представительные полные кадры на группу
     (первый / пиковый по уверенности / последний), остальные удаляет и
@@ -878,7 +898,8 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
                    tracking_report_id=None, tracking_api_base=None, srt_gps_tuple_order="lat_lon",
                    camera_hfov_deg=84.0, detector_backend="custom",
                    max_estimate_distance_m=sar_common.DEFAULT_MAX_ESTIMATE_DISTANCE_M,
-                   fov_cfg=None, color_max_per_frame=12):
+                   fov_cfg=None, color_max_per_frame=12,
+                   max_crops_per_scene=MAX_HITS_PER_SCENE_IN_REPORT):
     os.makedirs(out_dir, exist_ok=True)
     crops_dir = os.path.join(out_dir, "crops")
     frames_dir = os.path.join(out_dir, "frames")
@@ -1025,6 +1046,37 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
 
     cap.release()
 
+    # ОБРЫВ ЧТЕНИЯ НЕ ОТЛИЧИМ ОТ КОНЦА ФАЙЛА.
+    #
+    # cap.read() возвращает False и когда видео действительно кончилось, и
+    # когда файл прочитать не удалось: битый кадр, отвалившийся сетевой
+    # диск, оборванное скачивание из облака. В обоих случаях цикл выше
+    # просто заканчивается, и дальше пишется совершенно нормальный на вид
+    # отчёт -- по половине видео. Ни ошибки, ни предупреждения: статус
+    # "готово", отчёт открывается, сцены есть. Человек видит разобранный
+    # материал и идёт дальше, а вторую половину не смотрел никто.
+    #
+    # Это самый дорогой вид отказа для поисковой операции и ровно та
+    # категория, которой посвящён отдельный раздел в CLAUDE.md.
+    #
+    # Проверка возможна потому, что число кадров известно заранее из
+    # заголовка контейнера. На боевом материале (DJI, MP4) оно точное:
+    # сверено с ffprobe на четырёх файлах, расхождение ноль. Запас на
+    # случай контейнеров, где счётчик приблизительный, всё равно оставлен.
+    #
+    # Если счётчик недоступен (0 или отрицательный) -- проверить нечем,
+    # и тогда мы МОЛЧИМ ОСОЗНАННО: выдумывать тревогу там, где нет данных,
+    # значит приучить людей её игнорировать.
+    if total_frames > 0:
+        slack = max(MIN_FRAME_SLACK, int(total_frames * FRAME_SHORTFALL_TOLERANCE))
+        if frame_idx < total_frames - slack:
+            raise IncompleteReadError(
+                f"видео прочитано не до конца: {frame_idx} кадров из "
+                f"{total_frames} ({100.0 * frame_idx / total_frames:.1f}%). "
+                f"Отчёт по неполному видео не пишется -- он выглядел бы "
+                f"готовым. Причина обычно в самом файле (битый/недокачанный) "
+                f"или в носителе (отвалился сетевой диск).")
+
     hits.sort(key=lambda h: h.confidence, reverse=True)
 
     groups = group_hits_into_scenes(hits, max_frame_gap=effective_max_frame_gap,
@@ -1034,14 +1086,19 @@ def process_video(video_path, weights_path, model_type, target_classes, conf,
     if full_frame_save_mode == "representative":
         apply_representative_full_frame_mode(groups, out_dir)
 
+    # Кропы сверх того, что попадает в отчёт, -- чистый перерасход диска.
+    # Порог по умолчанию равен тому, что и так встраивается в HTML, то
+    # есть видимое поведение не меняется вовсе.
+    if max_crops_per_scene:
+        gone = prune_unshown_crops(groups, out_dir, max_crops_per_scene)
+        if gone:
+            print(f"Убрано кропов, не попадающих в отчёт: {gone}")
+
     save_outputs(hits, groups, out_dir, video_path,
                  tracking_report_id=tracking_report_id, tracking_api_base=tracking_api_base)
     print(f"\nГотово. Найдено кандидатов: {len(hits)}")
     print(f"Отчёт: {os.path.join(out_dir, 'report.html')}")
     return hits
-
-
-MAX_HITS_PER_SCENE_IN_REPORT = 80
 
 
 def _limit_scene_hits(g_hits, limit=MAX_HITS_PER_SCENE_IN_REPORT):
@@ -1066,6 +1123,61 @@ def _limit_scene_hits(g_hits, limit=MAX_HITS_PER_SCENE_IN_REPORT):
     # порядок по кадрам -- как и в исходном списке
     picked.sort(key=lambda h: h.frame_idx)
     return picked
+
+
+def prune_unshown_crops(groups, out_dir, limit):
+    """Удаляет кропы, которые отчёт всё равно не показывает.
+
+    ОТКУДА ПРОБЛЕМА. Кроп пишется на КАЖДУЮ детекцию, прямо в цикле по
+    кадрам -- то есть до того, как детекции сгруппированы в сцены, и
+    заранее неизвестно, какие из них понадобятся. А в report.html
+    встраивается не больше MAX_HITS_PER_SCENE_IN_REPORT кадров на сцену
+    (см. _limit_scene_hits): иначе страница вырастает до сотен мегабайт и
+    перестаёт открываться. Всё, что сверх этого, ложится на диск мёртвым
+    грузом.
+
+    Насколько мёртвым: на боевых данных медианная сцена -- 9 детекций, но
+    девяностый процентиль уже 121, а максимум 1598. То есть длинный хвост
+    крупных сцен и даёт основной объём.
+
+    ПОЧЕМУ ЭТО НЕ МЕНЯЕТ ВИДИМОГО ПОВЕДЕНИЯ. Удаляются ровно те файлы,
+    которых в отчёте нет и не было. Ссылки выброшенных детекций
+    перепривязываются на ближайший по кадру оставшийся кроп -- так же, как
+    это делает apply_representative_full_frame_mode для полных кадров, --
+    поэтому в detections.json не остаётся ни одной ссылки в пустоту.
+
+    Вызывается ПОСЛЕ группировки и ДО save_outputs: правим объекты Hit в
+    памяти, и отчёт пишется уже с исправленными ссылками. Чинить готовые
+    файлы задним числом не приходится.
+    """
+    crops_dir = os.path.join(out_dir, "crops")
+    if not os.path.isdir(crops_dir):
+        return 0
+
+    keep = set()
+    for g in groups:
+        g_hits = g["hits"]
+        shown = _limit_scene_hits(g_hits, limit)
+        shown_paths = {h.image_path for h in shown if h.image_path}
+        keep |= shown_paths
+        if not shown_paths:
+            continue
+        by_frame = sorted((h.frame_idx, h.image_path) for h in shown if h.image_path)
+        for h in g_hits:
+            if h.image_path and h.image_path not in shown_paths:
+                nearest = min(by_frame, key=lambda fp: abs(fp[0] - h.frame_idx))
+                h.image_path = nearest[1]
+
+    keep_names = {os.path.basename(p) for p in keep}
+    removed = 0
+    for fname in os.listdir(crops_dir):
+        if fname not in keep_names:
+            try:
+                os.remove(os.path.join(crops_dir, fname))
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def save_outputs(hits, groups, out_dir, video_path, tracking_report_id=None, tracking_api_base=None):

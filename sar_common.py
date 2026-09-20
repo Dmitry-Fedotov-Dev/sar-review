@@ -272,6 +272,137 @@ def operation_summary(conn, operation_id):
             "coverage_pct": pct, "marks": marks["n"]}
 
 
+# Человеческие названия хранилищ. Дублируются из sar_cloud намеренно:
+# sar_common не должен тянуть за собой сетевой модуль ради двух строк --
+# его импортируют и воркер, и бот, и разовые скрипты.
+CLOUD_PROVIDER_NAMES = {"google": "Google Диск", "yandex": "Яндекс.Диск"}
+
+
+def provider_for_account(conn, acc):
+    """Собирает провайдера с продлением доступа -- ОДНА точка.
+
+    Продлённый токен надо сохранить, иначе через час всё повторится, и так
+    до бесконечности. Сохранение -- дело базы, а sar_cloud про базу не
+    знает и знать не должен: его импортируют и разовые скрипты. Поэтому
+    провайдеру передаются две функции, а связывает их это место.
+
+    Собирать провайдера где-то ещё нельзя: тот экземпляр окажется без
+    продления и будет отказывать через час, причём молча -- «доступ
+    отклонён» выглядит одинаково и когда продлить нечем, и когда просто
+    забыли подключить.
+    """
+    import sar_cloud
+
+    account_id = acc["id"]
+
+    def renew():
+        if not (acc.get("client_id") and acc.get("client_secret")
+                and acc.get("refresh_token")):
+            raise sar_cloud.AuthExpired(
+                "доступ истёк, а продлить нечем: у подключения нет ключей "
+                "приложения. Подключите диск заново или укажите их в "
+                "настройках -- у Google токен живёт один час.")
+        return sar_cloud.refresh_google_token(
+            acc["client_id"], acc["client_secret"], acc["refresh_token"])
+
+    def save(token, expires_at):
+        update_cloud_account(
+            conn, account_id, token=token,
+            expires_at=datetime.fromtimestamp(expires_at).isoformat(),
+            last_error=None)
+        acc["token"] = token
+
+    prov = sar_cloud.make_provider(acc["provider"], acc["token"],
+                                    renew=renew, on_renew=save)
+
+    # ПРОДЛЕВАЕМ ЗАРАНЕЕ, не дожидаясь отказа: обращение с заведомо мёртвым
+    # токеном -- это лишний запрос к Google и лишняя запись об ошибке,
+    # которую потом видит человек и пугается.
+    exp = acc.get("expires_at")
+    if exp and acc.get("client_id"):
+        try:
+            left = (datetime.fromisoformat(exp) - datetime.now()).total_seconds()
+        except (TypeError, ValueError):
+            left = None
+        if left is not None and left < sar_cloud.REFRESH_MARGIN_SEC:
+            try:
+                prov.renew_access()
+            except Exception:
+                # Не вышло -- пусть отказ случится на настоящем запросе, с
+                # понятным сообщением. Молча глотать нельзя, но и падать
+                # здесь незачем: вызывающий сам обработает.
+                pass
+    return prov
+
+
+def cloud_display_roots(conn):
+    """id подключения -> имя его корня в дереве."""
+    out = {}
+    for a in cloud_accounts(conn, enabled_only=False):
+        out[a["id"]] = (a.get("label") or "").strip()             or CLOUD_PROVIDER_NAMES.get(a["provider"], a["provider"])
+    return out
+
+
+def material_display_path(rec, op_root, cloud_roots):
+    """Путь, по которому материал ПОКАЗЫВАЕТСЯ -- не тот, что хранится.
+
+    Корень подключения кладётся ВНУТРЬ папки операции: дерево начинается от
+    неё, и всё, что снаружи, считается «вне операции» и показывается плоским
+    списком. А материал из подключённой папки операции ей как раз
+    принадлежит -- значит и в дереве должен быть внутри.
+
+    Хранимый rel_path при этом не меняется: по нему ищется совпадение
+    материала, и переписать его значит завести дубли.
+
+    Вынесено отдельной функцией, потому что нужно в двух местах -- обходу
+    папок и поиску по операции. Посчитать его там и там по-своему значит
+    получить дерево и поиск, которые расходятся в том, где лежит файл.
+    """
+    rel = (rec["rel_path"] or "").replace("\\", "/")
+    acc = rec.get("cloud_account_id")
+    if acc and acc in cloud_roots:
+        return "/".join(p for p in (op_root, cloud_roots[acc], rel) if p)
+    return rel
+
+
+def operation_materials_flat(conn, operation_id):
+    """Все материалы операции одним плоским списком -- для поиска.
+
+    Поиск по ТЕКУЩЕЙ папке бесполезен: человек ищет файл как раз тогда,
+    когда не помнит, в какой он папке. На 206 материалах список отдаётся
+    целиком и фильтруется в браузере -- это мгновенно и без похода на
+    сервер на каждую букву.
+    """
+    op = get_operation(conn, operation_id)
+    if op is None:
+        return None
+    root = (op["folder"] or "").replace("\\", "/").strip("/")
+    cloud_roots = cloud_display_roots(conn)
+
+    sources = get_settings(conn).get("material_sources", "all")
+    out = []
+    for r in materials_of_operation(conn, operation_id):
+        r = dict(r)
+        in_cloud = bool(r.get("cloud_file_id"))
+        if sources == "local" and in_cloud:
+            continue
+        if sources == "cloud" and not in_cloud:
+            continue
+        full = material_display_path(r, root, cloud_roots)
+        folder, _, name = full.rpartition("/")
+        out.append({
+            "report_id": r["report_id"],
+            "name": name or full,
+            "folder": folder,
+            "rel_path": r["rel_path"],
+            "kind": r["kind"],
+            "status": r["status"],
+            "in_cloud": in_cloud,
+        })
+    out.sort(key=lambda x: (x["folder"].lower(), x["name"].lower()))
+    return out
+
+
 def browse_operation(conn, watch_dir, operation_id, subpath=""):
     """Содержимое одной папки операции: подпапки и материалы в ней.
 
@@ -288,12 +419,42 @@ def browse_operation(conn, watch_dir, operation_id, subpath=""):
         return None
     linked = {r["report_id"]: dict(r)
               for r in materials_of_operation(conn, operation_id)}
+
+    # ОТБОР ПО ИСТОЧНИКУ. Настройка из админки: подключив большое
+    # хранилище, полезно на время оставить в списке только его -- или
+    # наоборот, скрыть облачное, пока разбирают то, что уже на машине.
+    # Материал при этом никуда не девается: он остаётся привязанным к
+    # операции, просто не показывается.
+    sources = get_settings(conn).get("material_sources", "all")
+    if sources == "local":
+        linked = {k: v for k, v in linked.items() if not v.get("cloud_file_id")}
+    elif sources == "cloud":
+        linked = {k: v for k, v in linked.items() if v.get("cloud_file_id")}
+    # СТРУКТУРА ОБЛАЧНОЙ ПАПКИ СОХРАНЯЕТСЯ.
+    #
+    # В облаке материал разложен по-своему: на боевом подключении это папки
+    # по датам съёмки, а папка операции на диске называется иначе. Такой
+    # путь не начинается с имени папки операции, и без отдельной обработки
+    # все 150 файлов сваливались бы в «вне папки операции» одной плоской
+    # кучей -- то есть та раскладка, которую человек сделал в облаке,
+    # пропадала бы ровно там, где он её ищет.
+    #
+    # Поэтому у каждого подключения свой корень в дереве: под ним лежит его
+    # собственная структура, как есть. Хранимый rel_path при этом НЕ
+    # меняется -- по нему ищется совпадение материала, и трогать его
+    # значит заводить дубли.
+    root = (op["folder"] or "").replace("\\", "/").strip("/")
+
+    cloud_roots = cloud_display_roots(conn)
+
+    def display_rel(rec):
+        return material_display_path(rec, root, cloud_roots)
+
+    here = "/".join(p for p in (root, subpath.strip("/")) if p)
+
     by_rel = {}
     for r in linked.values():
-        by_rel.setdefault((r["rel_path"] or "").replace("\\", "/"), []).append(r)
-
-    root = (op["folder"] or "").replace("\\", "/").strip("/")
-    here = "/".join(p for p in (root, subpath.strip("/")) if p)
+        by_rel.setdefault(display_rel(r), []).append(r)
 
     folders, files, outside = {}, [], []
     for rel, recs in by_rel.items():
@@ -517,6 +678,14 @@ def ai_scene_ref_key(object_class, source, first_frame_idx, first_bbox):
 
 DEFAULT_SERVER_CONFIG = {
     "watch_dir": ".",
+    # Где держать служебные данные: базу, отчёты, прокси-копии, превью.
+    # None -- внутри watch_dir, как было всегда.
+    #
+    # Разделять стоит, когда материал уезжает на другой носитель: в облако
+    # или на большой внешний диск. Отчёты туда отправлять нельзя -- их
+    # сотни тысяч штук и они мелкие (на боевых данных 573 805 файлов при
+    # 7,4 ГБ), любая сетевая или exFAT-папка на таком встаёт колом.
+    "data_dir": None,
     "host": "0.0.0.0",
     "port": 8080,
     "shared_password": "change_me",
@@ -639,13 +808,279 @@ def load_telegram_bot_config(script_dir):
     return cfg, config_path
 
 
-def resolve_paths(watch_dir):
+# ---------------------------------------------------------------------------
+# НАСТРОЙКИ, МЕНЯЕМЫЕ НА ХОДУ
+#
+# ОДНО место, где описано, что вообще можно крутить: имя, тип, умолчание,
+# границы и человеческое название. Всё остальное -- страница админки,
+# проверка ввода, применение в воркере -- строится отсюда.
+#
+# Почему реестр, а не просто чтение ключей из базы. Настройка без границ --
+# это способ выстрелить себе в ногу через веб-форму: "загрузок 50"
+# положит и канал, и квоту облака, и саму машину. Границы живут рядом с
+# определением, и сервер зажимает значение по ним ВСЕГДА -- ввести
+# опасное значение нельзя даже намеренно.
+#
+# Тот же принцип уже применён к player_ai_poll_interval_sec: сервер
+# зажимает минимум 5 секунд, и конфиг не может заставить клиента
+# опрашивать чаще.
+# ---------------------------------------------------------------------------
+
+SETTINGS_SCHEMA = {
+    "downloads_in_flight": {
+        "type": "int", "default": 1, "min": 1, "max": 4,
+        "label": "Одновременных загрузок из облака",
+        "help": "Главный рычаг расхода канала. На бытовом подключении "
+                "больше двух обычно не ускоряет, а мешает: файлы качаются "
+                "параллельно и ни один не доходит до конца.",
+    },
+    "staging_cap_gb": {
+        "type": "float", "default": 4.0, "min": 1.0, "max": 100.0,
+        "label": "Потолок временной папки, ГБ",
+        "help": "Сколько места отдано скачанным оригиналам. Самый большой "
+                "файл операции -- 1,92 ГБ, обрабатывается один за раз, так "
+                "что 4 ГБ хватает с запасом. Когда место кончается, самые "
+                "давно не нужные оригиналы удаляются: отчёт и лёгкая копия "
+                "уже сделаны, а сам файл при надобности качается заново.",
+    },
+    "material_touches_per_pass": {
+        "type": "int", "default": 3, "min": 1, "max": 50,
+        "label": "Файлов за один обход папки",
+        "help": "Сколько файлов разрешено ПРОЧИТАТЬ за проход ради превью "
+                "и длительности. Без ограничения подключение папки с "
+                "полусотней видео означает попытку скачать всё разом.",
+    },
+    "daily_traffic_gb": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 10000.0,
+        "label": "Суточный лимит трафика, ГБ (0 -- без лимита)",
+        "help": "Страховка от исчерпания квоты облака. По достижении "
+                "лимита загрузки останавливаются до следующих суток, а в "
+                "журнал пишется явная запись -- молча платформа не тормозит.",
+    },
+    "material_sources": {
+        "type": "choice", "default": "all",
+        "options": [
+            {"value": "all", "label": "локальные и облачные"},
+            {"value": "local", "label": "только на этой машине"},
+            {"value": "cloud", "label": "только облачные"},
+        ],
+        "label": "Какой материал показывать",
+        "help": "Подключив большое хранилище, полезно на время оставить в "
+                "списке только его -- или наоборот, скрыть облачное, пока "
+                "разбирают то, что уже на машине. На сам материал это не "
+                "влияет: ничего не удаляется и не отвязывается от операции.",
+    },
+    "auto_process": {
+        "type": "bool", "default": True,
+        "label": "Ставить новые файлы в очередь автоматически",
+        "help": "Выключенным удобно подключать большое хранилище: файлы "
+                "появляются в списке и доступны для ручного просмотра, но "
+                "модель по ним не запускается, пока человек не попросит.",
+    },
+}
+
+
+def _coerce_setting(key, raw):
+    """Приводит значение к типу из реестра и зажимает по границам.
+
+    Зажимает, а не отвергает: администратор ввёл 50 загрузок -- получит 4
+    и увидит это в форме. Отказ с ошибкой заставил бы гадать, что
+    допустимо, а тихое принятие 50 положило бы канал.
+    """
+    spec = SETTINGS_SCHEMA[key]
+    t = spec["type"]
+    if t == "choice":
+        # Неизвестное значение -- к умолчанию. Отвергать нечего: выбор
+        # приходит из списка, который сама же платформа и отдала, а
+        # несовпадение означает устаревшую вкладку.
+        allowed = {o["value"] for o in spec["options"]}
+        v = str(raw or "").strip()
+        return v if v in allowed else spec["default"]
+    if t == "bool":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on", "да")
+    try:
+        v = int(raw) if t == "int" else float(raw)
+    except (TypeError, ValueError):
+        return spec["default"]
+    return max(spec["min"], min(spec["max"], v))
+
+
+def get_settings(conn):
+    """Все настройки: умолчания из реестра, поверх -- то, что в базе.
+
+    Неизвестный ключ в базе игнорируется, а не роняет выдачу: настройку
+    могли убрать из кода, а строка осталась.
+    """
+    out = {k: v["default"] for k, v in SETTINGS_SCHEMA.items()}
+    try:
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        key = r["key"] if hasattr(r, "keys") else r[0]
+        val = r["value"] if hasattr(r, "keys") else r[1]
+        if key in SETTINGS_SCHEMA:
+            out[key] = _coerce_setting(key, val)
+    return out
+
+
+def set_setting(conn, key, value, who=None):
+    """Записывает одну настройку. Возвращает то, что реально сохранено."""
+    if key not in SETTINGS_SCHEMA:
+        raise KeyError(key)
+    v = _coerce_setting(key, value)
+    conn.execute(
+        "INSERT INTO settings (key, value, set_by, set_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+        "set_by=excluded.set_by, set_at=excluded.set_at",
+        (key, "1" if v is True else "0" if v is False else str(v),
+         who, datetime.now().isoformat()))
+    conn.commit()
+    return v
+
+
+# ---------------------------------------------------------------------------
+# ПОДКЛЮЧЁННЫЕ ОБЛАЧНЫЕ ХРАНИЛИЩА
+#
+# ТОКЕНЫ -- СЕКРЕТЫ. Наружу (в интерфейс, в журнал, в метрики) они не
+# выходят никогда: cloud_accounts_public() отдаёт всё, кроме них. Показать
+# токен в админке «для удобства» значит положить его в историю браузера, в
+# скриншот и в пересланное сообщение.
+# ---------------------------------------------------------------------------
+
+def add_cloud_account(conn, provider, token, label=None, refresh_token=None,
+                       expires_at=None, root_id=None, root_name=None, who=None,
+                       client_id=None, client_secret=None):
+    cur = conn.execute(
+        "INSERT INTO cloud_accounts (provider, label, token, refresh_token, "
+        "expires_at, root_id, root_name, enabled, added_by, added_at, "
+        "client_id, client_secret) "
+        "VALUES (?,?,?,?,?,?,?,1,?,?,?,?)",
+        (provider, label, token, refresh_token, expires_at, root_id,
+         root_name, who, datetime.now().isoformat(),
+         client_id, client_secret))
+    conn.commit()
+    return cur.lastrowid
+
+
+def cloud_accounts(conn, enabled_only=True):
+    """Полные записи, С ТОКЕНАМИ -- только для воркера."""
+    q = "SELECT * FROM cloud_accounts"
+    if enabled_only:
+        q += " WHERE enabled=1"
+    q += " ORDER BY id"
+    try:
+        return [dict(r) for r in conn.execute(q).fetchall()]
+    except Exception:
+        return []
+
+
+def cloud_accounts_public(conn):
+    """То же самое БЕЗ токенов -- для интерфейса и API.
+
+    Отдельная функция, а не фильтр на месте использования: фильтр, который
+    надо не забыть применить, рано или поздно забудут. Здесь забыть нечего.
+    """
+    out = []
+    for a in cloud_accounts(conn, enabled_only=False):
+        a.pop("token", None)
+        a.pop("refresh_token", None)
+        a.pop("client_secret", None)
+        # client_id секретом не считается (он виден в адресной строке при
+        # авторизации), но и показывать его незачем -- в интерфейсе важно
+        # другое: ЕСТЬ ли чем продлевать доступ.
+        a["can_refresh"] = bool(a.pop("client_id", None))
+        out.append(a)
+    return out
+
+
+def update_cloud_account(conn, account_id, **fields):
+    allowed = {"label", "token", "refresh_token", "expires_at", "root_id",
+               "root_name", "enabled", "last_error", "last_ok_at",
+               "operation_id", "client_id", "client_secret"}
+    bad = set(fields) - allowed
+    if bad:
+        raise KeyError(", ".join(sorted(bad)))
+    if not fields:
+        return
+    sets = ", ".join("%s=?" % k for k in fields)
+    conn.execute("UPDATE cloud_accounts SET %s WHERE id=?" % sets,
+                 tuple(fields.values()) + (account_id,))
+    conn.commit()
+
+
+def delete_cloud_account(conn, account_id):
+    """Отключает хранилище и прибирает за ним материал.
+
+    БЕЗ ЭТОГО записи материала остаются ссылаться на исчезнувшее
+    подключение. Корня в дереве у них больше нет, и все файлы проваливаются
+    в «вне папки операции» плоской кучей -- ровно так диск и «пропадал»
+    после переподключения.
+
+    Что делаем с записями:
+      * чисто облачные, по которым никто не работал, -- удаляем: без
+        хранилища они пустые ссылки;
+      * те, где есть работа человека (пометки, обсуждения, просмотр), --
+        ОСТАВЛЯЕМ, сняв привязку к облаку. Терять сделанное людьми нельзя
+        ни при каких обстоятельствах, даже если сам файл стал недоступен.
+    """
+    rows = conn.execute(
+        "SELECT report_id, rel_path FROM reports WHERE cloud_account_id=?",
+        (account_id,)).fetchall()
+    removed = kept = 0
+    for r in rows:
+        rid = r["report_id"]
+        work = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM manual_observations WHERE report_id=?) "
+            "     + (SELECT COUNT(*) FROM detection_comments WHERE report_id=?) "
+            "     + (SELECT COUNT(*) FROM watch_segments WHERE report_id=?) "
+            "     + (SELECT COUNT(*) FROM detection_priorities WHERE report_id=?) AS n",
+            (rid, rid, rid, rid)).fetchone()["n"]
+        if work:
+            conn.execute(
+                "UPDATE reports SET cloud_account_id=NULL, cloud_file_id=NULL, "
+                "cloud_size=NULL, proxy_requested=0 WHERE report_id=?", (rid,))
+            kept += 1
+        else:
+            conn.execute("DELETE FROM operation_materials WHERE report_id=?", (rid,))
+            conn.execute("DELETE FROM reports WHERE report_id=?", (rid,))
+            removed += 1
+    conn.execute("DELETE FROM cloud_accounts WHERE id=?", (account_id,))
+    conn.commit()
+    return {"removed": removed, "kept": kept}
+
+
+
+
+
+def resolve_paths(watch_dir, data_dir=None):
     """watch_dir -> (watch_dir_abs, data_dir, db_path, reports_dir), создавая
     служебные папки при необходимости. И sar_server.py, и sar_worker.py
     вызывают это одинаково, чтобы гарантированно смотреть на один и тот же
-    набор путей независимо от того, какой из двух процессов стартовал раньше."""
+    набор путей независимо от того, какой из двух процессов стартовал раньше.
+
+    ЗАЧЕМ data_dir ОТДЕЛЬНО ОТ watch_dir. Раньше служебная папка жёстко
+    лежала внутри наблюдаемой: data_dir = watch_dir/sar_data. Пока и то и
+    другое на одном диске, разницы нет. Но материал и служебные данные --
+    это две РАЗНЫЕ по характеру нагрузки:
+
+      * материал -- десятки крупных файлов, читаются подряд и по одному
+        разу; их место -- в облаке или на большом медленном диске;
+      * служебное -- сотни тысяч мелких файлов отчётов плюс база SQLite,
+        которые нужны мгновенно и постоянно; их место -- на локальном SSD.
+
+    Смешивать их в одной папке значит либо тащить 21 ГБ материала на
+    системный диск, либо класть полмиллиона мелких файлов в облако, где
+    они гарантированно встанут колом.
+
+    Поэтому data_dir настраивается (server.data_dir в конфиге). Умолчание
+    сохранено прежнее -- ни одна существующая установка не переедет сама.
+    """
     watch_dir = os.path.abspath(watch_dir)
-    data_dir = os.path.join(watch_dir, "sar_data")
+    data_dir = (os.path.abspath(data_dir) if data_dir
+                else os.path.join(watch_dir, "sar_data"))
     os.makedirs(data_dir, exist_ok=True)
     db_path = os.path.join(data_dir, "sar_data.db")
     reports_dir = os.path.join(data_dir, "reports")
@@ -744,6 +1179,56 @@ def init_db(db_path):
         created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_manual_obs_report ON manual_observations(report_id);
+    -- Точки, поставленные человеком ПРЯМО НА КАРТЕ.
+    --
+    -- Отдельная таблица, а не строка в manual_observations, потому что это
+    -- другая сущность. Пометка в плеере -- наблюдение В КАДРЕ: у неё есть
+    -- материал, таймкод, рамка, а координаты ВЫЧИСЛЕНЫ из телеметрии.
+    -- Точка на карте -- место на земле, и она ни к какому кадру не
+    -- привязана: «группа сообщила отсюда», «это ущелье не облетали»,
+    -- «свидетель указал сюда».
+    --
+    -- Втиснув её в manual_observations, пришлось бы разрешить пустой
+    -- report_id, и тогда каждая выборка пометок по материалу, каждый
+    -- подсчёт покрытия и каждая страница находки обязаны были бы помнить
+    -- про строки без материала. Забыли бы -- и появились бы находки,
+    -- которые не открываются.
+    CREATE TABLE IF NOT EXISTS map_marks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id INTEGER NOT NULL,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        label TEXT,
+        note TEXT,
+        viewer_name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_map_marks_op ON map_marks(operation_id);
+    -- Разобранный трек дрона: результат чтения SRT, а не сам SRT.
+    --
+    -- Разбор делает ВОРКЕР, а не веб-слой. Сервер по устройству проекта
+    -- только читает базу и файлы; когда трек считался по запросу, каждый
+    -- холодный запрос разбирал 114 файлов телеметрии (2,9 с), а кеш жил в
+    -- памяти процесса и умирал при перезапуске.
+    --
+    -- Пустой points (строка "[]") -- это «разобрали, телеметрии нет», а НЕ
+    -- «ещё не разбирали». Без такой отметки 95 видео без телеметрии
+    -- разбирались бы заново каждый проход, вечно.
+    --
+    -- bbox хранится отдельно, чтобы карта могла выставить границы, не
+    -- читая все точки.
+    CREATE TABLE IF NOT EXISTS telemetry_tracks (
+        report_id TEXT PRIMARY KEY,
+        points TEXT NOT NULL,        -- JSON [[lat,lon],...], уже прорежено
+        raw_points INTEGER NOT NULL, -- сколько было до прореживания
+        first_sec REAL,
+        last_sec REAL,
+        min_lat REAL, max_lat REAL,
+        min_lon REAL, max_lon REAL,
+        source TEXT,                 -- какой SRT прочитан
+        source_mtime REAL,           -- чтобы перечитать, если файл заменили
+        parsed_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS detection_priorities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         report_id TEXT NOT NULL,
@@ -835,6 +1320,51 @@ def init_db(db_path):
     -- Журнал уже отправленных тревог: нужен, чтобы слать сообщение при
     -- СМЕНЕ состояния, а не каждую проверку. Иначе через сутки на алерты
     -- перестанут смотреть -- и пропустят настоящий.
+    -- НАСТРОЙКИ, МЕНЯЕМЫЕ НА ХОДУ
+    --
+    -- Почему в базе, а не в sar_config.json. Меняет их администратор через
+    -- веб-страницу -- то есть СЕРВЕР. А применяет их воркер: это он читает
+    -- файлы и качает материал. Сервер и воркер -- разные процессы, которые
+    -- по устройству проекта общаются ТОЛЬКО через эту базу. Запиши сервер
+    -- новое значение в конфиг-файл -- воркер узнает о нём в лучшем случае
+    -- после перезапуска, а качать продолжит по-старому. Через базу он
+    -- перечитывает настройку на каждом проходе.
+    --
+    -- В sar_config.json остаются секреты и то, что нужно ДО старта (порт,
+    -- пути, пароль). Здесь -- только то, что осмысленно крутить на ходу.
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,          -- всегда текст, разбор по SETTINGS_SCHEMA
+        set_by TEXT,                  -- кто поменял: спросить будет у кого
+        set_at TEXT
+    );
+
+    -- ПОДКЛЮЧЁННЫЕ ОБЛАЧНЫЕ ХРАНИЛИЩА
+    --
+    -- Здесь лежат ТОКЕНЫ ДОСТУПА -- это секреты того же уровня, что общий
+    -- пароль и токен бота. Вся папка sar_data/ исключена из git (см.
+    -- .gitignore), и выносить токены в конфиг или в логи нельзя ни при
+    -- каких обстоятельствах.
+    --
+    -- Почему в базе, а не в sar_config.json: подключает диск администратор
+    -- через веб-страницу, а читает воркер. Между ними только эта база --
+    -- см. соседнюю таблицу settings.
+    CREATE TABLE IF NOT EXISTS cloud_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,       -- google / yandex, см. sar_cloud.PROVIDERS
+        label TEXT,                   -- как человек назвал это подключение
+        token TEXT NOT NULL,
+        refresh_token TEXT,
+        expires_at TEXT,              -- когда токен протухнет, ISO
+        root_id TEXT,                 -- папка с материалом внутри хранилища
+        root_name TEXT,               -- её человеческое имя для интерфейса
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_error TEXT,              -- почему последний раз не вышло
+        last_ok_at TEXT,              -- когда последний раз всё получилось
+        added_by TEXT,
+        added_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS alert_state (
         check_name TEXT PRIMARY KEY,
         level TEXT NOT NULL,          -- текущее наблюдаемое состояние
@@ -852,6 +1382,28 @@ def init_db(db_path):
     # миграции для БД, созданных более ранними версиями схемы
     for alter_sql in ("ALTER TABLE reports ADD COLUMN file_ctime REAL",
                        "ALTER TABLE reports ADD COLUMN phase TEXT",
+                       # откуда взялся файл: если из облака, здесь лежит
+                       # подключение и идентификатор файла в нём
+                       # к какой операции относится подключённая папка:
+                       # структура в облаке своя, и по имени папки операцию
+                       # не угадать
+                       "ALTER TABLE cloud_accounts ADD COLUMN operation_id INTEGER",
+                       # Для продления доступа к Google. Токен там живёт ЧАС,
+                       # и без обновления диск приходится подключать заново
+                       # каждый час -- на подготовку 150 файлов (около трёх
+                       # часов) этого не хватает по определению.
+                       #
+                       # client_secret -- секрет того же уровня, что и токен:
+                       # вся папка sar_data/ исключена из репозитория.
+                       "ALTER TABLE cloud_accounts ADD COLUMN client_id TEXT",
+                       "ALTER TABLE cloud_accounts ADD COLUMN client_secret TEXT",
+                       "ALTER TABLE reports ADD COLUMN cloud_account_id INTEGER",
+                       "ALTER TABLE reports ADD COLUMN cloud_file_id TEXT",
+                       "ALTER TABLE reports ADD COLUMN cloud_size INTEGER",
+                       # человек попросил подготовить этот файл к просмотру:
+                       # скачать из облака и собрать лёгкую копию. Само
+                       # ничего не качается -- 150 файлов это около 88 ГБ.
+                       "ALTER TABLE reports ADD COLUMN proxy_requested INTEGER",
                        "ALTER TABLE manual_observations ADD COLUMN est_lat REAL",
                        "ALTER TABLE manual_observations ADD COLUMN est_lon REAL",
                        "ALTER TABLE manual_observations ADD COLUMN est_distance_m REAL",
@@ -859,6 +1411,12 @@ def init_db(db_path):
                        # персональный ключ входа и роль -- см. ROLE_* ниже
                        "ALTER TABLE telegram_access_requests ADD COLUMN access_token TEXT",
                        "ALTER TABLE telegram_access_requests ADD COLUMN role TEXT",
+                       # куда вести человека после одобрения: он мог прийти
+                       # по вечной ссылке на конкретную находку, и к моменту
+                       # выдачи доступа эта цель должна пережить и ожидание,
+                       # и перезапуск бота (сторож туннеля перезапускает его
+                       # при каждом обрыве канала)
+                       "ALTER TABLE telegram_access_requests ADD COLUMN pending_target TEXT",
                        # notified_level появился ПОСЛЕ того, как alert_state уже
                        # была создана на боевой базе. CREATE TABLE IF NOT EXISTS
                        # существующую таблицу не меняет, поэтому без этой строки
@@ -887,24 +1445,109 @@ def init_db(db_path):
 def make_report_id(name, abs_path):
     stem = os.path.splitext(os.path.basename(name))[0]
     safe_stem = re.sub(r"[^a-zA-Zа-яА-Я0-9_-]+", "_", stem)[:60] or "file"
-    try:
-        # На разных ОС/ФС "дата создания" трактуется по-разному: ctime на
-        # Linux — это время изменения МЕТАДАННЫХ, не создания файла (в
-        # POSIX честного "birth time" в общем случае нет). Это лучшее
-        # доступное приближение без сторонних зависимостей.
-        ctime = os.path.getctime(abs_path)
-    except OSError:
-        ctime = os.path.getmtime(abs_path)
+    # Дату берём через get_file_ctime -- ОДНУ функцию на весь проект.
+    #
+    # Здесь была вторая, собственная копия той же логики, и в ней запасной
+    # путь падал точно так же, как основной: у несуществующего файла
+    # getmtime бросает ровно то же исключение, что и getctime. Для файла из
+    # ОБЛАКА локального пути нет вовсе -- и это роняло ВЕСЬ проход
+    # наблюдения, из-за чего не регистрировался ни один материал, ни
+    # облачный, ни локальный.
+    #
+    # Ровно та ловушка, про которую отдельный раздел в CLAUDE.md: одно и то
+    # же, посчитанное в двух местах, расходится. Починили одно место --
+    # второе осталось.
+    ctime = get_file_ctime(abs_path)
     date_str = datetime.fromtimestamp(ctime).strftime("%Y%m%d_%H%M%S")
     path_hash = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
     return f"{safe_stem}__{date_str}__{path_hash}"
 
 
-def get_file_ctime(abs_path):
+# ---------------------------------------------------------------------------
+# ПУТИ ВЫЧИСЛЯЮТСЯ, А НЕ ХРАНЯТСЯ
+#
+# В reports есть столбцы abs_path и out_dir с АБСОЛЮТНЫМИ путями. Они
+# избыточны: оба выводятся из того, что уже лежит рядом в той же строке.
+# Проверено на боевой базе -- out_dir совпал с расчётом во всех 58 записях,
+# abs_path расходился только разделителем (/ против \).
+#
+# Чем плохо хранить. Абсолютный путь прибивает базу к одной машине, одной
+# букве диска и одной операционной системе. Пока всё живёт на D: одного
+# ноутбука, это незаметно; при любом переезде -- на другой диск, на сетевую
+# папку с материалом, на VPS под Linux -- все 58 записей превращаются в
+# ссылки в никуда. Причём молча: строка в базе есть, файла по ней нет.
+#
+# Это ровно та грабля, что уже описана в CLAUDE.md про папку резервных
+# копий, только в другом виде: там путь СЧИТАЛСЯ в трёх местах и разошёлся,
+# здесь он ХРАНИТСЯ в двух формах (rel_path и abs_path) и расходится при
+# переезде. Лечение одно -- одна точка правды. Ею становится rel_path.
+#
+# Столбцы остаются в схеме: их пишет воркер при регистрации, ими пользуются
+# внешние разовые скрипты, и сносить их ради чистоты значит ломать то, что
+# работает. Но ЧИТАТЬ их платформа больше не должна -- только эти две
+# функции.
+# ---------------------------------------------------------------------------
+
+def material_path(watch_dir, rel_path):
+    """Абсолютный путь к файлу материала.
+
+    rel_path хранится с прямыми слэшами независимо от системы (так его
+    формирует scan_all_materials), поэтому разбираем именно по "/", а не
+    по os.sep: на Linux os.path.join с виндовым разделителем внутри строки
+    молча склеил бы один сегмент вместо двух.
+    """
+    parts = [x for x in str(rel_path or "").replace("\\", "/").split("/") if x]
+    return os.path.join(watch_dir, *parts) if parts else watch_dir
+
+
+def report_dir(reports_dir, report_id):
+    """Папка отчёта. report_id уже безопасен как имя файла -- он собран из
+    очищенного имени, даты и хэша (см. make_report_id)."""
+    return os.path.join(reports_dir, str(report_id))
+
+
+def find_material_file(watch_dir, data_dir, rel_path):
+    """Где на диске лежит файл материала СЕЙЧАС, или None.
+
+    Мест два: наблюдаемая папка и временная папка скачанного из облака.
+    Всё, что читает файл -- превью, просмотр снимка, отдача оригинала --
+    обязано спрашивать здесь, а не складывать путь самостоятельно.
+
+    Иначе получается то, что уже случилось: материал скачан и готов, а
+    страница отвечает «файл не найден на диске», потому что смотрит только
+    в одно из двух мест. Причём для каждого потребителя отдельно -- то есть
+    чинить пришлось бы в каждом.
+    """
+    local = material_path(watch_dir, rel_path)
+    if os.path.exists(local):
+        return local
     try:
-        return os.path.getctime(abs_path)
-    except OSError:
-        return os.path.getmtime(abs_path)
+        import sar_staging
+        staged = sar_staging.Staging(
+            sar_staging.staging_dir(data_dir), cap_bytes=1).path_for(rel_path)
+    except Exception:
+        return None
+    return staged if os.path.exists(staged) else None
+
+
+def get_file_ctime(abs_path):
+    """Дата создания файла, 0.0 если узнать нельзя.
+
+    Раньше при недоступном файле второй вызов (getmtime) падал ровно так
+    же, как первый, и исключение уходило наружу. Это роняло ВЕСЬ список
+    материалов из-за одной строки: файл, удалённый между обходом папки и
+    чтением атрибутов, делал страницу недоступной целиком. Та же категория,
+    что и пустой out_dir, который когда-то ронял список с TypeError.
+
+    Теперь это нужно и для облака: у файла, который ещё не скачан, даты
+    создания на диске нет вовсе.
+    """
+    for fn in (os.path.getctime, os.path.getmtime):
+        try:
+            return fn(abs_path)
+        except OSError:
+            continue
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1023,6 +1666,129 @@ def attach_by_folder(conn, watch_dir, report_id, rel_path):
     return op_id
 
 
+def match_existing_material(conn, rel_path, watch_dir):
+    """Находит уже известную запись для файла из облака.
+
+    ПОЧЕМУ НЕ ПРОСТО ПО rel_path. В облаке материал может лежать иначе, чем
+    локально: на боевом подключении путь в облаке -- "2026 08 11/DJI_1.MP4",
+    а в базе -- "Курумды август 2026/DJI_1.MP4". Совпадение по пути не
+    срабатывает, и тот же файл заводится ВТОРОЙ записью: вся работа по нему
+    (пометки, обсуждения, отметки просмотра) остаётся на первой, невидимой.
+    Именно так проект уже терял покрытие -- 73 процента вместо 82.
+
+    Поэтому вторым заходом сверяемся по ИМЕНИ ФАЙЛА. Но только когда оно
+    однозначно: если таких имён в базе несколько, угадывать нельзя --
+    привязать работу не к тому материалу хуже, чем завести новый.
+
+    Возвращает (запись, что_делать):
+      ("skip")   -- файл уже есть локально, облачная копия не нужна;
+      ("adopt")  -- запись есть, а файла на диске нет: облако его вернёт;
+      ("new")    -- ничего похожего, заводим новую запись.
+    """
+    row = conn.execute("SELECT * FROM reports WHERE rel_path=?",
+                       (rel_path,)).fetchone()
+    if row is not None:
+        return row, "adopt"
+
+    name = os.path.basename(str(rel_path or "").replace("\\", "/"))
+    same = conn.execute(
+        "SELECT * FROM reports WHERE rel_path=? OR rel_path LIKE ?",
+        (name, "%/" + name)).fetchall()
+    if len(same) != 1:
+        return None, "new"
+
+    row = same[0]
+    local = material_path(watch_dir, row["rel_path"])
+    if os.path.exists(local):
+        # Локальная копия на месте и уже разобрана. Качать её из облака
+        # незачем, а заводить вторую запись -- прямой путь к потере работы.
+        return row, "skip"
+    # Файла нет, а работа по нему есть. Облако возвращает к нему доступ --
+    # это лучшее, что вообще может дать подключение.
+    return row, "adopt"
+
+
+def cloud_timestamp(value):
+    """Дата файла из облака в секундах, 0.0 если её нет.
+
+    Нужна, чтобы облачный материал становился в список ПО ДАТЕ СЪЁМКИ, а
+    не сваливался в конец общей кучей: на боевом подключении это 150
+    файлов, и без даты они оказывались за всем локальным материалом.
+
+    Google отдаёт "2026-08-15T10:00:00.000Z", Яндекс --
+    "2026-08-15T10:00:00+00:00". Разбираем оба, а при неудаче честно
+    возвращаем ноль вместо выдуманного значения.
+    """
+    if not value:
+        return 0.0
+    text = str(value).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except (ValueError, OSError):
+        return 0.0
+
+
+def scan_cloud_materials(conn, list_folder=None, log=None):
+    """Материал в подключённых облачных хранилищах.
+
+    Возвращает [(rel_path, kind, account_id, file_id, size)].
+
+    rel_path строится КАК У ЛОКАЛЬНОГО ФАЙЛА -- "Папка/Файл.MP4". Это не
+    косметика: по rel_path ищется существующая запись в reports (см.
+    watcher_loop), и если облачный файл получит другое имя, тот же самый
+    материал заведётся второй записью. На дублях в этом проекте уже
+    обжигались: было 38 видео и 39 фото вместо 34 и 24.
+
+    Поэтому ПЕРЕНОС МАТЕРИАЛА В ОБЛАКО С СОХРАНЕНИЕМ СТРУКТУРЫ ПАПОК
+    подхватывает существующие записи вместе со всей проделанной по ним
+    работой -- пометками, обсуждениями, отметками просмотра.
+
+    Обход рекурсивный, но с ограничением глубины: облачную папку человек
+    может выбрать любую, включая корень диска со всем накопленным за годы.
+
+    Ошибка одного хранилища не отменяет остальные и не роняет обход: она
+    записывается в last_error этого подключения и видна в админке.
+    """
+    out = []
+    for acc in cloud_accounts(conn, enabled_only=True):
+        try:
+            lister = list_folder or _cloud_lister(acc, conn)
+            _walk_cloud(lister, acc.get("root_id") or "", "", out, acc, depth=0)
+            update_cloud_account(conn, acc["id"], last_error=None,
+                                  last_ok_at=datetime.now().isoformat())
+        except Exception as e:
+            update_cloud_account(conn, acc["id"], last_error=str(e))
+            if log:
+                log("[облако] %s: %s" % (acc.get("label") or acc["provider"], e))
+    return out
+
+
+CLOUD_MAX_DEPTH = 3
+
+
+def _cloud_lister(acc, conn=None):
+    """Листинг с продлением доступа. conn нужен, чтобы сохранить новый
+    токен: без сохранения он продлевался бы на каждом проходе заново."""
+    return provider_for_account(conn, acc).list_folder
+
+
+def _walk_cloud(list_folder, folder_id, prefix, out, acc, depth):
+    if depth > CLOUD_MAX_DEPTH:
+        return
+    for item in list_folder(folder_id):
+        rel = (prefix + "/" + item.name) if prefix else item.name
+        if item.is_folder:
+            _walk_cloud(list_folder, item.id, rel, out, acc, depth + 1)
+            continue
+        ext = os.path.splitext(item.name)[1].lower()
+        if ext not in MEDIA_EXTS:
+            continue
+        kind = "video" if ext in VIDEO_EXTS else "photo"
+        out.append((rel, kind, acc["id"], item.id, item.size,
+                    cloud_timestamp(item.modified)))
+    return out
+
+
 def scan_all_materials(watch_dir):
     """Все медиафайлы: в папках операций и оставшиеся в корне.
 
@@ -1123,8 +1889,8 @@ def proxy_video_path(data_dir, filename):
     return os.path.join(proxies_dir, f"{safe_name}__{digest}.mp4")
 
 
-def finding_preview_path(data_dir, observation_id):
-    """Кадр находки с нарисованной рамкой.
+def finding_preview_path(data_dir, observation_id, full=False):
+    """Кадр находки.
 
     У ручной пометки НЕТ готовой картинки: человек обвёл область прямо на
     проигрываемом видео, и на диске остались только таймкод и координаты
@@ -1134,10 +1900,20 @@ def finding_preview_path(data_dir, observation_id):
     Ключ -- id наблюдения: он уникален сам по себе, и хэш от пути здесь не
     нужен (в отличие от превью материала, где совпадающие имена файлов в
     разных папках -- обычное дело).
+
+    Файла два, и они разные по назначению:
+
+    * обычный -- мелкий (960 px), рамка ВЖЖЕНА в картинку. Его показывает
+      сетка находок, где важна скорость: таких превью на экране десятки.
+    * full -- крупный и БЕЗ рамки. Его подгружает окно предпросмотра и
+      страница кадра, где картинку увеличивают. Рамка там рисуется поверх
+      в SVG: она остаётся чёткой на любом масштабе и её можно выключить,
+      чтобы посмотреть на находку своими глазами, а не в обводке.
     """
     previews_dir = os.path.join(data_dir, "finding_previews")
     os.makedirs(previews_dir, exist_ok=True)
-    return os.path.join(previews_dir, f"obs_{int(observation_id)}.jpg")
+    suffix = "_full" if full else ""
+    return os.path.join(previews_dir, f"obs_{int(observation_id)}{suffix}.jpg")
 
 
 # ---------------------------------------------------------------------------

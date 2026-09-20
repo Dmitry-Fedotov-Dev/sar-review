@@ -14,6 +14,7 @@
 У триажа сцены модели картинка уже есть -- кроп в папке отчёта; его и
 показываем, генерировать нечего.
 """
+import io
 import os
 import re
 
@@ -22,6 +23,8 @@ import pytest
 import sar_common
 import sar_server
 import sar_worker
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 CARD = sar_server.OPERATION_CARD_HTML.format(viewer_name="в")
@@ -60,29 +63,25 @@ def test_preview_path_is_keyed_by_observation(tmp_path):
     assert a.endswith(".jpg")
 
 
-def test_box_is_drawn_from_normalised_coordinates():
-    """bbox хранится долями 0..1 от размера кадра, чтобы пережить смену
-    разрешения видео. Нарисовать его как пиксели -- значит промахнуться."""
-    cv2 = pytest.importorskip("cv2")
-    import numpy as np
+def test_previews_are_written_without_a_burned_in_box():
+    """Рамку больше не впечатывают в картинку.
 
-    frame = np.zeros((200, 400, 3), dtype=np.uint8)
-    out = sar_worker._draw_box(cv2, frame, [0.25, 0.25, 0.75, 0.75])
-    # внутри рамки центр остался чёрным, а на её линии появился цвет
-    assert out[100, 200].sum() == 0, "закрасили содержимое вместо рамки"
-    assert out[50, 200].sum() > 0, "рамка не нарисована по верхней границе"
+    Так было раньше, и это ломало увеличение: рамка растягивалась вместе
+    с пикселями и рассыпалась, а поверх неё интерфейс рисовал ещё и свою --
+    выходила двойная линия, наполовину размытая. Теперь рамку рисует
+    только интерфейс, в SVG: она чёткая на любом масштабе и выключается.
+    """
+    src = io.open(os.path.join(ROOT, "sar_worker.py"), encoding="utf-8").read()
+    body = src[src.index("def _generate_finding_preview"):]
+    body = body[:body.index(chr(10) + "def ")]
+    assert "_draw_box" not in body, "рамка снова впечатывается в кадр"
+    assert "_write_thumbnail" in body
 
 
-def test_broken_bbox_does_not_crash_the_pass():
-    """Координаты приходят из базы, где лежат записи разных версий."""
-    cv2 = pytest.importorskip("cv2")
-    import numpy as np
-
-    frame = np.zeros((50, 50, 3), dtype=np.uint8)
-    for bad in ([], [1, 2], ["a", "b", "c", "d"], None):
-        if bad is None:
-            continue
-        sar_worker._draw_box(cv2, frame, bad)
+def test_worker_no_longer_carries_a_box_painter():
+    """Осиротевший код в этом проекте уже приводил к тихим поломкам --
+    после переноса логики функцию положено убирать, а не оставлять."""
+    assert not hasattr(sar_worker, "_draw_box")
 
 
 # --- отдача ---------------------------------------------------------------

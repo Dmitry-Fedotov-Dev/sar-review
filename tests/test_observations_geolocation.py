@@ -3,6 +3,7 @@
 (та же оценка, что и для AI-детекций, см. sar_common.estimate_ground_point) --
 bbox ручного наблюдения уже нормализован 0..1 (см. схему manual_observations
 в sar_common.py), поэтому используется напрямую, без размеров кадра."""
+import os
 import sqlite3
 
 import sar_common
@@ -18,6 +19,11 @@ SRT_CONTENT = (
 
 def _client(app, db_path, script_dir, monkeypatch):
     monkeypatch.setattr(sar_server, "DB_PATH", db_path, raising=False)
+    # Путь к материалу сервер ВЫЧИСЛЯЕТ от watch_dir, а не читает из базы --
+    # иначе база привязана к машине, на которой файл впервые увидели.
+    monkeypatch.setattr(sar_server, "SERVER_CFG",
+                        {"watch_dir": os.path.dirname(db_path)}, raising=False)
+    monkeypatch.setattr(sar_server, "_PATH_ROOTS_CACHE", {}, raising=False)
     monkeypatch.setattr(sar_server, "SCRIPT_DIR", script_dir)
     monkeypatch.setattr(sar_server, "_telemetry_cache", {})
     monkeypatch.setattr(sar_server, "_TELEMETRY_INDEX", {"by_stem": {}, "by_timestamp": []})

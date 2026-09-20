@@ -139,6 +139,12 @@ def client(tmp_path, monkeypatch):
     watch.mkdir()
     src = watch / "DJI_1.MP4"
     src.write_bytes(b"x")
+    # У записи r2 свой rel_path, значит на диске должен лежать свой файл.
+    # Раньше обе записи ссылались abs_path-ом на один и тот же DJI_1.MP4
+    # при разных rel_path -- фикстура противоречила сама себе, и это
+    # проходило только потому, что путь БРАЛСЯ из базы. Теперь он
+    # вычисляется из rel_path, и разойтись они уже не могут.
+    (watch / "DJI_2.MP4").write_bytes(b"x")
     db = str(tmp_path / "sar_data.db")
     sar_common.init_db(db)
     conn = sar_common.get_db_connection(db)

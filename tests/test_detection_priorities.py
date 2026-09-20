@@ -5,6 +5,7 @@ likely_person, confirmed_object, likely_object, rejected), ставит толь
 пишет. Плюс счётчики manual_count/ai_count на /api/tree для сортировки на
 главной странице."""
 import json
+import pathlib
 import sqlite3
 
 import sar_common
@@ -37,6 +38,19 @@ def _insert_report(db_path, report_id, rel_path, status, out_dir="/out",
     conn.close()
 
 
+def _scene_dir(watch_dir, report_id="rep1"):
+    """Папка отчёта в том виде, в каком её вычислит сервер.
+
+    out_dir из базы больше не читается -- хранимый абсолютный путь
+    привязывал бы базу к машине, на которой отчёт посчитали. Тест кладёт
+    detections.json туда, куда сервер и пойдёт смотреть.
+    """
+    _, _, _, reports_dir = sar_common.resolve_paths(str(watch_dir))
+    d = pathlib.Path(reports_dir) / report_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _hit(frame_idx, cx, cy, object_class="person", source="model", confidence=0.5, **extra):
     hit = {
         "frame_idx": frame_idx, "timestamp": str(frame_idx), "seconds": float(frame_idx),
@@ -51,8 +65,7 @@ def _hit(frame_idx, cx, cy, object_class="person", source="model", confidence=0.
 # --- ref_key стабильности AI-сцен ---
 
 def test_ai_scene_ref_key_is_content_based_not_positional(tmp_path, monkeypatch):
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
+    out_dir = _scene_dir(tmp_path)
     hits = [_hit(10, 100, 100), _hit(60, 105, 100),
             _hit(300, 500, 500, object_class="tent", source="color", confidence=0.9)]
     (out_dir / "detections.json").write_text(json.dumps(hits, ensure_ascii=False), encoding="utf-8")
@@ -78,8 +91,7 @@ def test_ai_scene_ref_key_distinguishes_scenes_starting_on_the_same_frame(tmp_pa
     (например rejected) тихо перезаписывал/задевал две другие через
     UNIQUE(report_id, kind, ref_key) в detection_priorities, и экспорт
     датасета тянул в хард-негативы кадры совсем других, непроверенных сцен."""
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
+    out_dir = _scene_dir(tmp_path)
     hits = [
         _hit(0, 100, 100),   # сцена A -- левый верхний угол
         _hit(0, 900, 700),   # сцена B -- другой угол, тот же стартовый кадр
@@ -232,8 +244,7 @@ def test_tree_ai_count_computed_for_done_report(tmp_path, monkeypatch):
     watch_dir = tmp_path / "watch"
     watch_dir.mkdir()
     (watch_dir / "DJI_z.MP4").write_bytes(b"fake")
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
+    out_dir = _scene_dir(watch_dir)
     hits = [_hit(0, 100, 100), _hit(50, 105, 100),
             _hit(300, 500, 500, object_class="tent", source="color", confidence=0.9)]
     (out_dir / "detections.json").write_text(json.dumps(hits, ensure_ascii=False), encoding="utf-8")

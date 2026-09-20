@@ -35,7 +35,7 @@ def env(tmp_path, monkeypatch):
                         raising=False)
     monkeypatch.setattr(sar_server, "DB_PATH", db, raising=False)
     monkeypatch.setattr(sar_common, "resolve_paths",
-                        lambda w: (str(watch), str(watch), db, str(watch)))
+                        lambda w, d=None: (str(watch), str(watch), db, str(watch)))
     sar_server.app.secret_key = "t"
     sar_server.app.testing = True
     c = sar_server.app.test_client()
@@ -239,3 +239,141 @@ def test_operations_list_links_to_the_card(op):
     html = client.get("/operations").get_data(as_text=True)
     assert "/operation/${o.id}/" in html
     assert 'href="/?op=' not in html
+
+
+# --- поиск по всей операции -----------------------------------------------
+#
+# Поиск по ТЕКУЩЕЙ папке бесполезен: человек ищет файл ровно тогда, когда не
+# помнит, в какой он папке. А с подключённым облаком папок стало больше:
+# на боевых данных материал разложен по датам съёмки и вложенным папкам
+# вроде "2026 08 14/Helicopter/Saykal".
+
+CARD = sar_server.OPERATION_CARD_HTML.format(viewer_name="в")
+
+
+def test_search_field_exists():
+    assert 'id="q"' in CARD
+    assert "Поиск по всей операции" in CARD
+
+
+def test_search_looks_at_the_whole_operation_not_one_folder():
+    """Ключевое: список берётся отдельным запросом по всей операции, а не
+    из содержимого открытой папки."""
+    assert "/materials" in CARD
+    assert "ensureAll" in CARD
+
+
+def test_list_is_fetched_once_not_per_keystroke():
+    """Поход на сервер на каждую букву -- это заметная задержка на
+    медленном канале, ради которой нет никакой причины: материалов
+    сотни, а не миллионы."""
+    assert "if (ALL) return ALL" in CARD
+
+
+def test_search_matches_path_as_well_as_name():
+    """«helicopter saykal» должно находить, даже если этих слов нет в
+    самом имени файла."""
+    assert "it.folder" in CARD and "it.name" in CARD
+
+
+def test_multiple_words_narrow_the_search():
+    """Как и в списке файлов: каждое слово должно совпасть."""
+    assert "parts.every" in CARD
+
+
+def test_results_show_where_the_file_lies():
+    """Найти файл и не понять, в какой он папке, -- половина пользы."""
+    assert "hit-where" in CARD
+
+
+def test_highlight_does_not_build_a_regexp_from_user_input():
+    """Запрос печатает человек: точка, скобка или звёздочка в нём либо
+    сломают собранную регулярку, либо заставят её совпадать не с тем."""
+    i = CARD.index("function mark(")
+    chunk = CARD[i:i + 1400]
+    assert "new RegExp" not in chunk, (
+        "подсветка снова собирает регулярку из пользовательского ввода")
+    assert "indexOf" in chunk
+
+
+def test_results_are_capped():
+    """Двести строк разом подвешивают слабую машину, а искать среди
+    двухсот результатов всё равно нельзя."""
+    assert "slice(0, 60)" in CARD
+
+
+def test_empty_result_explains_what_to_try():
+    assert "Ничего не найдено" in CARD
+
+
+def test_hotkey_checks_field_type_not_tag():
+    """На этих граблях в плеере уже стояли: проверка «это input?» ломала
+    горячие клавиши, стоило чекбоксу получить фокус."""
+    i = CARD.index("e.key !== '/'")
+    chunk = CARD[i:i + 600]
+    assert "el.type" in chunk and "checkbox" in chunk
+
+
+def test_escape_clears_the_search():
+    assert "'Escape'" in CARD
+
+
+# Проверки баланса скобок здесь НЕТ намеренно. Упрощённый разбор строк
+# спотыкается о регулярку /[&<>"']/g в esc(): кавычка внутри неё
+# принимается за начало строки, и счёт разъезжается ещё до конца шапки.
+# Тест, дающий ложный сигнал, хуже отсутствующего -- на него перестают
+# смотреть. Синтаксис скрипта проверяется запуском страницы в браузере.
+
+def test_no_template_braces_leaked():
+    assert "{{" not in CARD and "}}" not in CARD
+
+
+def test_search_is_shown_on_the_materials_tab_only():
+    """Поле поиска на вкладке находок или отчёта -- это поле, которое
+    ничего не делает."""
+    assert "classList.toggle('on', tab === 'mat')" in CARD
+
+
+def test_leaving_the_tab_clears_the_query():
+    """Иначе человек возвращается на материалы и видит отфильтрованный
+    список, не понимая почему."""
+    assert "if (tab !== 'mat' && query)" in CARD
+
+
+# --- порядок и вид вкладок -------------------------------------------------
+
+def _tabs_html(op):
+    client = op[0]
+    return client.get("/operation/1/").get_data(as_text=True)
+
+
+def test_broadcasts_tab_is_last(op):
+    """Эфиры -- заглушка. В одном ряду с работающими вкладками она обещает
+    то, чего нет."""
+    import re
+    html = _tabs_html(op)
+    order = re.findall(r'data-t="(\w+)"', html)
+    assert order[-1] == "live", order
+    assert order[0] == "mat"
+
+
+def test_broadcasts_tab_is_dimmed_and_pushed_right(op):
+    html = _tabs_html(op)
+    assert 'class="tab later" data-t="live"' in html
+    assert ".tab.later{margin-left:auto;color:var(--dim)}" in html
+
+
+def test_selected_broadcasts_tab_is_still_readable(op):
+    """Специфичность: без отдельного правила .tab.later.on выбранная
+    вкладка осталась бы блёклой и читалась как неактивная."""
+    html = _tabs_html(op)
+    assert ".tab.later.on{color:var(--ink)}" in html
+    assert html.index(".tab.later{") < html.index(".tab.later.on{"), (
+        "правило для выбранной идёт раньше -- его перебьёт общее"
+    )
+
+
+def test_working_tabs_are_not_dimmed(op):
+    """Приглушена должна быть ровно одна вкладка."""
+    html = _tabs_html(op)
+    assert html.count('class="tab later"') == 1

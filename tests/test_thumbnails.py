@@ -114,6 +114,12 @@ def test_ensure_thumbnail_does_not_regenerate_when_unchanged(tmp_path, monkeypat
 def _client(app, watch_dir, data_dir, monkeypatch):
     monkeypatch.setattr(sar_server, "SERVER_CFG", {"watch_dir": str(watch_dir)}, raising=False)
     monkeypatch.setattr(sar_server, "DATA_DIR", str(data_dir), raising=False)
+    # База нужна с 17.09.2026: имя файла сверяется не только с обходом
+    # папки, но и с reports -- иначе облачный материал, которого на диске
+    # нет по определению, получал 404 при готовом превью.
+    db = os.path.join(str(data_dir), "sar_data.db")
+    sar_common.init_db(db)
+    monkeypatch.setattr(sar_server, "DB_PATH", db, raising=False)
     app.secret_key = "test-secret"
     app.testing = True
     client = app.test_client()

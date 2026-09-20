@@ -6,6 +6,7 @@
 кликабельна, пока нет готового отчёта. То есть снимок в очереди нельзя было
 посмотреть НИЧЕМ, хотя файл лежит на диске с первой секунды -- в отличие от
 видео, где ручной плеер доступен сразу (см. test_player_accessibility.py)."""
+import os
 import sqlite3
 
 import cv2
@@ -39,6 +40,12 @@ def _setup(tmp_path, status="queued", kind="photo", exists=True):
 
 def _client(app, db_path, monkeypatch):
     monkeypatch.setattr(sar_server, "DB_PATH", db_path, raising=False)
+    # Пути к материалу и к папке отчёта сервер ВЫЧИСЛЯЕТ от watch_dir, а не
+    # читает из базы -- иначе база привязана к машине. Тесту достаточно
+    # сказать, где корень.
+    monkeypatch.setattr(sar_server, "SERVER_CFG",
+                        {"watch_dir": os.path.dirname(db_path)}, raising=False)
+    monkeypatch.setattr(sar_server, "_PATH_ROOTS_CACHE", {}, raising=False)
     app.secret_key = "test-secret"
     app.testing = True
     client = app.test_client()

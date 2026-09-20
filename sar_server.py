@@ -36,12 +36,13 @@ import threading
 import time
 import urllib.parse
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import (Flask, request, session, redirect, url_for, jsonify,
                     send_from_directory, send_file, make_response, g, Response)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sar_cloud
 import sar_common
 import sar_health
 from sar_video_review import (parse_srt_telemetry, lookup_telemetry, load_config as load_detection_config,
@@ -944,7 +945,7 @@ def _health_snapshot():
     в боте -- чтобы дашборд, HTTP и телеграм не разошлись в показаниях."""
     conn = get_db()
     watch = os.path.abspath(SERVER_CFG["watch_dir"])
-    _, _, db_path, _ = sar_common.resolve_paths(watch)
+    _, _, db_path, _ = sar_common.resolve_paths(watch, SERVER_CFG.get("data_dir"))
     data_dir = os.path.dirname(db_path)
     # Папку копий НЕ передаём: её знает sar_common.backups_dir(), и это
     # единственное место, где она считается. Здесь стоял третий по счёту
@@ -1372,6 +1373,8 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .upload-box button:hover {{ background:#3f66c9; }}
 .upload-box button:disabled {{ opacity:0.6; cursor:default; }}
 .upload-status {{ font-size:12px; color:#999; }}
+.badge.cloud {{ background:#1d3a52; color:#9ecbf0; border-color:#2b5473;
+  font-size:13px; line-height:1; padding:3px 7px; }}
 </style></head>
 <body>
 <h1><span id="page-title">SAR Review — файлы</span>
@@ -1626,6 +1629,12 @@ function renderItems(items) {{
            <span class="kind-icon" style="display:none">${{icon}}</span>
          </a>`;
     let right = `<span class="badge ${{it.status}}">${{badgeLabel(it.status)}}</span>`;
+    // Файл лежит в облаке, а не на этой машине. Отметка нужна, чтобы
+    // человек понимал, почему у него нет превью и почему открытие может
+    // занять время: иначе это выглядит как неисправность.
+    if (it.in_cloud) {{
+      right = `<span class="badge cloud" title="файл в облаке, ещё не скачан">☁</span>` + right;
+    }}
     if (it.status === 'processing') {{
       right = `<div class="progress-mini"><div class="progress-mini-bar" style="width:${{it.progress_pct||0}}%"></div></div>` + right;
     }}
@@ -1931,6 +1940,12 @@ OPERATION_CARD_HTML = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Операция — SAR Review</title>
+<!-- Leaflet лежит СВОЙ, а не с CDN: платформа обязана работать в поле без
+     интернета, и внешняя ссылка означала бы пустую страницу там, где она
+     нужнее всего. Подложка карты (тайлы) без сети всё равно не придёт, но
+     точки, треки и разметка останутся видны. BSD-2, лицензия рядом. -->
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
+<script src="/static/leaflet/leaflet.js"></script>
 <style>
 :root {{
   --bg:#12171c; --card:#1a2129; --card2:#212a33; --line:#2b353f;
@@ -1969,7 +1984,109 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
   border-bottom:2px solid transparent;white-space:nowrap;background:none;
   border-top:0;border-left:0;border-right:0;font-family:inherit}}
 .tab.on{{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}}
+/* Вкладка «на будущее»: отодвинута вправо и приглушена.
+   .tab.later.on -- специфичность ВЫШЕ, чем у .tab.later: иначе выбранная
+   вкладка осталась бы блёклой и читалась как неактивная. */
+.tab.later{{margin-left:auto;color:var(--dim)}}
+.tab.later:hover{{color:var(--soft)}}
+.tab.later.on{{color:var(--ink)}}
 
+/* --- карта ------------------------------------------------------------ */
+#map{{height:min(70vh,640px);border-radius:10px;border:1px solid var(--line);
+  background:#0d0d0d}}
+/* Подписи Leaflet светлые по умолчанию -- на тёмной странице они слепят. */
+.leaflet-container{{background:#0d0d0d;font-family:inherit}}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{{
+  background:var(--card2);color:var(--ink);border:1px solid var(--line)}}
+.leaflet-popup-content{{margin:11px 13px;font-size:13.5px;line-height:1.5}}
+/* Когда карточка упирается в maxHeight, Leaflet добавляет свою прокрутку
+   и светлую рамку -- на тёмной странице она выглядит как артефакт. */
+.leaflet-popup-scrolled{{border-top:1px solid var(--line);
+  border-bottom:1px solid var(--line)}}
+.leaflet-popup-content a{{color:var(--accent)}}
+/* Подсказка при наведении: светлая по умолчанию, на тёмной карте слепит. */
+.leaflet-tooltip{{background:var(--card2);color:var(--ink);
+  border:1px solid var(--line);box-shadow:none;font-size:13px;
+  padding:4px 9px;border-radius:6px}}
+.leaflet-tooltip-top:before{{border-top-color:var(--line)}}
+.leaflet-tooltip-bottom:before{{border-bottom-color:var(--line)}}
+.leaflet-tooltip-left:before{{border-left-color:var(--line)}}
+.leaflet-tooltip-right:before{{border-right-color:var(--line)}}
+.leaflet-control-attribution{{background:rgba(0,0,0,.55);color:var(--dim)}}
+.leaflet-control-attribution a{{color:var(--soft)}}
+.mapbar{{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;
+  margin:0 0 10px;font-size:13.5px;color:var(--soft)}}
+.mapbar label{{display:flex;align-items:center;gap:6px;cursor:pointer}}
+.mapnote{{margin:10px 0 0;font-size:13px;color:var(--dim);line-height:1.6}}
+.mapnote b{{color:var(--soft)}}
+.key{{display:inline-block;width:12px;height:12px;border-radius:50%;
+  vertical-align:-1px;margin-right:5px}}
+.key.obj{{background:var(--accent)}}
+.key.drone{{background:transparent;border:2px dashed var(--soft)}}
+.key.mark{{background:#e0a33a;border-radius:2px}}
+.key.track{{background:transparent;border-bottom:2px solid #4b9fd5;
+  border-radius:0;height:6px}}
+.addmode{{padding:7px 13px;border-radius:7px;border:1px solid var(--line);
+  background:var(--card2);color:var(--ink);cursor:pointer;font-family:inherit;
+  font-size:13.5px}}
+.addmode.on{{background:var(--accent);color:#0d0d0d;font-weight:600}}
+#map.adding{{cursor:crosshair}}
+
+/* --- отчёт ------------------------------------------------------------ */
+.rep-bar{{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;
+  margin:0 0 16px;font-size:13.5px;color:var(--soft)}}
+.rep-bar input[type=date]{{background:#0d0d0d;color:var(--ink);
+  border:1px solid var(--line);border-radius:6px;padding:6px 9px;
+  font-family:inherit;font-size:13.5px}}
+.rep-bar button{{padding:6px 12px;border-radius:6px;border:1px solid var(--line);
+  background:var(--card2);color:var(--ink);cursor:pointer;font-family:inherit;
+  font-size:13.5px}}
+.rep-sec{{margin:0 0 26px}}
+.rep-sec h3{{font-size:15px;margin:0 0 10px;color:var(--ink)}}
+.rep-grid{{display:grid;gap:10px;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}}
+.rep-kpi{{background:var(--card2);border:1px solid var(--line);border-radius:9px;
+  padding:12px 14px}}
+.rep-kpi b{{display:block;font-size:22px;color:var(--ink);
+  font-variant-numeric:tabular-nums;line-height:1.25}}
+.rep-kpi span{{font-size:12.5px;color:var(--soft)}}
+.rep-kpi.warn b{{color:#e0a33a}}
+.rep-tbl-wrap{{overflow-x:auto;border:1px solid var(--line);border-radius:9px}}
+table.rep{{width:100%;border-collapse:collapse;font-size:13px}}
+table.rep th,table.rep td{{padding:7px 11px;text-align:left;
+  border-bottom:1px solid var(--line);white-space:nowrap}}
+table.rep th{{background:var(--card2);color:var(--soft);cursor:pointer;
+  user-select:none;position:sticky;top:0}}
+table.rep th:hover{{color:var(--ink)}}
+table.rep th.num,table.rep td.num{{text-align:right;
+  font-variant-numeric:tabular-nums}}
+table.rep tbody tr:hover{{background:var(--card2)}}
+table.rep td.dim{{color:var(--dim)}}
+.covcell{{display:flex;align-items:center;gap:7px;justify-content:flex-end}}
+.covbar{{width:54px;height:6px;border-radius:3px;background:#0d0d0d;
+  overflow:hidden;flex:none}}
+.covbar i{{display:block;height:100%;background:var(--accent)}}
+.rep-note{{font-size:13px;color:var(--dim);line-height:1.65;margin:9px 0 0}}
+.rep-note b{{color:var(--soft)}}
+.rep-filter{{background:#0d0d0d;color:var(--ink);border:1px solid var(--line);
+  border-radius:6px;padding:6px 10px;font-size:13px;font-family:inherit;
+  margin:0 0 9px;width:min(320px,100%)}}
+@media print{{
+  .tabs,#searchbar,.rep-bar button,.rep-filter{{display:none}}
+  body{{background:#fff;color:#000}}
+  .rep-kpi,table.rep th{{background:#f4f4f4}}
+  table.rep th,table.rep td{{border-color:#ccc}}
+}}
+
+#searchbar{{display:none;align-items:center;gap:12px;margin:14px 0 2px}}
+#searchbar.on{{display:flex}}
+#q{{flex:1;max-width:420px;background:#0d0d0d;color:var(--ink);
+  border:1px solid var(--line);border-radius:7px;padding:8px 12px;font-size:14px}}
+#q:focus{{outline:none;border-color:var(--accent)}}
+#qhint{{color:var(--dim);font-size:12.5px;white-space:nowrap}}
+.hit-where{{color:var(--soft);font-size:12px;display:block;margin-top:2px}}
+.hit-mark{{background:#4a3a12;color:#ffd479;border-radius:3px;padding:0 1px}}
+.noqres{{color:var(--soft);padding:22px 4px}}
 .crumbs{{font-size:13px;color:var(--soft);margin-bottom:10px;
   word-break:break-word}}
 .crumbs a{{color:var(--accent);text-decoration:none}}
@@ -2010,6 +2127,26 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
   border-bottom:1px solid var(--line);text-decoration:none;color:inherit}}
 .find:hover{{background:var(--card)}}
 .find-body{{display:flex;flex-direction:column;min-width:0;flex:1}}
+/* Кнопка "кадр" -- ИМЕННО span, а не ссылка: вся строка находки уже
+   обёрнута в <a> (ведёт в плеер), а вложенная ссылка внутри ссылки
+   невалидна и разбирается браузерами непредсказуемо. На этом в проекте
+   уже обжигались с кнопкой плеера в списке файлов. */
+/* Рамка в миниатюре. Раньше она была впечатана в саму картинку -- и
+   при увеличении в окне предпросмотра рассыпалась на пиксели. */
+.exp{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin:0 0 12px;font-size:13px}}
+.exp-lbl{{color:var(--soft)}}
+.exp-btn{{border:1px solid var(--line);border-radius:6px;padding:5px 11px;
+  color:var(--fg);text-decoration:none}}
+.exp-btn:hover{{border-color:var(--accent);color:var(--accent)}}
+.exp-note{{color:var(--soft);font-size:12px}}
+.find-open{{flex:none;align-self:center;font-size:12px;color:var(--soft);
+  border:1px solid var(--line);border-radius:6px;padding:4px 9px;
+  white-space:nowrap;cursor:pointer;text-align:center}}
+/* Кнопка-значок: фиксированная ширина, чтобы подтверждение "✓" не меняло
+   размер и не дёргало соседнюю кнопку. */
+.find-open.ic{{min-width:30px;padding:4px 6px;font-size:13px}}
+.find-open:hover{{color:var(--fg);border-color:var(--soft)}}
 .find .lbl{{font-size:14px}}
 .find .sub{{font-size:12px;color:var(--soft);margin-top:2px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
@@ -2042,6 +2179,14 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .shot{{width:var(--thumb);height:var(--thumb);flex-shrink:0;border-radius:7px;
   overflow:hidden;background:var(--card2);display:block;position:relative}}
 .shot img{{width:100%;height:100%;object-fit:cover;display:block}}
+/* Рамка в миниатюре. Раньше она была впечатана в саму картинку -- и при
+   увеличении в окне предпросмотра рассыпалась на пиксели, складываясь с
+   нарисованной поверх. Теперь рисуем только здесь. */
+.shot svg{{position:absolute;inset:0;width:100%;height:100%;
+  pointer-events:none;overflow:visible}}
+.shot svg rect{{fill:none;stroke:#ffd24a;stroke-width:1;
+  vector-effect:non-scaling-stroke}}
+.shot svg rect.under{{stroke:rgba(0,0,0,.75);stroke-width:2.5}}
 /* Пока кадра нет (воркер до пометки не дошёл) -- ровный прямоугольник, а
    не пустая дыра и не значок битой картинки. */
 .shot.noshot::after{{content:'▭';position:absolute;inset:0;display:flex;
@@ -2057,8 +2202,25 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .peek.on{{display:block}}
 .peek-view{{position:relative;overflow:hidden;background:#000;
   touch-action:none;cursor:zoom-in}}
-.peek-view img{{display:block;width:100%;transform-origin:0 0;
-  will-change:transform}}
+.peek-zoom{{transform-origin:0 0;will-change:transform;position:relative}}
+.peek-view img{{display:block;width:100%}}
+/* Рамка находки рисуется поверх кадра, а не вжигается в него: остаётся
+   чёткой на любом увеличении (non-scaling-stroke) и не мешает смотреть
+   на саму находку. Кликов не перехватывает -- иначе съела бы зум и
+   перетаскивание. */
+.peek-box{{position:absolute;inset:0;width:100%;height:100%;
+  pointer-events:none;overflow:visible}}
+/* Толщина в ЭКРАННЫХ пикселях и не растёт при увеличении -- за это
+   отвечает non-scaling-stroke. Полторы точки: рамка обязана быть видна,
+   но находки бывают мелкие, и жирная линия закрывает собой то самое,
+   ради чего её открыли. */
+.peek-box rect{{fill:none;stroke:#ffd24a;stroke-width:1.5;
+  vector-effect:non-scaling-stroke}}
+.peek-box rect.under{{stroke:rgba(0,0,0,.75);stroke-width:3}}
+.peek-busy{{position:absolute;top:6px;left:6px;z-index:2;font-size:10.5px;
+  color:#e8eeec;background:rgba(0,0,0,.5);padding:2px 6px;border-radius:4px;
+  display:none}}
+.peek-busy.on{{display:block}}
 .peek-cap{{font-size:12px;color:var(--soft);padding:7px 10px;
   border-top:1px solid var(--line);white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}}
@@ -2086,9 +2248,17 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 
   <div class="tabs">
     <button class="tab on" data-t="mat">Материалы</button>
-    <button class="tab" data-t="live">Эфиры</button>
     <button class="tab" data-t="find">Находки</button>
+    <button class="tab" data-t="map">Карта</button>
     <button class="tab" data-t="rep">Отчёт</button>
+    <!-- Эфиры пока заглушка: отодвинуты вправо и приглушены, чтобы не
+         стояли в одном ряду с работающими вкладками и не обещали лишнего. -->
+    <button class="tab later" data-t="live">Эфиры</button>
+  </div>
+  <div id="searchbar">
+    <input id="q" type="search" placeholder="Поиск по всей операции…"
+           autocomplete="off" spellcheck="false">
+    <span id="qhint"></span>
   </div>
   <div id="body"></div>
 </div>
@@ -2096,7 +2266,10 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 <script>
 const OP = Number(location.pathname.split('/').filter(Boolean)[1]);
 let path = new URLSearchParams(location.search).get('path') || '';
-let tab = 'mat';
+// Вкладка берётся из адреса: без этого на находки нельзя было дать
+// прямую ссылку -- человек открывал страницу и должен был догадаться
+// нажать нужную вкладку сам.
+let tab = new URLSearchParams(location.search).get('tab') || 'mat';
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
   c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
@@ -2123,7 +2296,16 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {{
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
   tab = b.dataset.t;
+  // Адрес обновляем без перезагрузки: ссылку на вкладку можно скопировать
+  // прямо из строки браузера, а кнопка "назад" возвращает куда ожидается.
+  const u = new URL(location.href);
+  if (tab === 'mat') u.searchParams.delete('tab'); else u.searchParams.set('tab', tab);
+  history.replaceState(null, '', u);
   render();
+}});
+// Отметить активной ту вкладку, что пришла из адреса.
+document.querySelectorAll('.tab').forEach(x => {{
+  x.classList.toggle('on', x.dataset.t === tab);
 }});
 
 let data = null, findings = null;
@@ -2191,6 +2373,12 @@ function render() {{
   const b = document.getElementById('body');
   if (!data) return;
 
+  // Поиск нужен только там, где есть по чему искать -- на вкладке
+  // материалов. На находках и отчёте он был бы полем, которое ничего не
+  // делает.
+  document.getElementById('searchbar').classList.toggle('on', tab === 'mat');
+  if (tab !== 'mat' && query) {{ query = ''; document.getElementById('q').value = ''; }}
+
   if (tab === 'mat') {{
     let html = crumbs();
     const rows = data.folders.map(f =>
@@ -2215,6 +2403,7 @@ function render() {{
       `<div class="note">Только размеченное человеком: ручные пометки и
          статусы триажа. Сами по себе сцены модели сюда не попадают — их
          тысячи, и настоящие находки в них потерялись бы.</div>` +
+      exportButtons() +
       findFilters() +
       (shown.length
       ? shown.map(f => {{
@@ -2231,9 +2420,9 @@ function render() {{
           // «резко чёрное» тоже мало что говорит -- узнаётся именно кадр.
           const cap = esc(f.label || '') + (tc ? ' · ' + tc : '');
           const shot = f.preview
-            ? `<span class="shot" onmouseenter="showPeek(this,'${{f.preview}}','${{cap}}')">
+            ? `<span class="shot" onmouseenter="showPeek(this,'${{f.preview}}','${{cap}}',${{f.obs_id || 'null'}},${{JSON.stringify(f.bbox || null)}})">
                  <img src="${{f.preview}}" alt="" loading="lazy" decoding="async"
-                      onerror="this.parentNode.classList.add('noshot');this.remove()"></span>`
+                      onerror="this.parentNode.classList.add('noshot');this.remove()">${{boxSvg(f.bbox)}}</span>`
             : `<span class="shot noshot"></span>`;
           const status = f.status
             ? `<span class="tag st ${{f.priority}}">${{esc(f.status)}}</span>` : '';
@@ -2244,19 +2433,523 @@ function render() {{
               <span class="sub">${{esc(f.file)}}${{tc ? ' · ' + tc : ''}}${{f.viewer ? ' · ' + esc(f.viewer) : ''}}${{f.lat ? ' · 📍' : ''}}</span>
               <span class="sub when">записано ${{fmtStamp(f.created_at)}}</span>
             </span>
+            ${{f.obs_id ? `<span class="find-open" title="Открыть кадр находки"
+                 onclick="openFrame(event, ${{f.obs_id}})">кадр</span>` : ''}}
+            <span class="find-open ic" title="Скопировать ссылку на находку"
+              onclick="copyFindingLink(event, ${{f.obs_id || 'null'}}, '${{f.report_id}}', ${{f.seconds === null || f.seconds === undefined ? 'null' : f.seconds}})">🔗</span>
           </a>`;
         }}).join('')
       : `<div class="empty">${{findings.length
             ? 'В этом отборе находок нет'
             : 'Находок пока нет'}}</div>`);
 
+  }} else if (tab === 'map') {{
+    b.innerHTML = `
+      <div class="mapbar">
+        <label><input type="checkbox" id="l-obj" checked>
+          <span class="key obj"></span>точка объекта</label>
+        <label><input type="checkbox" id="l-drone" checked>
+          <span class="key drone"></span>позиция дрона</label>
+        <label><input type="checkbox" id="l-mark" checked>
+          <span class="key mark"></span>отметка человека</label>
+        <label><input type="checkbox" id="l-track">
+          <span class="key track"></span>треки дрона</label>
+        <button class="addmode" id="addbtn">＋ поставить отметку</button>
+      </div>
+      <div id="map"></div>
+      <div class="mapnote" id="mapnote">Загружаю…</div>`;
+    drawMap();
+
   }} else if (tab === 'live') {{
     b.innerHTML = `<div class="empty">Эфиры появятся, когда включим трансляции.<br>
       Записи эфиров будут попадать сюда же, в материалы операции.</div>`;
   }} else {{
-    b.innerHTML = `<div class="empty">Отчёт заказчику — в работе.<br>
-      Соберётся из сводки выше и находок, размеченных людьми.</div>`;
+    b.innerHTML = `
+      <div class="rep-bar">
+        <label>с <input type="date" id="r-from" value="${{repFrom}}"></label>
+        <label>по <input type="date" id="r-to" value="${{repTo}}"></label>
+        <button id="r-all">весь период</button>
+        <label><input type="checkbox" id="r-anon" ${{repAnon ? 'checked' : ''}}>
+          обезличить</label>
+        <button id="r-print">🖨 печать / PDF</button>
+      </div>
+      <div id="rep"><div class="empty">Собираю…</div></div>`;
+    document.getElementById('r-from').onchange = reloadReport;
+    document.getElementById('r-to').onchange = reloadReport;
+    document.getElementById('r-anon').onchange = reloadReport;
+    document.getElementById('r-all').onclick = () => {{
+      repFrom = repTo = ''; render();
+    }};
+    document.getElementById('r-print').onclick = () => window.print();
+    drawReport();
   }}
+}}
+
+// --- отчёт ----------------------------------------------------------------
+//
+// Главное в этом отчёте -- не найденное, а НЕ ПРОСМОТРЕННОЕ. Отчёт,
+// показывающий только находки, льстит: он отвечает на вопрос «что мы
+// нашли», тогда как решение принимается по вопросу «куда ещё не смотрели».
+// Поэтому непросмотренное вынесено в заметные числа, а не спрятано в
+// таблицу.
+
+let repFrom = '', repTo = '', repAnon = false, repData = null;
+let repSort = {{ video: ['coverage_pct', 1], photo: ['findings', 1] }};
+let repFilter = {{ video: '', photo: '' }};
+
+function reloadReport() {{
+  repFrom = document.getElementById('r-from').value || '';
+  repTo = document.getElementById('r-to').value || '';
+  repAnon = document.getElementById('r-anon').checked;
+  drawReport();
+}}
+
+async function drawReport() {{
+  const host = document.getElementById('rep');
+  const qs = new URLSearchParams();
+  if (repFrom) qs.set('from', repFrom);
+  if (repTo) qs.set('to', repTo);
+  if (repAnon) qs.set('anon', '1');
+  try {{
+    repData = await (await fetch(
+      `/api/operations/${{OP}}/report?` + qs.toString())).json();
+  }} catch (e) {{
+    host.innerHTML = `<div class="empty">Отчёт не собрался: ${{esc(String(e))}}</div>`;
+    return;
+  }}
+  paintReport();
+}}
+
+function kpi(value, label, warn) {{
+  return `<div class="rep-kpi${{warn ? ' warn' : ''}}"><b>${{value}}</b>`
+    + `<span>${{label}}</span></div>`;
+}}
+
+function paintReport() {{
+  const d = repData, v = d.volume, c = d.coverage, f = d.findings;
+  const period = d.period.full
+    ? 'за всю операцию'
+    : `за период ${{d.period.from || '…'}} — ${{d.period.to || '…'}}`;
+
+  let h = `<div class="rep-sec"><h3>${{esc(d.operation.title)}} — ${{period}}`
+    + (d.anonymized ? ' <span style="color:#9aa8a5">(обезличено)</span>' : '')
+    + `</h3></div>`;
+
+  h += `<div class="rep-sec"><h3>Объём</h3><div class="rep-grid">`
+    + kpi(v.materials, 'материалов')
+    + kpi(v.videos, 'видео')
+    + kpi(v.photos, 'фотографий')
+    + kpi(hhmm(v.footage_sec), 'отснято')
+    + kpi(hhmm(v.viewer_sec), 'человеко-часов разбора')
+    + `</div>`;
+  if (v.footage_known < v.videos) {{
+    h += `<div class="rep-note">Длительность известна у <b>${{v.footage_known}}</b> `
+      + `видео из ${{v.videos}} — «отснято» считается только по ним.</div>`;
+  }}
+  h += `</div>`;
+
+  // САМЫЙ ВАЖНЫЙ БЛОК. Непросмотренное -- первым и с подсветкой.
+  h += `<div class="rep-sec"><h3>Покрытие</h3><div class="rep-grid">`
+    + kpi(c.videos_untouched, 'видео НЕ открывал никто', c.videos_untouched > 0)
+    + kpi(c.videos_touched, 'видео открывал хоть кто-то')
+    + kpi(hhmm(c.watched_sec), 'просмотрено')
+    + `</div>`;
+  if (!c.photos_tracked && c.photos_total) {{
+    h += `<div class="rep-note">Просмотр фотографий платформа <b>не отслеживает</b>: `
+      + `отрезки пишет только плеер видео. Про ${{c.photos_total}} снимков нельзя `
+      + `сказать ни что их смотрели, ни что нет — это не ноль, это отсутствие `
+      + `измерения.</div>`;
+  }}
+  h += `</div>`;
+
+  h += `<div class="rep-sec"><h3>Второй проход</h3><div class="rep-grid">`;
+  d.second_pass.forEach(x => {{
+    h += kpi(x.materials, x.viewers === 0
+      ? 'материалов не смотрел никто'
+      : `материалов смотрели ${{x.viewers}} чел.`, x.viewers === 0);
+  }});
+  h += `</div><div class="rep-note">Учёт второго прохода: важно не сколько `
+    + `посмотрели, а сколько посмотрели <b>дважды</b>.</div></div>`;
+
+  h += `<div class="rep-sec"><h3>Находки</h3><div class="rep-grid">`
+    + kpi(f.total, 'пометок всего')
+    + kpi(f.with_object_point, 'с расчётной точкой объекта')
+    + kpi(f.drone_only, 'только позиция дрона', f.drone_only > 0)
+    + kpi(f.without_coords, 'без координат', f.without_coords > 0)
+    + `</div>`;
+  const st = Object.entries(f.by_status || {{}});
+  if (st.length) {{
+    h += `<div class="rep-grid" style="margin-top:10px">`
+      + st.map(([k, n]) => kpi(n, esc(k))).join('') + `</div>`;
+  }}
+  h += `<div class="rep-note">Выгрузка: `
+    + `<a href="/api/operations/${{OP}}/findings.kml">KML</a> · `
+    + `<a href="/api/operations/${{OP}}/findings.gpx">GPX</a></div></div>`;
+
+  h += `<div class="rep-sec"><h3>Кто работал</h3>`
+    + repTable('people', d.people) + `</div>`;
+
+  h += `<div class="rep-sec"><h3>Покрытие по видео</h3>`
+    + `<input class="rep-filter" id="fv" placeholder="фильтр по имени…" `
+    + `value="${{esc(repFilter.video)}}">`
+    + repTable('video', d.materials.video) + `</div>`;
+
+  h += `<div class="rep-sec"><h3>Фотографии</h3>`
+    + `<input class="rep-filter" id="fp" placeholder="фильтр по имени…" `
+    + `value="${{esc(repFilter.photo)}}">`
+    + repTable('photo', d.materials.photo) + `</div>`;
+
+  h += `<div class="rep-sec"><h3>Чего этот отчёт не показывает</h3>`
+    + `<div class="rep-note">`
+    + `• «Просмотрено» значит «кто-то проиграл этот отрезок», а не «увидел `
+    + `всё, что там было».<br>`
+    + `• У <b>${{f.without_coords}}</b> находок координат нет вовсе, `
+    + `у <b>${{f.drone_only}}</b> известна только позиция дрона — на этом `
+    + `материале расхождение доходит до 653 метров.<br>`
+    + `• Телеметрия есть у <b>${{d.geography.tracks}}</b> видео из `
+    + `${{d.geography.videos}}: находки на остальных на земле не локализовать.<br>`
+    + `• Детектор — вспомогательный сигнал, а не заключение.`
+    + (c.photos_tracked ? '' : `<br>• Просмотр фотографий не измеряется.`)
+    + `</div></div>`;
+
+  document.getElementById('rep').innerHTML = h;
+  wireReportTables();
+}}
+
+const REP_COLS = {{
+  people: [
+    ['name', 'кто', 0], ['seconds', 'времени', 1],
+    ['materials', 'материалов', 1], ['marks', 'пометок', 1]],
+  video: [
+    ['name', 'файл', 0], ['folder', 'папка', 0],
+    ['coverage_pct', 'просмотрено', 1], ['views', 'просмотров', 1],
+    ['viewers', 'человек', 1], ['findings', 'находок', 1]],
+  photo: [
+    ['name', 'файл', 0], ['folder', 'папка', 0], ['findings', 'находок', 1]],
+}};
+
+function repTable(kind, rows) {{
+  const cols = REP_COLS[kind];
+  const q = (repFilter[kind] || '').toLowerCase();
+  let list = rows.slice();
+  if (q && kind !== 'people') {{
+    list = list.filter(r => ((r.folder || '') + '/' + r.name).toLowerCase().includes(q));
+  }}
+  const [key, dir] = repSort[kind] || [cols[0][0], 1];
+  list.sort((a, x) => {{
+    const A = a[key], B = x[key];
+    if (A === B) return 0;
+    if (A === null || A === undefined) return 1;   // «нет данных» -- в конец
+    if (B === null || B === undefined) return -1;
+    return (A > B ? 1 : -1) * (dir ? -1 : 1);
+  }});
+
+  let h = `<div class="rep-tbl-wrap"><table class="rep"><thead><tr>`;
+  cols.forEach(([k, label, num]) => {{
+    const on = k === key ? (dir ? ' ↓' : ' ↑') : '';
+    h += `<th class="${{num ? 'num' : ''}}" data-k="${{k}}" data-t="${{kind}}">`
+      + `${{esc(label)}}${{on}}</th>`;
+  }});
+  h += `</tr></thead><tbody>`;
+  if (!list.length) h += `<tr><td colspan="${{cols.length}}" class="dim">пусто</td></tr>`;
+  list.forEach(r => {{
+    h += '<tr>';
+    cols.forEach(([k, , num]) => {{
+      let val = r[k];
+      if (k === 'seconds') val = hhmm(val);
+      else if (k === 'coverage_pct') {{
+        // Пустая длительность -- НЕ ноль процентов: посчитать не из чего.
+        val = (val === null || val === undefined)
+          ? '<span class="dim">нет длительности</span>'
+          : `<span class="covcell">${{val}}%<span class="covbar">`
+            + `<i style="width:${{val}}%"></i></span></span>`;
+      }} else if (k === 'folder') val = `<span class="dim">${{esc(val || '—')}}</span>`;
+      else val = esc(val);
+      h += `<td class="${{num ? 'num' : ''}}">${{val}}</td>`;
+    }});
+    h += '</tr>';
+  }});
+  return h + `</tbody></table></div>`;
+}}
+
+function wireReportTables() {{
+  document.querySelectorAll('table.rep th').forEach(th => {{
+    th.onclick = () => {{
+      const k = th.dataset.k, t = th.dataset.t;
+      const [cur, dir] = repSort[t] || [];
+      repSort[t] = [k, cur === k ? !dir : true];
+      paintReport();
+    }};
+  }});
+  [['fv', 'video'], ['fp', 'photo']].forEach(([id, kind]) => {{
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.oninput = () => {{
+      repFilter[kind] = el.value;
+      paintReport();
+      const again = document.getElementById(id);
+      if (again) {{ again.focus(); again.setSelectionRange(9999, 9999); }}
+    }};
+  }});
+}}
+
+// --- карта ----------------------------------------------------------------
+//
+// ЧЕСТНОСТЬ КАРТЫ -- главное требование, а не украшение. Из 32 пометок
+// операции только у 8 посчитана точка объекта, у 7 известна лишь позиция
+// дрона, у 17 координат нет вовсе. На материале этой операции дрон и
+// объект расходятся до 653 метров -- это соседнее ущелье. Поэтому:
+//
+//   * «точка объекта» и «позиция дрона» -- РАЗНЫЕ значки, как в выгрузке KML;
+//   * между ними рисуется линия, чтобы разнос было видно, а не прочитать;
+//   * сколько находок на карту НЕ попало -- написано прямо под ней.
+//
+// Карта, молча скрывающая половину пометок, хуже отсутствия карты: по ней
+// делают вывод, что искать больше негде.
+
+let mapObj = null, mapData = null, mapLayers = {{}}, tracksData = null;
+let addingMark = false;
+
+async function drawMap() {{
+  const note = document.getElementById('mapnote');
+  if (!mapData) {{
+    try {{
+      mapData = await (await fetch(`/api/operations/${{OP}}/findings-map`)).json();
+    }} catch (e) {{
+      note.textContent = 'Не удалось загрузить точки: ' + e;
+      return;
+    }}
+  }}
+
+  if (mapObj) {{ mapObj.remove(); mapObj = null; }}
+  mapObj = L.map('map', {{ zoomControl: true }});
+  // Подпись Leaflet -- обычной ссылкой, без встроенной в неё картинки.
+  //
+  // По умолчанию Leaflet 1.9 подставляет в prefix свой SVG-значок. Это
+  // высказывание разработчиков библиотеки, а не требование лицензии:
+  // BSD-2 обязывает сохранять текст лицензии при распространении (он
+  // лежит в static/leaflet/LICENSE), про интерфейс там нет ничего.
+  // Платформа поисково-спасательная, и лишних высказываний на её карте
+  // быть не должно -- ни в одну сторону.
+  //
+  // Подпись OpenStreetMap ниже трогать НЕЛЬЗЯ: вот она как раз
+  // обязательна по ODbL. См. THIRD-PARTY.md.
+  mapObj.attributionControl.setPrefix(
+    '<a href="https://leafletjs.com" title="Библиотека карт">Leaflet</a>');
+  L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    maxZoom: 19,
+    // Указание авторства ODbL обязательно и убирать его нельзя -- см.
+    // THIRD-PARTY.md. Без интернета подложки не будет, точки останутся.
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  }}).addTo(mapObj);
+
+  mapLayers = {{
+    obj: L.layerGroup(), drone: L.layerGroup(),
+    mark: L.layerGroup(), track: L.layerGroup()
+  }};
+
+  const bounds = [];
+  (mapData.points || []).forEach(p => {{
+    bounds.push([p.lat, p.lon]);
+    if (p.estimated) {{
+      L.circleMarker([p.lat, p.lon], {{
+        radius: 7, color: '#3ecf8e', weight: 2, fillOpacity: .85, fillColor: '#3ecf8e'
+      }}).bindTooltip(tipFor(p))
+        .bindPopup(findingPopup(p), POPUP_OPTS)
+        .addTo(mapLayers.obj);
+      // Линия к позиции дрона: разнос виден глазом, а не в подписи.
+      if (p.drone) {{
+        L.polyline([[p.lat, p.lon], [p.drone.lat, p.drone.lon]], {{
+          color: '#9aa8a5', weight: 1, dashArray: '4,5', opacity: .7
+        }}).addTo(mapLayers.obj);
+      }}
+    }} else {{
+      L.circleMarker([p.lat, p.lon], {{
+        radius: 6, color: '#9aa8a5', weight: 2, dashArray: '3,3', fillOpacity: 0
+      }}).bindTooltip(tipFor(p))
+        .bindPopup(findingPopup(p), POPUP_OPTS)
+        .addTo(mapLayers.drone);
+    }}
+  }});
+
+  (mapData.marks || []).forEach(m => {{
+    bounds.push([m.lat, m.lon]);
+    L.marker([m.lat, m.lon], {{
+      icon: L.divIcon({{
+        className: '', iconSize: [14, 14], iconAnchor: [7, 7],
+        html: '<div style="width:14px;height:14px;background:#e0a33a;'
+            + 'border:2px solid #0d0d0d;border-radius:3px"></div>'
+      }})
+    }}).bindTooltip(esc(m.label || 'отметка'))
+      .bindPopup(markPopup(m), POPUP_OPTS)
+      .addTo(mapLayers.mark);
+  }});
+
+  mapLayers.obj.addTo(mapObj);
+  mapLayers.drone.addTo(mapObj);
+  mapLayers.mark.addTo(mapObj);
+
+  if (bounds.length) mapObj.fitBounds(bounds, {{ padding: [40, 40], maxZoom: 16 }});
+  else mapObj.setView([39.48, 73.59], 12);
+
+  ['obj', 'drone', 'mark', 'track'].forEach(k => {{
+    const cb = document.getElementById('l-' + k);
+    cb.onchange = () => {{
+      if (!cb.checked) {{ mapObj.removeLayer(mapLayers[k]); return; }}
+      mapLayers[k].addTo(mapObj);
+      if (k === 'track') loadTracks();
+    }};
+  }});
+
+  document.getElementById('addbtn').onclick = toggleAdding;
+  mapObj.on('click', onMapClick);
+  updateMapNote();
+}}
+
+// Наведение -- ПОДСКАЗКА С НАЗВАНИЕМ, клик -- карточка.
+//
+// Раньше наведение открывало карточку целиком: с кадром, оговорками и
+// ссылкой. На карте с полутора десятками точек это означало, что карточка
+// выскакивает при каждом движении мыши и закрывает соседние точки.
+// Подсказка отвечает на вопрос «что это», карточка -- на вопрос
+// «расскажи подробнее», и второй задаётся осознанно.
+//
+// У точки, где известна только позиция ДРОНА, в подсказке это сказано:
+// иначе при наведении видно «рюкзак» над местом, где рюкзака нет.
+// Карточка не должна вылезать за рамку карты.
+//
+// Leaflet сам подвигает карту, чтобы вписать открытую карточку -- но
+// только если ей есть куда вписаться. Высокая карточка (кадр + текст)
+// упиралась в верхний край и обрезалась. Поэтому: предел высоты со своей
+// прокруткой и отступ, внутри которого карта двигаться не пытается.
+const POPUP_OPTS = {{
+  maxWidth: 270,
+  maxHeight: 340,
+  autoPanPadding: [24, 24],
+}};
+
+function tipFor(p) {{
+  return esc(p.title) + (p.estimated ? '' : ' — позиция дрона');
+}}
+
+function findingPopup(p) {{
+  // Кадр находки прямо в карточке: без него точка на карте -- просто
+  // кружок, и чтобы понять, что там, надо уходить на страницу находки.
+  //
+  // onerror прячет картинку, а не оставляет значок битого изображения:
+  // превью может не быть (воркер не дошёл, находка старая), и это не
+  // ошибка -- карточка должна остаться читаемой.
+  // max-height обязателен: без него вертикальный кадр делает карточку
+  // выше карты, и Leaflet не может её вписать -- она уезжает за верхнюю
+  // рамку и обрезается. Ровно это и было видно на боевой карте.
+  const pic = `<img src="/api/finding/${{p.id}}/preview" alt="" `
+    + `style="width:100%;max-width:240px;max-height:150px;object-fit:cover;`
+    + `border-radius:6px;display:block;margin-bottom:9px;background:#0d0d0d" `
+    + `onerror="this.style.display='none'">`;
+  const head = p.estimated
+    ? '<b style="color:#3ecf8e">Вероятная точка объекта</b>'
+    : '<b style="color:#9aa8a5">Позиция ДРОНА, не объекта</b>';
+  // Одной строкой НАМЕРЕННО. Внутри бэктиков перенос -- это перенос, а не
+  // склейка: попытка продолжить строку кавычкой-плюсом-кавычкой отправляет
+  // эти символы прямо в карточку как текст. На боевой карте так и было
+  // видно -- лишние знаки между словом «дальность» и числом.
+  const dist = p.distance_m ? Math.round(p.distance_m) : null;
+  const warn = p.estimated
+    ? (dist ? `<br><span style="color:#9aa8a5">расчётная дальность ${{dist}} м — это расчёт, а не измерение</span>` : '')
+    : `<br><span style="color:#9aa8a5">объект в стороне: точка на земле не посчитана</span>`;
+  return `${{pic}}${{head}}${{warn}}<br><br><b>${{esc(p.title)}}</b>`
+    + (p.note ? `<br>${{esc(p.note)}}` : '')
+    + (p.status ? `<br>статус: ${{esc(p.status)}}` : '')
+    + (p.file ? `<br><span style="color:#6f7d7a">${{esc(p.file)}}`
+        + (p.tc ? ` ${{esc(p.tc)}}` : '') + '</span>' : '')
+    + (p.viewer ? `<br><span style="color:#6f7d7a">отметил: ${{esc(p.viewer)}}</span>` : '')
+    + `<br><br><a href="/finding/${{p.id}}/">открыть находку →</a>`;
+}}
+
+function markPopup(m) {{
+  return `<b style="color:#e0a33a">Отметка на карте</b><br>`
+    + `<span style="color:#9aa8a5">поставлена человеком, не расчёт</span><br><br>`
+    + (m.label ? `<b>${{esc(m.label)}}</b><br>` : '')
+    + (m.note ? `${{esc(m.note)}}<br>` : '')
+    + `<span style="color:#6f7d7a">${{esc(m.viewer_name)}}</span><br>`
+    + `${{m.lat.toFixed(6)}}, ${{m.lon.toFixed(6)}}<br><br>`
+    + `<a href="#" onclick="delMark(${{m.id}});return false" `
+    + `style="color:#c8553d">убрать отметку</a>`;
+}}
+
+function updateMapNote() {{
+  const d = mapData, note = document.getElementById('mapnote');
+  const bits = [`На карте <b>${{d.points.length}}</b> из <b>${{d.total}}</b> находок: `
+    + `${{d.estimated}} с точкой объекта, ${{d.drone_only}} только с позицией дрона.`];
+  if (d.without_coords) {{
+    // Самое важное предложение на этой вкладке.
+    bits.push(`<b>У ${{d.without_coords}} находок координат нет вовсе</b> — `
+      + `их на карте не видно. Пустое место здесь не значит «там не искали».`);
+  }}
+  if (d.drone_only) {{
+    bits.push(`Пунктирные кружки — это где был ДРОН, а не где находка. `
+      + `Расхождение на материале операции доходит до 653 метров.`);
+  }}
+  if (tracksData) {{
+    let t = `Треки: ${{tracksData.tracks.length}} видео с телеметрией, `
+      + `у ${{tracksData.without_telemetry}} её нет.`;
+    // «Ещё не разобрано» и «телеметрии нет» -- разные вещи: первое пройдёт
+    // само, второе не изменится никогда. Смешать их значит обещать треки,
+    // которых не будет.
+    if (tracksData.pending) {{
+      t += ` Ещё ${{tracksData.pending}} в разборе — обновите страницу позже.`;
+    }}
+    bits.push(t);
+  }}
+  note.innerHTML = bits.join('<br>');
+}}
+
+async function loadTracks() {{
+  if (tracksData) return;
+  const note = document.getElementById('mapnote');
+  note.innerHTML = 'Загружаю треки…';
+  try {{
+    tracksData = await (await fetch(`/api/operations/${{OP}}/tracks`)).json();
+  }} catch (e) {{
+    note.textContent = 'Треки не загрузились: ' + e;
+    return;
+  }}
+  tracksData.tracks.forEach(t => {{
+    L.polyline(t.points, {{ color: '#4b9fd5', weight: 2, opacity: .65 }})
+      .bindPopup(`<b>${{esc(t.name)}}</b><br>трек дрона по телеметрии`)
+      .addTo(mapLayers.track);
+  }});
+  updateMapNote();
+}}
+
+function toggleAdding() {{
+  addingMark = !addingMark;
+  document.getElementById('addbtn').classList.toggle('on', addingMark);
+  document.getElementById('map').classList.toggle('adding', addingMark);
+}}
+
+async function onMapClick(e) {{
+  if (!addingMark) return;
+  const label = prompt('Что здесь? (коротко)');
+  if (label === null) return;
+  const note = prompt('Пояснение (можно пропустить)') || '';
+  const r = await fetch(`/api/operations/${{OP}}/map-marks`, {{
+    method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ lat: e.latlng.lat, lon: e.latlng.lng, label, note }})
+  }});
+  const d = await r.json();
+  if (!r.ok) {{ alert(d.error || 'не вышло'); return; }}
+  mapData = null; tracksData = null;   // перечитаем вместе с новой отметкой
+  toggleAdding();
+  drawMap();
+}}
+
+async function delMark(id) {{
+  const r = await fetch(`/api/operations/${{OP}}/map-marks/${{id}}`, {{ method: 'DELETE' }});
+  const d = await r.json();
+  if (!r.ok) {{ alert(d.error || 'не вышло'); return; }}
+  mapData = null; tracksData = null;
+  drawMap();
 }}
 
 // --- окно предпросмотра находки ------------------------------------------
@@ -2267,6 +2960,8 @@ function render() {{
 // строке уже занят переходом в плеер на таймкод находки.
 let peekEl = null, peekScale = 1, peekX = 0, peekY = 0, peekPinch = 0;
 let peekDrag = null;      // {{x, y}} последней точки при перетаскивании
+let peekPress = null;     // {{x, y, moved}} нажатия -- клик или таскание
+let peekLoadId = 0;       // номер загрузки крупного кадра: отсекает опоздавшие
 
 function peek() {{
   if (peekEl) return peekEl;
@@ -2275,8 +2970,14 @@ function peek() {{
   peekEl.innerHTML =
     `<div class="peek-view">
        <button class="peek-x" title="Закрыть">×</button>
-       <span class="peek-hint">колесо — масштаб, перетаскивание — сдвиг</span>
-       <img alt="">
+       <span class="peek-busy">загружаю кадр…</span>
+       <span class="peek-hint">клик и колесо — масштаб, перетаскивание — сдвиг</span>
+       <div class="peek-zoom">
+         <img alt="">
+         <svg class="peek-box" viewBox="0 0 1 1" preserveAspectRatio="none">
+           <rect class="under"></rect><rect></rect>
+         </svg>
+       </div>
      </div>
      <div class="peek-cap"></div>`;
   document.body.appendChild(peekEl);
@@ -2298,22 +2999,44 @@ function peek() {{
   // только зумить: край снимка становился недостижим, а находка нередко
   // как раз с краю.
   view.addEventListener('mousedown', e => {{
-    if (e.button !== 0 || peekScale <= 1) return;
+    if (e.button !== 0) return;
     e.preventDefault();
-    peekDrag = {{ x: e.clientX, y: e.clientY }};
-    view.style.cursor = 'grabbing';
+    // Точку нажатия запоминаем ВСЕГДА, даже когда тащить ещё нечего
+    // (масштаб 1): по ней на отпускании отличаем клик от перетаскивания.
+    peekPress = {{ x: e.clientX, y: e.clientY, moved: 0 }};
+    if (peekScale > 1) {{
+      peekDrag = {{ x: e.clientX, y: e.clientY }};
+      view.style.cursor = 'grabbing';
+    }}
   }});
   // Слушаем на документе, а не на окне: если курсор при быстром движении
   // выскочил за край, перетаскивание не должно застревать.
   document.addEventListener('mousemove', e => {{
+    if (peekPress) {{
+      peekPress.moved = Math.max(peekPress.moved,
+        Math.hypot(e.clientX - peekPress.x, e.clientY - peekPress.y));
+    }}
     if (!peekDrag) return;
     panPeek(e.clientX - peekDrag.x, e.clientY - peekDrag.y);
     peekDrag = {{ x: e.clientX, y: e.clientY }};
   }});
-  document.addEventListener('mouseup', () => {{
-    if (!peekDrag) return;
-    peekDrag = null;
-    view.style.cursor = peekScale > 1 ? 'grab' : 'zoom-in';
+  document.addEventListener('mouseup', e => {{
+    const press = peekPress;
+    peekPress = null;
+    if (peekDrag) {{
+      peekDrag = null;
+      view.style.cursor = peekScale > 1 ? 'grab' : 'zoom-in';
+    }}
+    // Курсор показывал лупу, но клик не делал ничего: увеличить можно было
+    // только колесом, а на ноутбучном тачпаде это неудобно. Порог в 5 px --
+    // чтобы дрожание руки на нажатии не считалось перетаскиванием.
+    if (!press || press.moved > 5) return;
+    if (!peekEl || !peekEl.classList.contains('on')) return;
+    if (e.target.closest('.peek-x')) return;
+    if (!e.target.closest('.peek-view')) return;
+    // Shift -- отдалить: без него из глубокого зума пришлось бы выкручиваться
+    // колесом, а на тачпаде это и есть исходная жалоба.
+    zoomPeek(e.shiftKey ? 1 / 1.6 : 1.6, e);
   }});
 
   // Тот же жест одним пальцем на тач-экране.
@@ -2348,13 +3071,13 @@ function peek() {{
 
 function applyPeekTransform() {{
   const view = peekEl.querySelector('.peek-view');
-  const img = peekEl.querySelector('img');
+  const zoom = peekEl.querySelector('.peek-zoom');
   // Не даём утащить картинку за края окна: иначе легко "потерять" её и
   // смотреть в пустоту, не понимая, куда всё делось.
   const w = view.clientWidth, h = view.clientHeight;
   peekX = Math.min(0, Math.max(peekX, w - w * peekScale));
   peekY = Math.min(0, Math.max(peekY, h - h * peekScale));
-  img.style.transform =
+  zoom.style.transform =
     `translate(${{peekX}}px, ${{peekY}}px) scale(${{peekScale}})`;
   view.style.cursor = peekScale > 1 ? (peekDrag ? 'grabbing' : 'grab') : 'zoom-in';
 }}
@@ -2381,12 +3104,129 @@ function zoomPeek(factor, at) {{
   applyPeekTransform();
 }}
 
-function showPeek(anchor, src, caption) {{
+// --- ссылка на находку -----------------------------------------------------
+//
+// Адрес абсолютный и берётся с сервера, а не из location: платформа живёт за
+// быстрым туннелем, и его имя меняется при каждом падении канала. Ссылка,
+// собранная из location, была бы верной только пока открыта эта вкладка.
+// Внешний адрес спрашиваем у сервера, а не подставляем в страницу:
+// туннель меняет имя при каждом падении канала, и вкладка, открытая до
+// падения, продолжила бы копировать мёртвые ссылки. Один запрос на
+// загрузку страницы, дальше держим в памяти.
+let EXTERNAL_BASE = '';
+let BOT_NAME = '';
+fetch('/api/external_base')
+  .then(r => r.json())
+  .then(d => {{ EXTERNAL_BASE = d.base || ''; BOT_NAME = d.bot || ''; }})
+  .catch(() => {{}});
+
+function findingLink(obsId, reportId, seconds) {{
+  // ВЕЧНАЯ ссылка идёт через бота: адрес t.me не меняется никогда, а имя
+  // быстрого туннеля -- при каждом перезапуске, и старое исчезает из DNS
+  // без всякой возможности перенаправить.
+  if (obsId && BOT_NAME) return `https://t.me/${{BOT_NAME}}?start=finding_${{obsId}}`;
+  const base = EXTERNAL_BASE || location.origin;
+  if (obsId) return `${{base}}/finding/${{obsId}}/`;
+  if (!reportId) return '';
+  const t = (seconds !== null && seconds !== undefined)
+    ? `?t=${{Math.max(0, Math.floor(seconds))}}` : '';
+  return `${{base}}/report/${{reportId}}/player/${{t}}`;
+}}
+
+async function copyFindingLink(e, obsId, reportId, seconds) {{
+  if (e) {{ e.preventDefault(); e.stopPropagation(); }}
+  const link = findingLink(obsId, reportId, seconds);
+  if (!link) return;
+  try {{
+    await navigator.clipboard.writeText(link);
+    flashCopied(e && e.target);
+  }} catch (err) {{
+    // Буфер обмена браузер отдаёт только по https, а платформа внутри сети
+    // ходит по http. Молчаливое "ничего не произошло" -- худший исход,
+    // поэтому показываем ссылку для ручного копирования.
+    window.prompt('Скопируйте ссылку:', link);
+  }}
+}}
+
+function flashCopied(el) {{
+  if (!el) return;
+  // Значком, а не словом: кнопка шириной в один символ, и "скопировано"
+  // растянуло бы строку, сдвинув соседние кнопки на время подсказки.
+  const was = el.textContent;
+  el.textContent = '✓';
+  setTimeout(() => {{ el.textContent = was; }}, 1400);
+}}
+
+// Рамка находки как SVG поверх картинки. Координаты нормализованы 0..1,
+// поэтому viewBox "0 0 1 1" и preserveAspectRatio="none" ложатся ровно на
+// кадр независимо от его размера и пропорций.
+function boxSvg(bbox) {{
+  if (!bbox || bbox.length !== 4) return '';
+  const x1 = Math.min(bbox[0], bbox[2]), x2 = Math.max(bbox[0], bbox[2]);
+  const y1 = Math.min(bbox[1], bbox[3]), y2 = Math.max(bbox[1], bbox[3]);
+  const w = Math.max(0, x2 - x1), h = Math.max(0, y2 - y1);
+  const r = `x="${{x1}}" y="${{y1}}" width="${{w}}" height="${{h}}"`;
+  return `<svg viewBox="0 0 1 1" preserveAspectRatio="none">` +
+         `<rect class="under" ${{r}}></rect><rect ${{r}}></rect></svg>`;
+}}
+
+// Строка находки ведёт в плеер, а эта кнопка -- на страницу кадра.
+// Гасим и переход по внешней ссылке, и всплытие: иначе сработали бы оба.
+function openFrame(e, obsId) {{
+  e.preventDefault();
+  e.stopPropagation();
+  window.open(`/finding/${{obsId}}/`, '_blank', 'noopener');
+}}
+
+function showPeek(anchor, src, caption, obsId, bbox) {{
   const el = peek();
-  peekScale = 1; peekX = 0; peekY = 0; peekDrag = null;
+  peekScale = 1; peekX = 0; peekY = 0; peekDrag = null; peekPress = null;
   const img = el.querySelector('img');
-  img.style.transform = '';
+  el.querySelector('.peek-zoom').style.transform = '';
+
+  // Мелкий кадр показываем сразу -- он уже в кэше браузера, потому что
+  // тот же файл стоит в сетке находок. Иначе окно открывалось бы пустым
+  // на время загрузки крупного.
   img.src = src;
+
+  // Крупный кадр (2560 px, без вжённой рамки) подгружаем следом и
+  // подменяем. Именно ради него всё и затевалось: на мелком при
+  // увеличении видна каша.
+  const busy = el.querySelector('.peek-busy');
+  peekLoadId++;
+  const myLoad = peekLoadId;
+  if (obsId) {{
+    busy.classList.add('on');
+    const big = new Image();
+    big.onload = () => {{
+      // Пока грузили, человек мог навести на другую находку -- тогда
+      // подменять нельзя, иначе в окне окажется чужой кадр.
+      if (myLoad !== peekLoadId) return;
+      img.src = big.src;
+      busy.classList.remove('on');
+    }};
+    big.onerror = () => {{ if (myLoad === peekLoadId) busy.classList.remove('on'); }};
+    big.src = `/api/finding/${{obsId}}/preview?full=1`;
+  }} else {{
+    busy.classList.remove('on');
+  }}
+
+  // Рамка поверх кадра. У мелкого она вжжена внутрь, у крупного нет --
+  // поэтому рисуем свою: после подмены картинки рамка остаётся на месте.
+  const svg = el.querySelector('.peek-box');
+  if (bbox && bbox.length === 4) {{
+    const x1 = Math.min(bbox[0], bbox[2]), x2 = Math.max(bbox[0], bbox[2]);
+    const y1 = Math.min(bbox[1], bbox[3]), y2 = Math.max(bbox[1], bbox[3]);
+    svg.querySelectorAll('rect').forEach(r => {{
+      r.setAttribute('x', x1); r.setAttribute('y', y1);
+      r.setAttribute('width', Math.max(0, x2 - x1));
+      r.setAttribute('height', Math.max(0, y2 - y1));
+    }});
+    svg.style.display = '';
+  }} else {{
+    svg.style.display = 'none';
+  }}
+
   el.querySelector('.peek-cap').textContent = caption || '';
   el.classList.add('on');
 
@@ -2440,6 +3280,22 @@ function passesFilter(f) {{
   return (f.priority || '') === findFilter;
 }}
 
+// Выгрузка координатору. Он работает не в нашей платформе, а в своей
+// карте или навигаторе -- пока координаты живут только здесь, они
+// бесполезны ровно там, где нужны.
+function exportButtons() {{
+  // считать здесь "есть ли координата" самостоятельно нельзя: счётчик
+  // и содержимое файла разошлись бы молча. Признак ставит сервер.
+  const withGeo = findings.filter(f => f.exportable).length;
+  if (!withGeo) return '';
+  return `<div class="exp">
+    <span class="exp-lbl">Выгрузить координаты (${{withGeo}}):</span>
+    <a class="exp-btn" href="/api/operations/${{OP}}/findings.kml">KML для карты</a>
+    <a class="exp-btn" href="/api/operations/${{OP}}/findings.gpx">GPX для навигатора</a>
+    <span class="exp-note">точки объектов и позиции дрона разделены</span>
+  </div>`;
+}}
+
 function findFilters() {{
   const counts = {{}};
   findings.forEach(f => {{
@@ -2473,6 +3329,133 @@ async function loadFindings() {{
   findings = (await r.json()).findings || [];
   render();
 }}
+
+
+// --- ПОИСК ПО ВСЕЙ ОПЕРАЦИИ ------------------------------------------------
+//
+// Поиск по ТЕКУЩЕЙ папке бесполезен: человек ищет файл ровно тогда, когда
+// не помнит, в какой он папке. Поэтому список материалов операции берётся
+// целиком -- на сотнях файлов это несколько килобайт -- и дальше
+// фильтруется в браузере: мгновенно и без похода на сервер на каждую букву.
+
+let ALL = null;          // весь список, грузится один раз
+let query = '';
+
+async function ensureAll() {{
+  if (ALL) return ALL;
+  const r = await fetch(`/api/operations/${{OP}}/materials`);
+  ALL = r.ok ? (await r.json()).items : [];
+  return ALL;
+}}
+
+function matches(it, parts) {{
+  // Ищем и по имени, и по пути: "helicopter saykal" должно находить, даже
+  // если этих слов нет в самом имени файла.
+  const hay = ((it.folder || '') + '/' + it.name).toLowerCase();
+  return parts.every(p => hay.includes(p));
+}}
+
+function mark(text, parts) {{
+  // Подсветка совпавших кусков. Имена вроде DJI_20260814143659_0015_Z.MP4
+  // отличаются серединой, и без подсветки глазами их не различить.
+  //
+  // Обходимся БЕЗ регулярного выражения: запрос печатает человек, в нём
+  // спокойно окажется точка или скобка, и собранная из него регулярка
+  // либо сломается, либо начнёт совпадать не с тем. Обычный поиск
+  // подстроки этой беды не знает.
+  const src = String(text == null ? '' : text);
+  const low = src.toLowerCase();
+  const hits = [];
+  parts.forEach(p => {{
+    if (!p) return;
+    let from = 0;
+    for (;;) {{
+      const i = low.indexOf(p, from);
+      if (i < 0) break;
+      hits.push([i, i + p.length]);
+      from = i + p.length;
+    }}
+  }});
+  if (!hits.length) return esc(src);
+  // Совпадения разных слов могут пересекаться -- склеиваем, иначе теги
+  // подсветки вложатся друг в друга и разметка поедет.
+  hits.sort((a, b) => a[0] - b[0]);
+  const merged = [hits[0]];
+  for (let k = 1; k < hits.length; k++) {{
+    const last = merged[merged.length - 1];
+    if (hits[k][0] <= last[1]) last[1] = Math.max(last[1], hits[k][1]);
+    else merged.push(hits[k]);
+  }}
+  let out = '', pos = 0;
+  merged.forEach(([a, b]) => {{
+    out += esc(src.slice(pos, a))
+        + '<span class="hit-mark">' + esc(src.slice(a, b)) + '</span>';
+    pos = b;
+  }});
+  return out + esc(src.slice(pos));
+}}
+
+function hitRow(it, parts) {{
+  const href = it.kind === 'video' ? `/report/${{it.report_id}}/player/`
+                                   : `/report/${{it.report_id}}/viewer/`;
+  const where = it.folder
+    ? `<span class="hit-where">${{mark(it.folder, parts)}}</span>` : '';
+  const cloud = it.in_cloud ? ' <span class="meta">☁</span>' : '';
+  return `<a class="row" href="${{href}}">
+    <span class="ic">${{it.kind === 'video' ? '🎬' : '🖼'}}</span>
+    <span class="nm">${{mark(it.name, parts)}}${{cloud}}${{where}}</span>
+    <span class="meta">${{esc(it.status)}}</span></a>`;
+}}
+
+function renderSearch() {{
+  const b = document.getElementById('body');
+  const parts = query.split(/\\s+/).filter(Boolean);
+  const hits = (ALL || []).filter(it => matches(it, parts));
+  document.getElementById('qhint').textContent =
+    hits.length ? `найдено: ${{hits.length}}` : '';
+  if (!hits.length) {{
+    b.innerHTML = `<div class="noqres">Ничего не найдено по запросу
+      «${{esc(query)}}». Ищите по части имени файла или по названию папки.</div>`;
+    return;
+  }}
+  // Потолок на выдачу: показать 200 строк разом значит подвесить страницу
+  // на слабой машине, а искать среди двухсот результатов всё равно нельзя.
+  const shown = hits.slice(0, 60);
+  let html = shown.map(it => hitRow(it, parts)).join('');
+  if (hits.length > shown.length) {{
+    html += `<div class="note">…и ещё ${{hits.length - shown.length}}.
+      Уточните запрос.</div>`;
+  }}
+  b.innerHTML = html;
+}}
+
+async function onQuery(v) {{
+  query = (v || '').trim().toLowerCase();
+  document.getElementById('qhint').textContent = '';
+  if (!query) {{ render(); return; }}
+  await ensureAll();
+  renderSearch();
+}}
+
+document.getElementById('q').addEventListener('input', e => onQuery(e.target.value));
+document.getElementById('q').addEventListener('keydown', e => {{
+  if (e.key === 'Escape') {{ e.target.value = ''; onQuery(''); e.target.blur(); }}
+}});
+
+// «/» ставит курсор в поиск. Проверяем ТИП поля, а не тег: проверка
+// «это input?» ломала бы горячую клавишу, стоило чекбоксу получить фокус --
+// на этих граблях в плеере уже стояли.
+document.addEventListener('keydown', e => {{
+  if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+  const el = document.activeElement;
+  const typing = el && (el.isContentEditable
+    || el.tagName === 'TEXTAREA'
+    || (el.tagName === 'INPUT'
+        && !['checkbox','radio','button','submit'].includes(el.type)));
+  if (typing) return;
+  e.preventDefault();
+  document.getElementById('q').focus();
+}});
 
 loadBrowse();
 </script></body></html>"""
@@ -2528,6 +3511,21 @@ def api_operations():
     return jsonify({"ok": True, "id": op_id, "title": title, "folder": folder})
 
 
+@app.route("/api/operations/<int:op_id>/materials")
+def api_operation_materials(op_id):
+    """Плоский список материалов операции -- для поиска.
+
+    Отдаётся целиком и один раз: на сотнях материалов это несколько
+    килобайт, а фильтрация в браузере отвечает мгновенно и не гоняет
+    запрос на каждую нажатую букву.
+    """
+    conn = get_db()
+    items = sar_common.operation_materials_flat(conn, op_id)
+    if items is None:
+        return jsonify({"error": "операции нет"}), 404
+    return jsonify({"items": items})
+
+
 @app.route("/api/operations/<int:op_id>/browse")
 def api_operation_browse(op_id):
     """Одна папка операции: подпапки и материалы. Ходим как в проводнике."""
@@ -2569,14 +3567,66 @@ def api_operation_browse(op_id):
 
 @app.route("/api/finding/<int:observation_id>/preview")
 def api_finding_preview(observation_id):
-    """Кадр ручной пометки с рамкой. Сервер только отдаёт готовый файл --
-    вырезает его воркер (см. ensure_finding_previews в sar_worker.py), как
-    и все прочие картинки в проекте."""
-    path = sar_common.finding_preview_path(DATA_DIR, observation_id)
+    """Кадр ручной пометки. Сервер только отдаёт готовый файл -- вырезает
+    его воркер (см. ensure_finding_previews в sar_worker.py), как и все
+    прочие картинки в проекте.
+
+    ?full=1 -- крупный кадр БЕЗ рамки, для окна предпросмотра и страницы
+    кадра, где картинку увеличивают. Если крупного ещё нет (воркер не
+    дошёл, или находка старая), молча отдаём мелкий: пустое окно
+    предпросмотра хуже, чем окно с картинкой похуже.
+    """
+    want_full = request.args.get("full") in ("1", "true", "yes")
+    if want_full:
+        path = sar_common.finding_preview_path(DATA_DIR, observation_id, full=True)
+        if not os.path.exists(path):
+            path = sar_common.finding_preview_path(DATA_DIR, observation_id)
+    else:
+        path = sar_common.finding_preview_path(DATA_DIR, observation_id)
     if not os.path.exists(path):
         # воркер ещё не дошёл до этой пометки -- не ошибка
         return "", 404
     return send_file(path, mimetype="image/jpeg")
+
+
+def _finding_bbox(f):
+    """Рамка находки как список из четырёх чисел 0..1, либо None.
+
+    В базе она лежит строкой JSON. Битую строку молча считаем отсутствующей:
+    находка без рамки полезна, а падение списка из-за одной кривой записи --
+    нет (тот же урок, что и с превью).
+    """
+    raw = f.get("bbox")
+    if not raw:
+        return None
+    try:
+        box = json.loads(raw) if isinstance(raw, str) else raw
+        vals = [float(v) for v in list(box)[:4]]
+        return vals if len(vals) == 4 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _finding_obs_id(f):
+    """Id ручной пометки, стоящей за находкой, либо None.
+
+    Находка -- это либо сама пометка, либо триаж, поставленный НА пометку;
+    в обоих случаях кадр, рамка и страница кадра у них общие. У триажа
+    сцены модели своей пометки нет, и обратиться не к чему.
+
+    Логика повторялась в подборе превью -- вынесена сюда, чтобы адрес
+    картинки и адрес страницы кадра не разъехались между собой.
+    """
+    if f.get("kind") == "manual":
+        obs_id = f.get("id")
+    elif f.get("target_kind") == "manual":
+        obs_id = f.get("ref_key")
+    else:
+        return None
+    try:
+        return int(obs_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def _finding_preview_url(conn, f):
@@ -2689,10 +3739,19 @@ def api_operation_findings(op_id):
             # "в самом начале видео", то есть врал бы.
             "seconds": f.get("timestamp_sec"),
             "lat": f.get("lat"), "lon": f.get("lon"),
+            # попадёт ли эта находка в KML/GPX -- решает сервер тем же
+            # правилом, что и сама выгрузка. Интерфейс только считает.
+            "exportable": _finding_export_point(f) is not None,
             # время постановки: created_at у пометки, set_at у триажа
             "created_at": (f.get("created_at") or f.get("set_at")
                             or f.get("updated_at")),
             "preview": _finding_preview_url(conn, f),
+            # id пометки: по нему открывается страница кадра и строится
+            # постоянная ссылка на находку
+            "obs_id": _finding_obs_id(f),
+            # рамка нормализована 0..1 -- рисуется поверх кадра в SVG,
+            # поэтому остаётся чёткой при увеличении и выключается
+            "bbox": _finding_bbox(f),
         })
     return jsonify({"findings": out})
 
@@ -2877,6 +3936,12 @@ def _build_tree_payload(cache_key, op_param):
     # Папки операций обходятся рекурсивно (заказчик раскладывает материал
     # так же, как у себя в облаке), корень -- плоско, там «Не разобрано».
     found = sar_common.scan_all_materials(watch_dir)
+    # Какой материал показывать -- настройка администратора, см.
+    # material_sources в SETTINGS_SCHEMA. На сам материал не влияет:
+    # ничего не удаляется и не отвязывается от операции.
+    sources = sar_common.get_settings(conn).get("material_sources", "all")
+    if sources == "cloud":
+        found = []
 
     only = None
     op_title = None
@@ -2943,6 +4008,41 @@ def _build_tree_payload(cache_key, op_param):
             continue
         items.append(item)
 
+    # МАТЕРИАЛ ИЗ ОБЛАКА. Обход выше ходит по локальной папке и облачные
+    # записи не находит: их нет на диске. Без этого блока подключённый диск
+    # выглядел бы неработающим -- файлы зарегистрированы, привязаны к
+    # операции, а в списке их нет, и понять почему невозможно.
+    seen_ids = {i["report_id"] for i in items}
+    cloud_rows = [] if sources == "local" else conn.execute(
+        "SELECT * FROM reports WHERE cloud_file_id IS NOT NULL "
+        "ORDER BY rel_path").fetchall()
+    for r in cloud_rows:
+        r = dict(r)
+        report_id = r["report_id"]
+        if report_id in seen_ids:
+            continue          # тот же файл уже нашёлся локально
+        if only is not None and report_id not in only:
+            continue
+        name = r["rel_path"]
+        kind = r["kind"] or "video"
+        item = {"report_id": report_id, "name": name, "kind": kind,
+                "status": r["status"], "progress_pct": r["progress_pct"] or 0,
+                "viewer_count": 0, "percent": None, "buckets": None,
+                # Даты создания у облачного файла нет: локально его не было.
+                # Ставим 0, а не выдумываем -- сортировка по дате просто
+                # положит такие файлы в конец, и это честно.
+                "file_ctime": r["file_ctime"] or 0,
+                "in_cloud": True,
+                "size_bytes": r["cloud_size"] or 0,
+                "manual_count": conn.execute(
+                    "SELECT COUNT(*) c FROM manual_observations WHERE report_id=?",
+                    (report_id,)).fetchone()["c"],
+                "ai_count": len(_get_ai_scenes_for_report(r))
+                if r["status"] == "done" else None}
+        if kind == "video":
+            item.update(get_report_stats(conn, report_id, r["duration_sec"]))
+        items.append(item)
+
     payload = {"items": items, "operation": op_title, "op": op_param or None}
     _tree_cache_put(cache_key, payload)
     return payload
@@ -2962,7 +4062,21 @@ def api_thumbnail(filename):
     found = {name: kind for name, _abs_path, kind in sar_common.scan_all_materials(watch_dir)}
     # превью есть и у видео (первый кадр), и у фото (уменьшенная копия) --
     # см. _generate_thumbnail в sar_worker.py
-    if found.get(filename) not in ("video", "photo"):
+    kind = found.get(filename)
+
+    if kind not in ("video", "photo"):
+        # ОБЛАЧНОГО МАТЕРИАЛА НА ДИСКЕ НЕТ ПО ОПРЕДЕЛЕНИЮ, и проверка по
+        # обходу папки его не пропускала -- 404 на каждое облачное превью,
+        # хотя JPEG лежал рядом готовый. Тот же класс ошибки, что был с
+        # отдачей видео: «настоящий ли это материал» выяснялось у диска.
+        #
+        # Защита от подстановки пути не ослабевает: сверяем с ТОЧНЫМ
+        # rel_path из базы, а не склеиваем присланное с каталогом.
+        row = get_db().execute(
+            "SELECT kind FROM reports WHERE rel_path = ?", (filename,)).fetchone()
+        kind = row["kind"] if row else None
+
+    if kind not in ("video", "photo"):
         return "", 404
 
     thumb_path = sar_common.get_thumbnail_path(DATA_DIR, filename)
@@ -3178,10 +4292,65 @@ poll();
 </body></html>"""
 
 
+# Корни, от которых вычисляются пути отчёта. Берутся из SERVER_CFG, а не
+# из глобалей DATA_DIR/REPORTS_DIR: те заполняются только в main(), а тесты
+# поднимают приложение без него и подменяют именно SERVER_CFG.
+#
+# Ключ кэша -- сам watch_dir. Без этого тесты с временными каталогами
+# увидели бы чужие пути: ровно та же причина, по которой ключ кэша
+# /api/tree обязан включать watch_dir и путь к базе.
+_PATH_ROOTS_CACHE = {}
+
+
+def _data_dir():
+    """Папка служебных данных -- устойчиво к тому, что main() не запускался.
+
+    Глобаль DATA_DIR заполняется только в main(), а тесты поднимают
+    приложение без него. Обращение к ней напрямую роняло страницу плеера
+    с NameError -- то есть правка, задуманная как «пускать в плеер, когда
+    есть лёгкая копия», ломала плеер вообще.
+    """
+    d = globals().get("DATA_DIR")
+    if d:
+        return d
+    return sar_common.resolve_paths(SERVER_CFG["watch_dir"],
+                                     SERVER_CFG.get("data_dir"))[1]
+
+
+def _path_roots():
+    """(watch_dir, reports_dir) -- корни для material_path и report_dir."""
+    watch = SERVER_CFG["watch_dir"]
+    roots = _PATH_ROOTS_CACHE.get(watch)
+    if roots is None:
+        resolved = sar_common.resolve_paths(watch, SERVER_CFG.get("data_dir"))
+        roots = (resolved[0], resolved[3])
+        _PATH_ROOTS_CACHE[watch] = roots
+    return roots
+
+
 def get_report_row(report_id):
+    """Строка отчёта с ВЫЧИСЛЕННЫМИ путями.
+
+    abs_path и out_dir в базе -- абсолютные пути, записанные на той машине,
+    где файл впервые увидели. Они прибивают базу к букве диска и к ОС, и
+    при любом переезде (материал в облако, платформа на VPS) превращаются
+    в ссылки в никуда -- молча: строка есть, файла по ней нет.
+
+    Поэтому здесь они ПЕРЕКРЫВАЮТСЯ расчётом от rel_path и report_id.
+    Это единственный аксессор отчёта в веб-слое, так что достаточно одной
+    правки здесь -- все потребители получают правильный путь, не зная об
+    этом. Сверено на боевой базе: расчёт совпал с хранимым в 58 записях
+    из 58.
+    """
     conn = get_db()
     row = conn.execute("SELECT * FROM reports WHERE report_id=?", (report_id,)).fetchone()
-    return dict(row) if row else None
+    if row is None:
+        return None
+    d = dict(row)
+    watch, reports = _path_roots()
+    d["abs_path"] = sar_common.material_path(watch, d.get("rel_path"))
+    d["out_dir"] = sar_common.report_dir(reports, d.get("report_id"))
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -3234,8 +4403,6 @@ def report_video(report_id):
     report = get_report_row(report_id)
     if report is None:
         return "Отчёт не найден", 404
-    if not os.path.exists(report["abs_path"]):
-        return "Исходный видеофайл больше не найден на диске", 404
 
     # По умолчанию отдаём лёгкую копию: оригинал идёт на 30 Мбит/с, и
     # столько нужно КАЖДОМУ зрителю через один канал наружу. Копия того же
@@ -3244,11 +4411,30 @@ def report_video(report_id):
     # ?original=1 -- когда надо разглядеть вплотную. Копию всегда можно
     # обойти, поэтому сжатие не отнимает у человека ничего, а только
     # ускоряет обычный просмотр.
-    path = report["abs_path"]
-    if request.args.get("original") != "1":
+    #
+    # ПОРЯДОК ЗДЕСЬ ВАЖЕН. Раньше наличие ОРИГИНАЛА проверялось первым, до
+    # подстановки копии. Пока весь материал лежал на локальном диске, это
+    # было незаметно. Но материал уезжает в облако, и там оригинала на
+    # месте может не быть вовсе -- он нужен ровно дважды, при обработке и
+    # при сборке копии. Со старым порядком плеер отдавал бы 404, ИМЕЯ
+    # готовую копию под рукой: человек видит "видео не найдено" при
+    # полностью рабочем материале.
+    #
+    # Поэтому оригинал обязателен только тогда, когда его прямо попросили.
+    want_original = request.args.get("original") == "1"
+    path = None
+    if not want_original:
         proxy = sar_common.proxy_video_path(DATA_DIR, report["rel_path"])
         if os.path.exists(proxy):
             path = proxy
+    if path is None:
+        path = sar_common.find_material_file(
+            _path_roots()[0], _data_dir(), report["rel_path"])             or report["abs_path"]
+        if not os.path.exists(path):
+            if want_original:
+                return ("Оригинал недоступен: файла нет на месте. "
+                        "Уберите «оригинал», чтобы смотреть лёгкую копию."), 404
+            return "Видеофайл больше не найден на диске", 404
 
     # conditional=True -> Flask/Werkzeug сам обрабатывает Range-заголовки,
     # это и даёт перемотку в <video> без ручной реализации потоковой отдачи
@@ -3285,6 +4471,10 @@ def report_photo(report_id):
         return "Отчёт не найден", 404
     if report["kind"] != "photo":
         return "Это не фото", 400
+    found = sar_common.find_material_file(
+        _path_roots()[0], _data_dir(), report["rel_path"])
+    if found:
+        report = dict(report, abs_path=found)
     if not os.path.exists(report["abs_path"]):
         return "Исходный файл больше не найден на диске", 404
     return send_file(report["abs_path"], conditional=True)
@@ -3395,7 +4585,12 @@ def photo_viewer_page(report_id):
         return "Отчёт не найден", 404
     if report["kind"] != "photo":
         return "Просмотр снимка доступен только для фото", 400
-    if not os.path.exists(report["abs_path"]):
+    found = sar_common.find_material_file(
+        _path_roots()[0], _data_dir(), report["rel_path"])
+    if not found:
+        if report.get("cloud_file_id"):
+            return _not_ready_page(report)
+    if not found and not os.path.exists(report["abs_path"]):
         return "Исходный файл больше не найден на диске", 404
 
     if report["status"] == "done":
@@ -3515,14 +4710,19 @@ def _get_ai_scenes_for_report(report):
     if report["status"] == "done" and report_id in _ai_scenes_cache:
         return _ai_scenes_cache[report_id]
 
-    # out_dir может быть пустым у записи, созданной до начала обработки или
-    # повреждённой. Раньше это роняло ВЕСЬ список файлов с TypeError: одна
-    # плохая строка делала страницу недоступной целиком. Считаем, что сцен
-    # просто нет -- список должен пережить любую отдельную запись.
-    out_dir = report["out_dir"]
-    if not out_dir:
+    # Папка отчёта ВЫЧИСЛЯЕТСЯ, а не берётся из столбца out_dir: хранимый
+    # абсолютный путь привязывает базу к машине и к букве диска, а сюда
+    # приходят строки и из /api/tree (сырые, мимо get_report_row), и из
+    # самого get_report_row -- то есть если считать по-разному, разойдутся.
+    #
+    # Пустой report_id по-прежнему означает "сцен нет": раньше пустой
+    # out_dir ронял ВЕСЬ список файлов с TypeError -- одна плохая строка
+    # делала страницу недоступной целиком.
+    if not report_id:
         return []
-    det_path = os.path.join(out_dir, "detections.json")
+    _, reports_root = _path_roots()
+    det_path = os.path.join(sar_common.report_dir(reports_root, report_id),
+                            "detections.json")
     raw_hits = _read_detections_file(det_path) if os.path.exists(det_path) else []
     if not raw_hits:
         return []
@@ -4018,6 +5218,13 @@ video::-webkit-media-controls-fullscreen-button {{ display:none !important; }}
 .obs-head {{ display:flex; align-items:center; gap:10px; margin-bottom:4px; }}
 .obs-head .obs-when {{ margin-left:auto; }}
 .obs-time {{ color:#8ecbff; font-weight:bold; cursor:pointer; font-size:14px; }}
+/* Ссылка и кадр -- рядом с удалением, в шапке карточки. Кнопка ссылки
+   именно button: карточка не обёрнута в <a>, но привычка вкладывать
+   ссылки в этом проекте уже приводила к неработающим кнопкам. */
+.obs-link, .obs-frame {{ background:none; border:none; cursor:pointer;
+  color:#8a949c; font-size:13px; padding:0 3px; line-height:1;
+  text-decoration:none; }}
+.obs-link:hover, .obs-frame:hover {{ color:#cfe6ef; }}
 /* когда пометка СДЕЛАНА -- отдельно от таймкода в видео, иначе их путают */
 .obs-when {{ color:#777; font-size:11.5px; margin-left:auto; white-space:nowrap; }}
 .obs-author {{ font-size:11px; color:#888; }}
@@ -4969,6 +6176,10 @@ async function loadObservations() {{
           <span class="obs-time" onclick="jumpTo(${{o.timestamp_sec}})">▶ ${{fmtTime(o.timestamp_sec)}}</span>
           <span class="obs-author">${{o.viewer_name}}</span>
           <span class="obs-when">${{fmtStamp(o.created_at)}}</span>
+          <button class="obs-link" onclick="copyFindingLink(event, ${{o.id}}, ${{o.timestamp_sec}})"
+            title="Скопировать ссылку на находку">🔗</button>
+          <a class="obs-frame" href="/finding/${{o.id}}/" target="_blank" rel="noopener"
+            title="Открыть кадр находки">🖼</a>
           <button class="obs-del" onclick="deleteObservation(${{o.id}})"
             title="Удалить наблюдение целиком">🗑</button>
         </div>
@@ -5024,6 +6235,50 @@ async function loadAiScenes() {{
       ${{renderComments('ai_scene', s.ref_key)}}
     </div>`;
   }}).join(''));
+}}
+
+// --- ссылка на находку -----------------------------------------------------
+//
+// Адрес абсолютный и приходит с сервера, а не собирается из location:
+// платформа живёт за быстрым туннелем, и его имя меняется при каждом падении
+// канала. Ссылка из location была бы верна только пока открыта эта вкладка.
+// Внешний адрес спрашиваем у сервера, а не подставляем в страницу:
+// туннель меняет имя при каждом падении канала, и вкладка, открытая до
+// падения, продолжила бы копировать мёртвые ссылки. Один запрос на
+// загрузку страницы, дальше держим в памяти.
+let EXTERNAL_BASE = '';
+let BOT_NAME = '';
+fetch('/api/external_base')
+  .then(r => r.json())
+  .then(d => {{ EXTERNAL_BASE = d.base || ''; BOT_NAME = d.bot || ''; }})
+  .catch(() => {{}});
+
+function findingLink(obsId, seconds) {{
+  // См. страницу операции: вечная ссылка -- через бота, потому что имя
+  // туннеля перестаёт существовать при каждом его перезапуске.
+  if (obsId && BOT_NAME) return `https://t.me/${{BOT_NAME}}?start=finding_${{obsId}}`;
+  const base = EXTERNAL_BASE || location.origin;
+  if (obsId) return `${{base}}/finding/${{obsId}}/`;
+  const t = (seconds !== null && seconds !== undefined)
+    ? `?t=${{Math.max(0, Math.floor(seconds))}}` : '';
+  return `${{base}}/report/{report_id}/player/${{t}}`;
+}}
+
+async function copyFindingLink(e, obsId, seconds) {{
+  if (e) {{ e.preventDefault(); e.stopPropagation(); }}
+  const link = findingLink(obsId, seconds);
+  try {{
+    await navigator.clipboard.writeText(link);
+    if (e && e.target) {{
+      const el = e.target, was = el.textContent;
+      el.textContent = '✓';
+      setTimeout(() => {{ el.textContent = was; }}, 1400);
+    }}
+  }} catch (err) {{
+    // Буфер обмена доступен только по https, а внутри сети платформа
+    // ходит по http. Показываем ссылку, а не молчим.
+    window.prompt('Скопируйте ссылку:', link);
+  }}
 }}
 
 function jumpTo(sec) {{
@@ -5417,17 +6672,217 @@ def material_crumbs(conn, report, extra=""):
     добавлена раньше, остальные не теряются -- они видны в самой операции.
     """
     ops = sar_common.operations_of_material(conn, report["report_id"])
-    name = (report["rel_path"] or "").replace("\\", "/").split("/")[-1]
+    rel = (report["rel_path"] or "").replace("\\", "/")
+    name = rel.split("/")[-1]
     parts = ['<a href="/operations">Операции</a>']
     if ops:
         op = ops[-1]
-        parts.append('<a href="/operation/%d/">%s</a>' % (op["id"], op["title"]))
+        parts.append('<a href="/operation/%d/">%s</a>'
+                     % (op["id"], html_escape(op["title"])))
+
+        # ПАПКИ, В КОТОРЫХ ЛЕЖИТ ФАЙЛ. Без них крошки обрывались на
+        # названии операции: человек видел файл, но не понимал, из какой он
+        # папки и как вернуться именно туда -- а с подключённым облаком
+        # вложенность стала заметной ("2026 08 14/Helicopter/Saykal").
+        #
+        # Путь считается ТЕМ ЖЕ способом, что и дерево
+        # (sar_common.material_display_path): иначе крошки повели бы в
+        # папку, которой в дереве нет.
+        op_root = (op["folder"] or "").replace("\\", "/").strip("/")
+        full = sar_common.material_display_path(
+            dict(report), op_root, sar_common.cloud_display_roots(conn))
+        inside = full[len(op_root) + 1:] if op_root and             full.startswith(op_root + "/") else full
+        folders = inside.split("/")[:-1]
+        acc = ""
+        for f in folders:
+            acc = acc + "/" + f if acc else f
+            parts.append('<a href="/operation/%d/?path=%s">%s</a>'
+                         % (op["id"], urllib.parse.quote(acc), html_escape(f)))
     else:
         parts.append('<a href="/">Не разобрано</a>')
     if extra:
         parts.append(extra)
-    parts.append("<span>%s</span>" % name)
+    parts.append("<span>%s</span>" % html_escape(name))
     return " &rsaquo; ".join(parts)
+
+
+NOT_READY_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>{name} — не готов</title>
+<style>
+body{{font-family:-apple-system,Arial,sans-serif;background:#12171c;color:#e8eeec;
+  margin:0;padding:40px 22px;line-height:1.6}}
+.wrap{{max-width:620px;margin:0 auto}}
+a{{color:#5fb8c7}}
+h1{{font-size:20px;margin:0 0 6px}}
+.path{{color:#9aa8a5;font-size:13px;margin:0 0 26px;word-break:break-all}}
+.card{{background:#1a2129;border:1px solid #2b353f;border-radius:10px;
+  padding:20px 22px;margin:0 0 18px}}
+p{{margin:0 0 14px}}
+.note{{color:#9aa8a5;font-size:14px}}
+button{{background:#1b5e20;color:#fff;border:1px solid #2e7d32;border-radius:7px;
+  padding:10px 20px;font-size:15px;cursor:pointer}}
+button:hover{{background:#227026}}
+button:disabled{{background:#2a2f34;border-color:#39424a;color:#8b9499;cursor:default}}
+#msg{{margin-left:14px;color:#9aa8a5;font-size:14px}}
+.err{{color:#e5807a}}
+</style></head><body><div class="wrap">
+<p><a href="{back}">← к материалам операции</a></p>
+<h1>{name}</h1>
+<p class="path">☁ {folder}</p>
+<div class="card">
+  <p><b>Файл лежит в облаке и ещё не готов к просмотру.</b></p>
+  {status}
+  <p class="note">
+    Чтобы его можно было смотреть, платформа скачает оригинал ({size}) и
+    соберёт из него лёгкую копию. Сам оригинал после этого не нужен и
+    освободит место — смотреть вы будете копию, как и весь остальной
+    материал.
+  </p>
+  <p class="note">
+    Само ничего не качается: {total} файлов из этого хранилища заняли бы
+    десятки гигабайт трафика. Поэтому решение за вами, и за каждый файл
+    отдельно.
+  </p>
+  <p style="margin-top:18px">
+    <button id="go" onclick="prepare()" {btn_disabled}>{btn_label}</button>
+    <span id="msg"></span>
+  </p>
+</div>
+<p class="note">
+  Подготовка идёт в фоне и занимает несколько минут: скачивание зависит от
+  канала, сборка копии — от процессора. Обновите страницу позже.
+</p>
+<script>
+async function prepare() {{
+  const b = document.getElementById('go'), m = document.getElementById('msg');
+  b.disabled = true;
+  m.textContent = 'Отправляю…';
+  const r = await fetch('/api/report/{report_id}/prepare', {{method: 'POST'}});
+  const d = await r.json().catch(() => ({{}}));
+  if (!r.ok || !d.ok) {{
+    b.disabled = false;
+    m.textContent = (d && d.error) || 'Не получилось';
+    return;
+  }}
+  m.textContent = 'Принято. Файл встал в очередь на подготовку.';
+  setTimeout(() => location.reload(), 3000);
+}}
+
+// Пока файл готовится, страницу обновляем сами: иначе человек смотрит на
+// «в очереди» и не знает, сдвинулось ли что-нибудь.
+if (document.getElementById('go').disabled) {{
+  setTimeout(() => location.reload(), 15000);
+}}
+</script>
+</div></body></html>"""
+
+
+@app.route("/api/report/<report_id>/prepare", methods=["POST"])
+def api_report_prepare(report_id):
+    """Просьба подготовить облачный материал к просмотру.
+
+    Отмечаем флагом, а не качаем прямо здесь: сервер по устройству проекта
+    ничего не обрабатывает, он только читает. Скачает и соберёт копию
+    воркер -- со всеми ограничителями расхода.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT cloud_file_id FROM reports WHERE report_id=?",
+        (report_id,)).fetchone()
+    if row is None:
+        return jsonify({"ok": False, "error": "материал не найден"}), 404
+    if not row["cloud_file_id"]:
+        return jsonify({"ok": False,
+                        "error": "этот материал не из облака"}), 400
+    conn.execute("UPDATE reports SET proxy_requested=1 WHERE report_id=?",
+                 (report_id,))
+    conn.commit()
+    return jsonify({"ok": True})
+
+
+def cloud_prepare_state(conn, report):
+    """Что сейчас происходит с подготовкой этого материала.
+
+    Смотрим на ФАКТЫ, а не на предположения: стоит ли просьба, лежит ли
+    недокачанный остаток, есть ли уже копия. Так состояние не разъедется с
+    действительностью, даже если воркер перезапускали.
+
+    Отдельно достаём ошибку подключения. Без неё страница говорит «в
+    очереди» и молчит месяцами, когда на самом деле протух токен: человек
+    ждёт, а платформа каждые 15 секунд получает отказ. Ровно это и вышло
+    при первом живом включении.
+    """
+    rel = report.get("rel_path") or ""
+    data_dir = _data_dir()
+    state = {"requested": bool(report.get("proxy_requested")),
+             "done_bytes": 0, "blocked": None}
+
+    if os.path.exists(sar_common.proxy_video_path(data_dir, rel)):
+        state["stage"] = "ready"
+        return state
+
+    try:
+        import sar_staging
+        part = sar_staging.Staging(sar_staging.staging_dir(data_dir),
+                                    cap_bytes=1).path_for(rel) + ".part"
+        if os.path.exists(part):
+            state["done_bytes"] = os.path.getsize(part)
+    except Exception:
+        pass
+
+    acc_id = report.get("cloud_account_id")
+    for a in sar_common.cloud_accounts_public(conn):
+        if a["id"] == acc_id and a.get("last_error"):
+            state["blocked"] = a["last_error"]
+
+    if state["done_bytes"]:
+        state["stage"] = "downloading"
+    elif state["requested"]:
+        state["stage"] = "queued"
+    else:
+        state["stage"] = "idle"
+    return state
+
+
+def _not_ready_page(report):
+    """Страница материала, который ещё не скачан из облака."""
+    rel = (report.get("rel_path") or "").replace("\\", "/")
+    folder, _, name = rel.rpartition("/")
+    conn = get_db()
+    total = conn.execute(
+        "SELECT COUNT(*) n FROM reports WHERE cloud_file_id IS NOT NULL"
+    ).fetchone()["n"]
+    ops = sar_common.operations_of_material(conn, report["report_id"])
+    back = "/operation/%d/" % ops[0]["id"] if ops else "/"
+    size = report.get("cloud_size") or 0
+    st = cloud_prepare_state(conn, report)
+
+    if st["stage"] == "downloading":
+        pct = (100.0 * st["done_bytes"] / size) if size else 0
+        status = ('<p><b>Скачивается: %.0f%%</b> (%.0f из %.0f МБ)</p>'
+                  % (pct, st["done_bytes"] / 1e6, size / 1e6))
+    elif st["stage"] == "queued":
+        status = ("<p><b>В очереди на подготовку.</b> Воркер возьмёт файл "
+                  "в ближайшие секунды.</p>")
+    else:
+        status = ""
+
+    if st["blocked"]:
+        status += ('<p class="err">Но подготовка не идёт: %s</p>'
+                   '<p class="note">Пока это не исправлено, файл так и будет '
+                   'ждать. Проверьте подключение в <a href="/admin">настройках '
+                   'платформы</a> — у Google токен живёт один час.</p>'
+                   % html_escape(st["blocked"]))
+
+    return NOT_READY_HTML.format(
+        name=html_escape(name or rel),
+        folder=html_escape(folder or "корень хранилища"),
+        size=("%.1f ГБ" % (size / 1e9)) if size >= 1e9 else ("%.0f МБ" % (size / 1e6)),
+        total=total, back=back, report_id=html_escape(report["report_id"]),
+        status=status,
+        btn_disabled="disabled" if st["stage"] in ("queued", "downloading") else "",
+        btn_label=("Уже в очереди" if st["stage"] in ("queued", "downloading")
+                   else "Подготовить к просмотру"))
 
 
 @app.route("/report/<report_id>/player/")
@@ -5437,7 +6892,17 @@ def player_page(report_id):
         return "Отчёт не найден", 404
     if report["kind"] != "video":
         return "Ручной плеер доступен только для видео", 400
-    if not os.path.exists(report["abs_path"]):
+
+    # СМОТРЯТ ЛЁГКУЮ КОПИЮ, а не оригинал -- значит и доступность плеера
+    # определяет она. Материал из облака оригинала на диске не имеет вовсе,
+    # и проверять его наличие здесь значило бы не пускать в плеер файл,
+    # который прекрасно готов к просмотру.
+    proxy = sar_common.proxy_video_path(_data_dir(), report["rel_path"])
+    staged = sar_common.find_material_file(
+        _path_roots()[0], _data_dir(), report["rel_path"])
+    if not os.path.exists(proxy) and not staged:
+        if report.get("cloud_file_id"):
+            return _not_ready_page(report)
         return "Исходный видеофайл больше не найден на диске", 404
 
     # плеер доступен для видео в ЛЮБОМ статусе -- исходный файл на диске уже
@@ -5595,6 +7060,1895 @@ def api_online():
 
 
 # ---------------------------------------------------------------------------
+# АДМИНКА: ОГРАНИЧЕНИЯ РАСХОДА РЕСУРСОВ
+#
+# Зачем страница. Материал уезжает в облако, и каждое чтение файла
+# становится скачиванием. Без ограничителей подключение папки означает
+# попытку скачать всё разом; с ограничителями, зашитыми в код, их нельзя
+# подстроить под конкретный канал, не правя файл и не перезапуская процессы.
+#
+# ПОЧЕМУ ЗНАЧЕНИЯ ЗАЖИМАЮТСЯ, А НЕ ОТВЕРГАЮТСЯ. Ввели "50 загрузок" --
+# сохранится 4, и это видно прямо в форме. Отказ с ошибкой заставил бы
+# гадать, что допустимо; тихое принятие 50 положило бы канал и квоту.
+# Границы живут в sar_common.SETTINGS_SCHEMA, там же, где определены сами
+# настройки -- чтобы форма и проверка не могли разойтись.
+#
+# ПОЧЕМУ НАСТРОЙКИ В БАЗЕ. Меняет их эта страница (сервер), а применяет
+# воркер. Это разные процессы, общающиеся только через базу; запись в
+# sar_config.json до воркера не доехала бы до перезапуска.
+# ---------------------------------------------------------------------------
+
+ADMIN_PAGE_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>SAR Review — настройки</title>
+<style>
+body {{ font-family:-apple-system, Arial, sans-serif; background:#111; color:#eee;
+        margin:0; padding:20px; }}
+a {{ color:#6cb6ff; }}
+h1 {{ font-size:18px; display:flex; justify-content:space-between;
+      align-items:center; margin:0 0 4px; }}
+.whoami {{ font-size:13px; color:#999; font-weight:normal; }}
+.lead {{ color:#999; font-size:13px; max-width:720px; line-height:1.5;
+         margin:10px 0 22px; }}
+.card {{ background:#161616; border:1px solid #272727; border-radius:10px;
+         padding:16px 18px; margin:0 0 14px; max-width:720px; }}
+.card h2 {{ font-size:14px; margin:0 0 4px; }}
+.hint {{ color:#8a8a8a; font-size:12.5px; line-height:1.5; margin:0 0 12px; }}
+.row {{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
+input[type=number] {{ background:#0d0d0d; color:#eee; border:1px solid #333;
+                      border-radius:6px; padding:7px 10px; width:130px;
+                      font-size:14px; }}
+input[type=checkbox] {{ width:17px; height:17px; }}
+.range {{ color:#777; font-size:12px; }}
+.actions {{ display:flex; align-items:center; gap:14px; margin-top:18px;
+            max-width:720px; }}
+button {{ background:#1b5e20; color:#fff; border:1px solid #2e7d32;
+          border-radius:7px; padding:9px 18px; font-size:14px; cursor:pointer; }}
+button:hover {{ background:#227026; }}
+#saved {{ color:#7bc47f; font-size:13px; }}
+.who {{ color:#777; font-size:12px; }}
+.section {{ font-size:16px; margin:34px 0 6px; }}
+select, input[type=text], input[type=password] {{ background:#0d0d0d; color:#eee;
+  border:1px solid #333; border-radius:6px; padding:7px 10px; font-size:14px; }}
+.acc {{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
+.acc .name {{ font-weight:600; }}
+.acc .meta {{ color:#8a8a8a; font-size:12.5px; }}
+.err {{ color:#e5807a; font-size:12.5px; margin-top:6px; }}
+.warns {{ margin:8px 0 0; padding-left:20px; color:#e0b060; font-size:13px; }}
+.warns li {{ margin:0 0 5px; }}
+.fl {{ display:flex; align-items:center; gap:7px; font-size:13px;
+  color:var(--soft); }}
+.acc-edit {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }}
+.acc-edit input {{ width:250px; }}
+.ok {{ color:#7bc47f; font-size:12.5px; }}
+.danger {{ background:#3a1c1c; border-color:#5c2b2b; }}
+.danger:hover {{ background:#4a2222; }}
+</style></head><body>
+<h1>Настройки платформы <span class="whoami">{viewer_name}</span></h1>
+<div class="lead">
+  Ограничения расхода канала, места и квоты облака. Применяются воркером
+  на ближайшем обходе папки — перезапускать ничего не нужно.
+  <a href="/">← к операциям</a>
+</div>
+<div id="form"></div>
+<div class="actions">
+  <button onclick="save()">Сохранить</button>
+  <span id="saved"></span>
+</div>
+
+<h2 class="section">Облачные хранилища</h2>
+<div class="lead">
+  Материал можно держать в облаке, а на этой машине оставлять только
+  отчёты и лёгкие копии. Токен доступа получают сами — в консоли
+  разработчика Google или на oauth.yandex.ru — и вставляют сюда.
+  Перенаправление не используется: адрес платформы меняется при каждом
+  перезапуске туннеля, и зарегистрированная ссылка возврата протухала бы
+  вместе с ним.
+</div>
+<div id="clouds"></div>
+<div class="card">
+  <h2>Подключить хранилище</h2>
+  <div class="hint">
+    Токен показывается платформой только один раз — при вводе. Дальше он
+    хранится в базе и наружу не отдаётся.
+  </div>
+  <div class="row">
+    <label class="fl">Хранилище <select id="c_prov"></select></label>
+    <label class="fl">Операция <select id="c_op"></select></label>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <input type="password" id="c_token" placeholder="токен доступа" style="width:340px">
+  </div>
+  <div class="row" style="margin-top:10px">
+    <input type="text" id="c_root" placeholder="ссылка на папку с материалом"
+           style="width:460px">
+  </div>
+  <div class="hint" style="margin-top:8px">
+    Откройте нужную папку в облаке и скопируйте адрес из строки браузера.
+    Оставите пустым — платформа возьмёт <b>весь диск целиком</b>, вместе с
+    личными файлами.
+  </div>
+  <div class="row" style="margin-top:10px">
+    <input type="text" id="c_label" placeholder="название подключения (необязательно)"
+           style="width:340px">
+  </div>
+  <details style="margin-top:14px">
+    <summary style="cursor:pointer;color:var(--soft);font-size:13.5px">
+      Продление доступа — обязательно для Google
+    </summary>
+    <div class="hint" style="margin:10px 0">
+      Токен Google живёт один час. Чтобы платформа продлевала его сама,
+      заведите своё приложение в консоли Google, включите в OAuth Playground
+      «Use your own OAuth credentials» и вставьте сюда три значения.
+      Без них диск придётся подключать заново каждый час.
+      <br>Яндекс.Диску это не нужно: там токен действует около года.
+    </div>
+    <div class="row">
+      <input type="text" id="c_cid" placeholder="client_id" style="width:280px">
+      <input type="password" id="c_csec" placeholder="client_secret" style="width:220px">
+    </div>
+    <div class="row" style="margin-top:10px">
+      <input type="password" id="c_rt" placeholder="refresh token" style="width:400px">
+    </div>
+  </details>
+  <div class="row" style="margin-top:14px">
+    <button onclick="connectCloud()">Проверить и подключить</button>
+    <span id="c_msg"></span>
+  </div>
+</div>
+<script>
+let SCHEMA = {{}}, VALUES = {{}};
+
+function esc(t) {{
+  return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}}
+
+function render() {{
+  document.getElementById('form').innerHTML = Object.keys(SCHEMA).map(k => {{
+    const s = SCHEMA[k], v = VALUES[k];
+    let input;
+    if (s.type === 'bool') {{
+      input = `<input type="checkbox" id="f_${{k}}" ${{v ? 'checked' : ''}}>`;
+    }} else if (s.type === 'choice') {{
+      // Варианты приходят из реестра вместе со значением -- второго
+      // списка во фронтенде быть не должно, он разойдётся с кодом.
+      input = `<select id="f_${{k}}">` + s.options.map(o =>
+        `<option value="${{o.value}}"${{o.value === v ? ' selected' : ''}}>`
+        + `${{esc(o.label)}}</option>`).join('') + '</select>';
+    }} else {{
+      const step = s.type === 'float' ? '0.5' : '1';
+      input = `<input type="number" id="f_${{k}}" value="${{v}}"
+                 min="${{s.min}}" max="${{s.max}}" step="${{step}}">
+               <span class="range">от ${{s.min}} до ${{s.max}}</span>`;
+    }}
+    const by = s.set_by ? `<div class="who">поставил: ${{esc(s.set_by)}}</div>` : '';
+    return `<div class="card">
+      <h2>${{esc(s.label)}}</h2>
+      <div class="hint">${{esc(s.help)}}</div>
+      <div class="row">${{input}}</div>${{by}}
+    </div>`;
+  }}).join('');
+}}
+
+async function load() {{
+  const r = await fetch('/api/admin/settings');
+  if (!r.ok) {{ document.getElementById('form').textContent = 'Нет доступа'; return; }}
+  const d = await r.json();
+  SCHEMA = d.schema; VALUES = d.values; render();
+}}
+
+async function save() {{
+  const body = {{}};
+  for (const k of Object.keys(SCHEMA)) {{
+    const el = document.getElementById('f_' + k);
+    body[k] = SCHEMA[k].type === 'bool' ? el.checked : el.value;
+    // select и number оба отдают value -- отдельная ветка не нужна
+  }}
+  const r = await fetch('/api/admin/settings', {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(body)
+  }});
+  const d = await r.json();
+  if (!r.ok || !d.ok) {{
+    document.getElementById('saved').textContent = 'Не сохранилось';
+    return;
+  }}
+  // Показываем то, что РЕАЛЬНО сохранилось: значение могло быть зажато по
+  // границам, и человек должен это увидеть, а не думать, что принято как есть.
+  VALUES = d.values; render();
+  const el = document.getElementById('saved');
+  el.textContent = 'Сохранено';
+  setTimeout(() => {{ el.textContent = ''; }}, 2500);
+}}
+
+// --- облачные хранилища ---------------------------------------------------
+
+let CLOUD = {{providers: [], accounts: []}};
+
+function renderClouds() {{
+  const sel = document.getElementById('c_prov');
+  if (!sel.options.length) {{
+    sel.innerHTML = CLOUD.providers
+      .map(p => `<option value="${{p.name}}">${{esc(p.label)}}</option>`).join('');
+  }}
+  const ops = document.getElementById('c_op');
+  if (!ops.options.length) {{
+    ops.innerHTML = '<option value="">— без операции —</option>'
+      + (CLOUD.operations || [])
+        .map(o => `<option value="${{o.id}}">${{esc(o.title)}}</option>`).join('');
+  }}
+  const box = document.getElementById('clouds');
+  if (!CLOUD.accounts.length) {{
+    box.innerHTML = '<div class="card"><div class="hint">'
+      + 'Пока ничего не подключено — материал берётся из локальной папки.'
+      + '</div></div>';
+    return;
+  }}
+  box.innerHTML = CLOUD.accounts.map(a => {{
+    const where = a.root_name || a.root_id || 'корень';
+    const op = (CLOUD.operations || []).find(o => o.id === a.operation_id);
+    const opTxt = op ? ` · операция: ${{esc(op.title)}}` : ' · без операции';
+    const err = a.last_error
+      ? `<div class="err">последняя ошибка: ${{esc(a.last_error)}}</div>` : '';
+    const ok = a.last_ok_at ? '<span class="ok">проверено</span>' : '';
+    // Главное, что надо знать про подключение: переживёт ли оно час.
+    const renew = a.provider === 'google' && !a.can_refresh
+      ? '<span class="err">доступ не продлевается — истечёт через час</span>'
+      : '';
+    return `<div class="card">
+      <div class="acc">
+        <span class="name">${{esc(a.label || a.provider)}}</span>
+        <span class="meta">${{esc(a.provider)}} · папка: ${{esc(where)}}${{opTxt}}</span>
+        ${{ok}}
+        <button class="danger" onclick="dropCloud(${{a.id}})">Отключить</button>
+      </div>${{renew ? '<div class="err">' + renew + '</div>' : ''}}${{err}}
+      <div class="acc-edit">
+        <label class="fl">Операция
+          <select id="op_${{a.id}}">${{opOptions(a.operation_id)}}</select>
+        </label>
+        <input type="text" id="rt_${{a.id}}" value="${{esc(a.root_id || '')}}"
+               placeholder="папка или ссылка на неё">
+        <button onclick="saveCloud(${{a.id}})">Сохранить</button>
+        <span id="am_${{a.id}}" class="ok"></span>
+      </div>
+    </div>`;
+  }}).join('');
+}}
+
+function opOptions(selected) {{
+  return '<option value="">— без операции —</option>'
+    + (CLOUD.operations || []).map(o =>
+        `<option value="${{o.id}}"${{o.id === selected ? ' selected' : ''}}>`
+        + `${{esc(o.title)}}</option>`).join('');
+}}
+
+// Менять операцию и папку у УЖЕ подключённого диска. Без этого
+// единственным способом было отключить и подключить заново -- а отключение
+// убирает записи материала, то есть за смену операции платили пересканом.
+async function saveCloud(id) {{
+  const m = document.getElementById('am_' + id);
+  m.textContent = 'Сохраняю…';
+  const r = await fetch('/api/admin/cloud/' + id, {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{
+      operation_id: document.getElementById('op_' + id).value,
+      root_id: document.getElementById('rt_' + id).value
+    }})
+  }});
+  const d = await r.json();
+  if (!r.ok || !d.ok) {{ m.textContent = (d && d.error) || 'Не вышло'; return; }}
+  CLOUD.accounts = d.accounts;
+  renderClouds();
+  const m2 = document.getElementById('am_' + id);
+  if (m2) {{
+    m2.textContent = 'Сохранено. Материал переедет на ближайшем обходе.';
+    setTimeout(() => {{ const e = document.getElementById('am_' + id);
+                      if (e) e.textContent = ''; }}, 4000);
+  }}
+}}
+
+async function loadClouds() {{
+  const r = await fetch('/api/admin/cloud');
+  if (!r.ok) return;
+  CLOUD = await r.json();
+  renderClouds();
+}}
+
+async function connectCloud() {{
+  const msg = document.getElementById('c_msg');
+  msg.textContent = 'Проверяю...';
+  const r = await fetch('/api/admin/cloud', {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{
+      provider: document.getElementById('c_prov').value,
+      label: document.getElementById('c_label').value,
+      token: document.getElementById('c_token').value,
+      root_id: document.getElementById('c_root').value,
+      operation_id: document.getElementById('c_op').value,
+      client_id: document.getElementById('c_cid').value,
+      client_secret: document.getElementById('c_csec').value,
+      refresh_token: document.getElementById('c_rt').value
+    }})
+  }});
+  const d = await r.json();
+  if (!r.ok || !d.ok) {{ msg.textContent = d.error || 'Не получилось'; return; }}
+  // Токен из поля убираем сразу: он не должен оставаться в форме, в
+  // истории браузера и на случайном скриншоте.
+  ['c_token', 'c_csec', 'c_rt'].forEach(
+    id => document.getElementById(id).value = '');
+  const warns = d.warnings || [];
+  msg.innerHTML = `Подключено, файлов: ${{d.found}}.`
+    + (warns.length
+       ? '<ul class="warns">' + warns.map(x => `<li>${{esc(x)}}</li>`).join('') + '</ul>'
+       : '');
+  CLOUD.accounts = d.accounts;
+  renderClouds();
+}}
+
+async function dropCloud(id) {{
+  const r = await fetch('/api/admin/cloud/' + id, {{method: 'DELETE'}});
+  const d = await r.json();
+  if (!d.ok) return;
+  CLOUD.accounts = d.accounts;
+  renderClouds();
+  // Говорим, что именно убрали: молчаливое исчезновение сотни записей
+  // выглядит как потеря данных.
+  const c = d.cleanup || {{}};
+  if (c.removed || c.kept) {{
+    document.getElementById('c_msg').textContent =
+      `Отключено. Убрано записей: ${{c.removed || 0}}` +
+      (c.kept ? `, сохранено с пометками: ${{c.kept}}` : '');
+  }}
+}}
+
+load();
+loadClouds();
+</script>
+</body></html>"""
+
+
+@app.route("/admin")
+def admin_page():
+    if not is_admin():
+        return "Нужны права администратора", 403
+    return ADMIN_PAGE_HTML.format(
+        viewer_name=html_escape(session.get("viewer_name", "")))
+
+
+# --- подключение облачных хранилищ ------------------------------------------
+#
+# ПОЧЕМУ НЕ КЛАССИЧЕСКИЙ OAUTH С ПЕРЕНАПРАВЛЕНИЕМ. Ему нужен постоянный
+# адрес возврата, зарегистрированный у провайдера. У платформы такого
+# адреса НЕТ: наружу она смотрит через туннель, имя которого меняется при
+# каждом перезапуске (см. sar_tunnel.py). Зарегистрированный redirect_uri
+# протухал бы вместе с туннелем, и подключение ломалось бы ровно тогда,
+# когда его труднее всего чинить -- в поле.
+#
+# Поэтому токен вводится вручную: человек получает его сам (в консоли
+# разработчика Google или на oauth.yandex.ru) и вставляет в поле. Это
+# менее красиво, зато не зависит от адреса платформы вообще и работает
+# одинаково на ноутбуке, на VPS и через любой туннель.
+#
+# ТОКЕН НАРУЖУ НЕ ВОЗВРАЩАЕТСЯ НИКОГДА -- ни в списке подключений, ни в
+# ответе после сохранения. Для этого есть cloud_accounts_public().
+
+
+@app.route("/api/admin/cloud", methods=["GET", "POST"])
+def api_admin_cloud():
+    if not is_admin():
+        return jsonify({"ok": False, "error": "нужны права администратора"}), 403
+    conn = get_db()
+
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        provider = (data.get("provider") or "").strip()
+        token = (data.get("token") or "").strip()
+        if provider not in sar_cloud.PROVIDERS:
+            return jsonify({"ok": False, "error": "неизвестное хранилище"}), 400
+        if not token:
+            return jsonify({"ok": False, "error": "не введён токен доступа"}), 400
+
+        # Проверяем ДО сохранения: подключение, которое не работает, не
+        # должно попадать в список исправных. Иначе человек уйдёт уверенный,
+        # что диск подключён, а выяснится это при первой обработке.
+        # Человек естественнее всего вставит ССЫЛКУ на папку -- её видно в
+        # адресной строке. Понимаем и её, и голый идентификатор.
+        #
+        # И ещё: ссылку дважды вставляли в поле НАЗВАНИЯ -- оно первое
+        # текстовое в форме, и рука идёт туда. Последствие тяжёлое: поле
+        # папки остаётся пустым, платформа берёт весь диск и затягивает
+        # чужие фотографии. Раз люди так делают, надо это понимать, а не
+        # считать их ошибкой.
+        label_in = (data.get("label") or "").strip()
+        root_in = (data.get("root_id") or "").strip()
+        if not root_in and label_in.startswith("http"):
+            root_in, label_in = label_in, ""
+
+        try:
+            root = sar_cloud.folder_ref(provider, root_in)
+        except sar_cloud.CloudError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+        try:
+            prov = sar_cloud.make_provider(provider, token)
+            items = prov.list_folder(root or _default_root(provider))
+        except sar_cloud.AuthExpired:
+            return jsonify({"ok": False,
+                            "error": "токен не принят хранилищем. Проверьте, "
+                                     "что он не истёк и выдан с правом чтения "
+                                     "файлов."}), 400
+        except sar_cloud.CloudError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+        # Ключи продления -- необязательны, но без них доступ к Google
+        # умрёт через час, и подготовка материала (около трёх часов на
+        # 150 файлов) не сможет завершиться в принципе.
+        from datetime import timedelta
+        try:
+            op_id = int(data.get("operation_id") or 0)
+        except (TypeError, ValueError):
+            op_id = 0
+
+        acc_id = sar_common.add_cloud_account(
+            conn, provider=provider, token=token,
+            label=label_in or None,
+            root_id=root or _default_root(provider),
+            root_name=(data.get("root_name") or "").strip() or None,
+            who=session.get("viewer_name"),
+            refresh_token=(data.get("refresh_token") or "").strip() or None,
+            client_id=(data.get("client_id") or "").strip() or None,
+            client_secret=(data.get("client_secret") or "").strip() or None,
+            # Точного срока нам не сообщили, а у Google он всегда час.
+            # Ставим его, чтобы продление включилось заранее, а не после
+            # первого отказа.
+            expires_at=(datetime.now() + timedelta(hours=1)).isoformat()
+            if provider == "google" else None)
+        if op_id:
+            sar_common.update_cloud_account(conn, acc_id, operation_id=op_id)
+        sar_common.update_cloud_account(
+            conn, acc_id, last_ok_at=datetime.now().isoformat())
+
+        # ПОДКЛЮЧЕНИЕ К КОРНЮ -- почти всегда ошибка. На боевом подключении
+        # пустое поле папки означало «взять весь Диск», и в платформу
+        # поисковой операции затянуло 288 личных фотографий. Молчать об
+        # этом нельзя: человек уходит уверенный, что подключил нужную папку.
+        # ПРЕДУПРЕЖДЕНИЙ МОЖЕТ БЫТЬ НЕСКОЛЬКО, и они независимы. Раньше
+        # каждое затирало предыдущее: человек, подключивший весь диск без
+        # операции и без продления, видел ровно одно из трёх -- и чинил
+        # одно, оставаясь с двумя.
+        warnings = []
+        if not root:
+            warnings.append(
+                "Папка не указана, поэтому взят ВЕСЬ диск целиком. Обычно "
+                "нужна одна папка с материалом операции: откройте её в "
+                "облаке и вставьте адрес из строки браузера.")
+        if not op_id:
+            warnings.append(
+                "Операция не выбрана, поэтому материал попадёт в «Не "
+                "разобрано», а не в операцию.")
+        if provider == "google" and not (data.get("client_id")
+                                          and data.get("refresh_token")):
+            warnings.append(
+                "Доступ к Google истечёт через час, и подготовка материала "
+                "остановится. Чтобы платформа продлевала его сама, нужны "
+                "ключи вашего приложения и refresh token.")
+        return jsonify({"ok": True, "id": acc_id, "found": len(items),
+                        "warnings": warnings,
+                        "accounts": sar_common.cloud_accounts_public(conn)})
+
+    # Операции отдаём вместе со списком: папку в облаке надо к чему-то
+    # привязать, а по её имени операцию не угадать.
+    ops = [{"id": o["id"], "title": o["title"]}
+           for o in sar_common.list_operations(conn)]
+    return jsonify({"ok": True,
+                    "providers": [{"name": p.name, "label": p.label}
+                                  for p in sar_cloud.PROVIDERS.values()],
+                    "operations": ops,
+                    "accounts": sar_common.cloud_accounts_public(conn)})
+
+
+def _default_root(provider):
+    """Корень хранилища, если человек не указал папку."""
+    return "disk:/" if provider == "yandex" else "root"
+
+
+@app.route("/api/admin/cloud/<int:account_id>", methods=["DELETE", "POST"])
+def api_admin_cloud_one(account_id):
+    if not is_admin():
+        return jsonify({"ok": False, "error": "нужны права администратора"}), 403
+    conn = get_db()
+
+    if request.method == "DELETE":
+        res = sar_common.delete_cloud_account(conn, account_id)
+        return jsonify({"ok": True, "cleanup": res,
+                        "accounts": sar_common.cloud_accounts_public(conn)})
+
+    data = request.get_json(force=True, silent=True) or {}
+    rows = [a for a in sar_common.cloud_accounts(conn, enabled_only=False)
+            if a["id"] == account_id]
+    provider = rows[0]["provider"] if rows else "google"
+    fields = {}
+    for key in ("label", "root_id", "root_name", "enabled", "operation_id"):
+        if key not in data:
+            continue
+        if key in ("enabled", "operation_id"):
+            fields[key] = int(data[key] or 0) if key == "operation_id"                 else int(bool(data[key]))
+        elif key == "root_id":
+            try:
+                fields[key] = sar_cloud.folder_ref(provider, data[key])
+            except sar_cloud.CloudError as e:
+                return jsonify({"ok": False, "error": str(e)}), 400
+        else:
+            fields[key] = data[key]
+    was_op = rows[0].get("operation_id") if rows else None
+    if fields:
+        sar_common.update_cloud_account(conn, account_id, **fields)
+
+    # СМЕНА ОПЕРАЦИИ ПЕРЕВОДИТ И УЖЕ НАЙДЕННЫЙ МАТЕРИАЛ. Иначе он остаётся
+    # в прежней операции, а в новой появляются только файлы, найденные
+    # после смены: одна папка оказывается разложена по двум операциям, и
+    # понять это по интерфейсу невозможно.
+    new_op = fields.get("operation_id")
+    if "operation_id" in fields and new_op != was_op:
+        ids = [r["report_id"] for r in conn.execute(
+            "SELECT report_id FROM reports WHERE cloud_account_id=?",
+            (account_id,)).fetchall()]
+        for rid in ids:
+            if was_op:
+                sar_common.detach_material(conn, was_op, rid)
+            if new_op:
+                sar_common.attach_material(conn, new_op, rid)
+
+    return jsonify({"ok": True,
+                    "accounts": sar_common.cloud_accounts_public(conn)})
+
+
+@app.route("/api/admin/cloud/<int:account_id>/browse")
+def api_admin_cloud_browse(account_id):
+    """Список папок хранилища -- чтобы выбрать, где лежит материал."""
+    if not is_admin():
+        return jsonify({"ok": False, "error": "нужны права администратора"}), 403
+    conn = get_db()
+    rows = [a for a in sar_common.cloud_accounts(conn, enabled_only=False)
+            if a["id"] == account_id]
+    if not rows:
+        return jsonify({"ok": False, "error": "подключение не найдено"}), 404
+    acc = rows[0]
+    folder = request.args.get("folder") or acc.get("root_id")         or _default_root(acc["provider"])
+    try:
+        prov = sar_common.provider_for_account(conn, acc)
+        items = prov.list_folder(folder)
+    except sar_cloud.CloudError as e:
+        # Причину записываем в подключение: иначе «почему не видно файлов»
+        # выясняется только чтением журнала воркера.
+        sar_common.update_cloud_account(conn, account_id, last_error=str(e))
+        return jsonify({"ok": False, "error": str(e)}), 400
+    sar_common.update_cloud_account(conn, account_id, last_error=None,
+                                     last_ok_at=datetime.now().isoformat())
+    return jsonify({
+        "ok": True, "folder": folder,
+        "items": [{"id": i.id, "name": i.name, "is_folder": i.is_folder,
+                   "size": i.size} for i in items],
+    })
+
+
+@app.route("/api/admin/settings", methods=["GET", "POST"])
+def api_admin_settings():
+    if not is_admin():
+        return jsonify({"ok": False, "error": "нужны права администратора"}), 403
+    conn = get_db()
+
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        who = session.get("viewer_name", "аноним")
+        for key, value in data.items():
+            if key in sar_common.SETTINGS_SCHEMA:
+                sar_common.set_setting(conn, key, value, who=who)
+            # Неизвестный ключ молча пропускаем: он может прийти от старой
+            # вкладки, открытой до обновления. Ронять сохранение остальных
+            # настроек из-за этого неправильно.
+
+    # Схема отдаётся вместе со значениями: форма строится из неё, и второй
+    # список полей во фронтенде заводить нельзя -- разойдётся с реестром.
+    schema = {}
+    rows = {r["key"]: r["set_by"] for r in
+            conn.execute("SELECT key, set_by FROM settings").fetchall()}
+    for key, spec in sar_common.SETTINGS_SCHEMA.items():
+        schema[key] = dict(spec)
+        schema[key]["set_by"] = rows.get(key)
+    return jsonify({"ok": True, "schema": schema,
+                    "values": sar_common.get_settings(conn)})
+
+
+# ---------------------------------------------------------------------------
+# ВЫГРУЗКА НАХОДОК КООРДИНАТОРУ
+#
+# Координатор на месте работает не в нашей платформе, а в своей карте или
+# навигаторе. Пока координаты живут только внутри системы, они бесполезны
+# ровно там, где нужны.
+#
+# ГЛАВНОЕ В ЭТОЙ ВЫГРУЗКЕ -- РАЗДЕЛЕНИЕ ДВУХ РАЗНЫХ ТОЧЕК:
+#
+#   * позиция ДРОНА в момент пометки -- то, что пишет телеметрия;
+#   * вероятная точка ОБЪЕКТА на земле -- расчёт по наклону подвеса,
+#     высоте и положению рамки в кадре (sar_common.estimate_ground_point).
+#
+# На реальном материале они расходятся на сотни метров: при высоте больше
+# километра и наклоне камеры к горизонту объект оказывается в 653 метрах от
+# точки под дроном. Подписать одно другим -- увести поиск в соседнее ущелье.
+# Поэтому в KML это РАЗНЫЕ ПАПКИ с разными значками, а в GPX -- разный тип
+# точки и пометка прямо в названии.
+# ---------------------------------------------------------------------------
+
+def _xml_escape(v):
+    return (str("" if v is None else v)
+            .replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _finding_export_point(f):
+    """Точка, которая попадёт в выгрузку, или None.
+
+    ЕДИНСТВЕННОЕ место, где решается "у этой находки есть координата".
+    Список находок показывает счётчик рядом с кнопками выгрузки, и если
+    считать его отдельным правилом, счётчик и файл разойдутся молча:
+    кнопка скажет "12", в файле окажется 15. Ровно так уже расходился
+    путь к папке резервных копий -- см. грабли в CLAUDE.md.
+
+    Возвращает (широта, долгота, посчитан_ли_объект).
+    """
+    est_lat, est_lon = f.get("est_lat"), f.get("est_lon")
+    if est_lat is not None and est_lon is not None:
+        return est_lat, est_lon, True
+    lat, lon = f.get("lat"), f.get("lon")
+    if lat is not None and lon is not None:
+        return lat, lon, False
+    return None
+
+
+def _findings_for_export(conn, op_id):
+    """Пометки операции, у которых есть хоть какие-то координаты."""
+    rows = conn.execute(
+        "SELECT o.id, o.label, o.note, o.timestamp_sec, o.viewer_name, "
+        "       o.lat, o.lon, o.est_lat, o.est_lon, o.est_distance_m, "
+        "       o.created_at, r.rel_path, p.priority "
+        "FROM manual_observations o "
+        "JOIN operation_materials m ON m.report_id = o.report_id "
+        "JOIN reports r ON r.report_id = o.report_id "
+        "LEFT JOIN detection_priorities p "
+        "  ON p.kind='manual' AND p.ref_key = CAST(o.id AS TEXT) "
+        "WHERE m.operation_id=? AND (o.lat IS NOT NULL OR o.est_lat IS NOT NULL) "
+        "ORDER BY o.id", (op_id,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        point = _finding_export_point(d)
+        if point is None:
+            # Половинчатая координата (одна из пары пустая) не годится ни
+            # для карты, ни для навигатора. Отбор в SQL этого не ловит:
+            # там проверяются РАЗНЫЕ пары полей. Пропускаем строку -- иначе
+            # выгрузка целиком падает из-за одной кривой.
+            continue
+        d["plat"], d["plon"], d["estimated"] = point
+        d["title"] = d["label"] or ("Находка №%d" % d["id"])
+        d["status"] = sar_common.PRIORITY_LABELS.get(d["priority"], "")
+        secs = d["timestamp_sec"]
+        d["tc"] = ("%02d:%02d" % (int(secs) // 60, int(secs) % 60)
+                   if secs is not None else "")
+        d["file"] = os.path.basename(d["rel_path"] or "")
+        d["link"] = finding_share_link(d["id"])
+        out.append(d)
+    return out
+
+
+def _finding_description(f):
+    bits = []
+    if f["estimated"]:
+        dist = (" (расчётная дальность %d м)" % int(f["est_distance_m"])
+                if f["est_distance_m"] is not None else "")
+        bits.append("ВЕРОЯТНАЯ ТОЧКА ОБЪЕКТА%s. Расчёт по телеметрии, "
+                    "а не измерение -- проверяйте на месте." % dist)
+        if f["lat"] is not None:
+            bits.append("Дрон в этот момент: %.6f, %.6f" % (f["lat"], f["lon"]))
+    else:
+        bits.append("ПОЗИЦИЯ ДРОНА, не объекта. Объект находится в стороне: "
+                    "расчёт точки на земле для этой пометки не выполнен.")
+    if f["note"]:
+        bits.append(f["note"])
+    if f["status"]:
+        bits.append("Статус проверки: %s" % f["status"])
+    if f["tc"]:
+        bits.append("Запись %s, таймкод %s" % (f["file"], f["tc"]))
+    if f["viewer_name"]:
+        bits.append("Отметил: %s" % f["viewer_name"])
+    if f["link"]:
+        bits.append(f["link"])
+    return "\n".join(bits)
+
+
+def _findings_kml(op_title, items):
+    est = [f for f in items if f["estimated"]]
+    drone = [f for f in items if not f["estimated"]]
+
+    def placemarks(rows, style):
+        out = []
+        for f in rows:
+            out.append(
+                "    <Placemark>\n"
+                "      <name>%s</name>\n"
+                "      <description>%s</description>\n"
+                "      <styleUrl>#%s</styleUrl>\n"
+                "      <Point><coordinates>%.6f,%.6f,0</coordinates></Point>\n"
+                "    </Placemark>" % (
+                    _xml_escape(f["title"]), _xml_escape(_finding_description(f)),
+                    style, f["plon"], f["plat"]))
+        return "\n".join(out)
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>\n'
+        "  <name>%s — находки</name>\n"
+        "  <description>Выгружено из платформы разбора аэровидеосъёмки. "
+        "Точки двух разных видов, см. папки.</description>\n"
+        '  <Style id="est"><IconStyle><color>ff2a2aff</color><scale>1.2</scale>'
+        '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/target.png</href>'
+        "</Icon></IconStyle></Style>\n"
+        '  <Style id="drone"><IconStyle><color>ff20a5da</color><scale>0.9</scale>'
+        '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href>'
+        "</Icon></IconStyle></Style>\n"
+        "  <Folder><name>Вероятные точки объектов (%d)</name>\n%s\n  </Folder>\n"
+        "  <Folder><name>Позиции дрона — объект в стороне (%d)</name>\n%s\n  </Folder>\n"
+        "</Document></kml>\n" % (
+            _xml_escape(op_title), len(est), placemarks(est, "est"),
+            len(drone), placemarks(drone, "drone")))
+
+
+def _findings_gpx(op_title, items):
+    pts = []
+    for f in items:
+        # В GPX нет папок, поэтому вид точки уходит в название и в <type>:
+        # на экране навигатора видно только имя.
+        name = f["title"] if f["estimated"] else f["title"] + " [дрон]"
+        pts.append(
+            '  <wpt lat="%.6f" lon="%.6f">\n'
+            "    <name>%s</name>\n"
+            "    <desc>%s</desc>\n"
+            "    <type>%s</type>\n"
+            "  </wpt>" % (
+                f["plat"], f["plon"], _xml_escape(name),
+                _xml_escape(_finding_description(f)),
+                "объект" if f["estimated"] else "позиция дрона"))
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<gpx version="1.1" creator="SAR Review" '
+        'xmlns="http://www.topografix.com/GPX/1/1">\n'
+        "  <metadata><name>%s — находки</name></metadata>\n%s\n</gpx>\n"
+        % (_xml_escape(op_title), "\n".join(pts)))
+
+
+# Разрыв, после которого просмотр считается НОВЫМ.
+#
+# «Количество просмотров» по отрезкам бессмысленно: один человек за один
+# заход даёт их сотни (на боевых данных 2467 отрезков от одного человека).
+# Считать надо заходы: подряд идущие отрезки одного человека по одному
+# материалу с паузой меньше этой -- один просмотр.
+SESSION_GAP_SEC = 30 * 60
+
+ALIAS_LETTERS = "АБВГДЕЖЗИКЛМНПРСТУФХЦЧШЩЭЮЯ"
+
+
+def _alias_for(i):
+    """волонтёр А, Б, ... АА, АБ -- если людей больше, чем букв."""
+    if i < len(ALIAS_LETTERS):
+        return "волонтёр " + ALIAS_LETTERS[i]
+    a, b = divmod(i - len(ALIAS_LETTERS), len(ALIAS_LETTERS))
+    return "волонтёр " + ALIAS_LETTERS[a] + ALIAS_LETTERS[b]
+
+
+def _report_aliases(conn, op_id):
+    """Устойчивое обезличивание: один человек -- один псевдоним ВЕЗДЕ.
+
+    Псевдонимы раздаются по убыванию вклада, поэтому «волонтёр А» -- это
+    всегда тот, кто сделал больше всех. Структурный вывод («двое сделали
+    больше половины») сохраняется, а имена нет.
+
+    Собирается ОДИН словарь на весь отчёт и применяется при сборке данных,
+    а не при отрисовке. Фильтр, который надо не забыть применить в каждом
+    месте, однажды забудут -- тот же урок, что с токенами облачных
+    подключений (`cloud_accounts_public`).
+    """
+    rows = conn.execute(
+        "SELECT s.viewer_name AS who, SUM(s.end_sec - s.start_sec) AS secs "
+        "FROM watch_segments s "
+        "JOIN operation_materials m ON m.report_id = s.report_id "
+        "WHERE m.operation_id=? GROUP BY s.viewer_name "
+        "ORDER BY secs DESC", (op_id,)).fetchall()
+    order = [r["who"] for r in rows]
+    # Люди, которые ничего не смотрели, но ставили пометки или писали
+    # комментарии, тоже должны получить псевдоним -- иначе их имя останется
+    # в списке находок открытым текстом.
+    for extra in conn.execute(
+            "SELECT DISTINCT o.viewer_name AS who FROM manual_observations o "
+            "JOIN operation_materials m ON m.report_id = o.report_id "
+            "WHERE m.operation_id=?", (op_id,)):
+        if extra["who"] not in order:
+            order.append(extra["who"])
+    for extra in conn.execute(
+            "SELECT DISTINCT viewer_name AS who FROM map_marks "
+            "WHERE operation_id=?", (op_id,)):
+        if extra["who"] not in order:
+            order.append(extra["who"])
+    return {name: _alias_for(i) for i, name in enumerate(order) if name}
+
+
+def _period_bounds(args):
+    """Границы периода из запроса. Пустые -- вся операция.
+
+    `to` включает весь указанный день: человек, выбравший «по 15 августа»,
+    имеет в виду 15-е целиком, а не полночь на его начало. Сравнение идёт
+    со строкой ISO, поэтому достаточно прибавить сутки и сравнивать строго.
+    """
+    frm = (args.get("from") or "").strip()[:10] or None
+    to = (args.get("to") or "").strip()[:10] or None
+    to_excl = None
+    if to:
+        try:
+            d = datetime.strptime(to, "%Y-%m-%d") + timedelta(days=1)
+            to_excl = d.strftime("%Y-%m-%d")
+        except ValueError:
+            to = None
+    return frm, to, to_excl
+
+
+def _period_sql(column, frm, to_excl):
+    """Кусок WHERE и параметры для отбора по периоду."""
+    sql, params = "", []
+    if frm:
+        sql += " AND %s >= ?" % column
+        params.append(frm)
+    if to_excl:
+        sql += " AND %s < ?" % column
+        params.append(to_excl)
+    return sql, params
+
+
+def _sessions(times):
+    """Сколько РАЗ смотрели, а не сколько отрезков записано."""
+    if not times:
+        return 0
+    times = sorted(times)
+    n, prev = 1, times[0]
+    for t in times[1:]:
+        if (t - prev).total_seconds() > SESSION_GAP_SEC:
+            n += 1
+        prev = t
+    return n
+
+
+def _parse_ts(value):
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _material_coverage(conn, op_id, frm, to_excl):
+    """Покрытие по каждому материалу за период.
+
+    Считается ПО ОТРЕЗКАМ, попавшим в период: «отчёт за 15 августа» --
+    это работа, сделанная 15-го, а не материал, снятый 15-го. Материал,
+    отснятый раньше, но разобранный в этот день, в отчёт попадает.
+    """
+    where, params = _period_sql("s.ts", frm, to_excl)
+    rows = conn.execute(
+        "SELECT s.report_id, s.viewer_name, s.start_sec, s.end_sec, s.ts "
+        "FROM watch_segments s "
+        "JOIN operation_materials m ON m.report_id = s.report_id "
+        "WHERE m.operation_id=?" + where, [op_id] + params).fetchall()
+
+    per = {}
+    for r in rows:
+        d = per.setdefault(r["report_id"],
+                           {"intervals": [], "viewers": {}, "times": []})
+        d["intervals"].append((r["start_sec"] or 0, r["end_sec"] or 0))
+        t = _parse_ts(r["ts"])
+        if t:
+            d["viewers"].setdefault(r["viewer_name"], []).append(t)
+            d["times"].append(t)
+    return per
+
+
+def _findings_per_material(conn, op_id, frm, to_excl):
+    where, params = _period_sql("o.created_at", frm, to_excl)
+    rows = conn.execute(
+        "SELECT o.report_id, COUNT(*) n FROM manual_observations o "
+        "JOIN operation_materials m ON m.report_id = o.report_id "
+        "WHERE m.operation_id=?" + where + " GROUP BY o.report_id",
+        [op_id] + params).fetchall()
+    return {r["report_id"]: r["n"] for r in rows}
+
+
+@app.route("/api/operations/<int:op_id>/report")
+def api_operation_report(op_id):
+    """Отчёт по операции: объём, покрытие, находки, люди, оговорки.
+
+    ПЕРИОД ФИЛЬТРУЕТ РАБОТУ, а не дату съёмки. «Отчёт за 15 августа» --
+    это что сделали 15-го: какие отрезки посмотрели, какие пометки
+    поставили. Материал, снятый раньше, но разобранный в этот день,
+    попадает; снятый в этот день, но никем не открытый, -- виден в
+    таблице с нулевым покрытием.
+
+    `anon=1` обезличивает: один человек -- один псевдоним ВЕЗДЕ, включая
+    список находок. Псевдонимы по убыванию вклада, поэтому структурный
+    вывод («двое сделали больше половины») сохраняется, а имена нет.
+    """
+    conn = get_db()
+    op = conn.execute(
+        "SELECT id, title, area FROM operations WHERE id=?", (op_id,)).fetchone()
+    if op is None:
+        return jsonify({"error": "операция не найдена"}), 404
+
+    frm, to, to_excl = _period_bounds(request.args)
+    anon = request.args.get("anon") in ("1", "true", "yes")
+    alias = _report_aliases(conn, op_id) if anon else {}
+    who = lambda name: alias.get(name, name) if anon else name
+
+    mats = conn.execute(
+        "SELECT r.report_id, r.rel_path, r.kind, r.duration_sec, r.status "
+        "FROM reports r JOIN operation_materials m ON m.report_id = r.report_id "
+        "WHERE m.operation_id=? ORDER BY r.rel_path", (op_id,)).fetchall()
+    cov = _material_coverage(conn, op_id, frm, to_excl)
+    finds = _findings_per_material(conn, op_id, frm, to_excl)
+
+    video, photo = [], []
+    for r in mats:
+        c = cov.get(r["report_id"])
+        dur = r["duration_sec"] or 0
+        watched = 0.0
+        if c:
+            watched = sum(e - s for s, e in merge_intervals(c["intervals"]))
+        # Заходы считаются ПО КАЖДОМУ ЧЕЛОВЕКУ отдельно и складываются.
+        # По общей ленте времени двое, смотревшие одновременно, слипались
+        # в один просмотр -- и выходило «просмотров 6, людей 8».
+        views = (sum(_sessions(t) for t in c["viewers"].values()) if c else 0)
+        row = {
+            "report_id": r["report_id"],
+            "name": os.path.basename(r["rel_path"] or ""),
+            "folder": os.path.dirname(r["rel_path"] or ""),
+            "views": views,
+            "viewers": len(c["viewers"]) if c else 0,
+            "findings": finds.get(r["report_id"], 0),
+        }
+        if r["kind"] == "video":
+            row["duration_sec"] = dur
+            # Без известной длительности процент посчитать не из чего, и
+            # показывать ноль нельзя -- это читается как «не смотрели».
+            row["coverage_pct"] = (round(min(100.0, watched / dur * 100), 1)
+                                   if dur > 0 else None)
+            row["watched_sec"] = round(watched, 1)
+            video.append(row)
+        else:
+            photo.append(row)
+
+    people = []
+    agg = {}
+    for c in cov.values():
+        for name, times in c["viewers"].items():
+            a = agg.setdefault(name, {"times": [], "materials": 0})
+            a["times"] += times
+            a["materials"] += 1
+    seg_where, seg_params = _period_sql("s.ts", frm, to_excl)
+    secs = {r["who"]: r["secs"] for r in conn.execute(
+        "SELECT s.viewer_name AS who, SUM(s.end_sec - s.start_sec) AS secs "
+        "FROM watch_segments s "
+        "JOIN operation_materials m ON m.report_id = s.report_id "
+        "WHERE m.operation_id=?" + seg_where + " GROUP BY s.viewer_name",
+        [op_id] + seg_params)}
+    mark_where, mark_params = _period_sql("o.created_at", frm, to_excl)
+    marks_by = {r["who"]: r["n"] for r in conn.execute(
+        "SELECT o.viewer_name AS who, COUNT(*) n FROM manual_observations o "
+        "JOIN operation_materials m ON m.report_id = o.report_id "
+        "WHERE m.operation_id=?" + mark_where + " GROUP BY o.viewer_name",
+        [op_id] + mark_params)}
+    for name, a in agg.items():
+        people.append({
+            "name": who(name),
+            "seconds": round(secs.get(name, 0) or 0, 1),
+            "materials": a["materials"],
+            "marks": marks_by.get(name, 0),
+        })
+    for name, n in marks_by.items():
+        if name not in agg:
+            people.append({"name": who(name), "seconds": 0,
+                           "materials": 0, "marks": n})
+    people.sort(key=lambda p: (-p["seconds"], -p["marks"], p["name"]))
+
+    findings = _findings_for_export(conn, op_id)
+    by_status = {}
+    fw, fp = _period_sql("o.created_at", frm, to_excl)
+    total_marks = conn.execute(
+        "SELECT COUNT(*) FROM manual_observations o "
+        "JOIN operation_materials m ON m.report_id = o.report_id "
+        "WHERE m.operation_id=?" + fw, [op_id] + fp).fetchone()[0]
+    for r in conn.execute(
+            "SELECT p.priority, COUNT(*) n FROM detection_priorities p "
+            "GROUP BY p.priority"):
+        by_status[sar_common.PRIORITY_LABELS.get(r["priority"], r["priority"])] = r["n"]
+
+    tracks = conn.execute(
+        "SELECT COUNT(*) FROM telemetry_tracks t "
+        "JOIN operation_materials m ON m.report_id = t.report_id "
+        "WHERE m.operation_id=? AND t.points <> '[]'", (op_id,)).fetchone()[0]
+
+    watched_videos = sum(1 for v in video if v["views"] > 0)
+    footage = sum(v["duration_sec"] or 0 for v in video)
+    watched_total = sum(v["watched_sec"] for v in video)
+
+    return jsonify({
+        "operation": {"id": op["id"], "title": op["title"], "area": op["area"]},
+        "period": {"from": frm, "to": to, "full": not (frm or to)},
+        "anonymized": anon,
+        "volume": {
+            "materials": len(mats),
+            "videos": len(video),
+            "photos": len(photo),
+            "footage_sec": round(footage, 1),
+            "footage_known": sum(1 for v in video if v["duration_sec"]),
+            "viewer_sec": round(sum(p["seconds"] for p in people), 1),
+        },
+        "coverage": {
+            "videos_touched": watched_videos,
+            "videos_untouched": len(video) - watched_videos,
+            "watched_sec": round(watched_total, 1),
+            # ПРОСМОТР ФОТОГРАФИЙ ПЛАТФОРМА НЕ ОТСЛЕЖИВАЕТ.
+            #
+            # Отрезки просмотра пишет только плеер (по timeupdate) и пинг
+            # при открытии сцены. У снимка ни того, ни другого нет, и на
+            # боевых данных это ноль отрезков на 92 фото.
+            #
+            # Показать «просмотрено 0 из 92» было бы ложью: это не «никто
+            # не смотрел», а «мы не измеряем». Отдаём признак, а не число,
+            # чтобы страница написала об этом словами.
+            "photos_tracked": bool(sum(p["views"] for p in photo)),
+            "photos_total": len(photo),
+        },
+        "second_pass": _second_pass_histogram(video + photo),
+        "findings": {
+            "total": total_marks,
+            "by_status": by_status,
+            "with_object_point": sum(1 for f in findings if f["estimated"]),
+            "drone_only": sum(1 for f in findings if not f["estimated"]),
+            "without_coords": total_marks - len(findings),
+        },
+        "geography": {"tracks": tracks, "videos": len(video)},
+        "people": people,
+        "materials": {"video": video, "photo": photo},
+    })
+
+
+def _second_pass_histogram(rows):
+    """Сколько материалов видели один человек, двое, трое...
+
+    Учёт второго прохода -- третий пункт в приоритетах платформы: важно не
+    «сколько посмотрели», а «сколько посмотрели ДВАЖДЫ».
+    """
+    hist = {}
+    for r in rows:
+        hist[r["viewers"]] = hist.get(r["viewers"], 0) + 1
+    return [{"viewers": k, "materials": hist[k]} for k in sorted(hist)]
+
+
+@app.route("/api/operations/<int:op_id>/findings-map")
+def api_findings_map(op_id):
+    """Точки для карты внутри платформы.
+
+    Берёт ТУ ЖЕ сборку, что и выгрузка в KML/GPX (_findings_for_export):
+    разделение «вероятная точка объекта» и «позиция дрона» посчитано там
+    один раз, и считать его второй раз здесь значило бы завести два
+    расходящихся ответа на один вопрос.
+
+    Отдаёт и то, сколько находок на карту НЕ ПОПАЛО. Карта, молча
+    скрывающая половину пометок, хуже отсутствия карты: по ней делают
+    вывод, что искать больше негде.
+    """
+    conn = get_db()
+    op = conn.execute("SELECT id, title FROM operations WHERE id=?",
+                      (op_id,)).fetchone()
+    if op is None:
+        return jsonify({"error": "операция не найдена"}), 404
+
+    items = _findings_for_export(conn, op_id)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM manual_observations o "
+        "JOIN operation_materials m ON m.report_id = o.report_id "
+        "WHERE m.operation_id=?", (op_id,)).fetchone()[0]
+
+    points = [{
+        "id": f["id"],
+        "lat": f["plat"],
+        "lon": f["plon"],
+        "estimated": bool(f["estimated"]),
+        "title": f["title"],
+        "status": f["status"],
+        "note": f["note"] or "",
+        "file": f["file"],
+        "tc": f["tc"],
+        "viewer": f["viewer_name"] or "",
+        # Пара «где был дрон» для тех точек, где посчитана точка объекта:
+        # линия между ними показывает разнос нагляднее любой подписи. На
+        # материале этой операции он доходит до 653 метров.
+        "drone": ({"lat": f["lat"], "lon": f["lon"]}
+                  if f["estimated"] and f["lat"] is not None else None),
+        "distance_m": f["est_distance_m"],
+    } for f in items]
+
+    marks = [dict(m) for m in conn.execute(
+        "SELECT id, lat, lon, label, note, viewer_name, created_at "
+        "FROM map_marks WHERE operation_id=? ORDER BY id", (op_id,)).fetchall()]
+
+    return jsonify({
+        "operation": op["title"],
+        "points": points,
+        "marks": marks,
+        "total": total,
+        "without_coords": total - len(points),
+        "estimated": sum(1 for p in points if p["estimated"]),
+        "drone_only": sum(1 for p in points if not p["estimated"]),
+    })
+
+
+@app.route("/api/operations/<int:op_id>/tracks")
+def api_operation_tracks(op_id):
+    """Треки дрона по видео операции -- то, что реально облетели.
+
+    Это географическая версия покрытия: по находкам видно, где смотрели
+    внимательно, а по трекам -- куда вообще летали. Пустое место на карте
+    при полном списке материалов значит «туда не летали», и увидеть это
+    можно только так.
+
+    ТОЛЬКО ЧИТАЕТ. Разбор SRT делает воркер (ensure_telemetry_tracks) и
+    складывает готовый трек в telemetry_tracks. Раньше это считалось
+    здесь, по запросу: 114 файлов на каждый холодный запрос (2,9 с), кеш
+    в памяти процесса, умирающий при перезапуске, и обработка в слое,
+    который по устройству проекта обрабатывать не должен.
+
+    «Ещё не разобрано» и «разобрано, телеметрии нет» -- разные вещи, и
+    считаются раздельно: первое пройдёт само, второе не изменится никогда.
+    """
+    conn = get_db()
+    if conn.execute("SELECT 1 FROM operations WHERE id=?", (op_id,)).fetchone() is None:
+        return jsonify({"error": "операция не найдена"}), 404
+
+    rows = conn.execute(
+        "SELECT r.report_id, r.rel_path, t.points, t.raw_points, t.last_sec "
+        "FROM reports r "
+        "JOIN operation_materials m ON m.report_id = r.report_id "
+        "LEFT JOIN telemetry_tracks t ON t.report_id = r.report_id "
+        "WHERE m.operation_id=? AND r.kind='video' ORDER BY r.rel_path",
+        (op_id,)).fetchall()
+
+    tracks, without, pending = [], 0, 0
+    for row in rows:
+        if row["points"] is None:
+            pending += 1
+            continue
+        try:
+            pts = json.loads(row["points"])
+        except (TypeError, ValueError):
+            pts = []
+        if len(pts) < 2:
+            without += 1
+            continue
+        tracks.append({
+            "report_id": row["report_id"],
+            "name": os.path.basename(row["rel_path"] or ""),
+            "points": pts,
+            "raw_points": row["raw_points"],
+            "seconds": row["last_sec"],
+        })
+
+    return jsonify({
+        "tracks": tracks,
+        "videos": len(rows),
+        "without_telemetry": without,
+        "pending": pending,
+    })
+
+
+@app.route("/api/operations/<int:op_id>/map-marks", methods=["POST"])
+def api_map_mark_add(op_id):
+    """Точка, поставленная человеком прямо на карте.
+
+    Координаты приходят от клика, а не из телеметрии -- поэтому это
+    ЗНАНИЕ ЧЕЛОВЕКА, а не оценка платформы, и на карте она показывается
+    третьим, отдельным значком. Смешать её с «вероятной точкой объекта»
+    значило бы выдать чужое наблюдение за расчёт по телеметрии.
+    """
+    d = request.get_json(silent=True) or {}
+    try:
+        lat, lon = float(d.get("lat")), float(d.get("lon"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "нужны координаты"}), 400
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return jsonify({"error": "координаты вне допустимого диапазона"}), 400
+
+    conn = get_db()
+    if conn.execute("SELECT 1 FROM operations WHERE id=?", (op_id,)).fetchone() is None:
+        return jsonify({"error": "операция не найдена"}), 404
+    cur = conn.execute(
+        "INSERT INTO map_marks (operation_id, lat, lon, label, note, "
+        "viewer_name, created_at) VALUES (?,?,?,?,?,?,datetime('now'))",
+        (op_id, lat, lon, (d.get("label") or "").strip()[:120] or None,
+         (d.get("note") or "").strip()[:2000] or None,
+         session.get("viewer_name") or "—"))
+    conn.commit()
+    return jsonify({"ok": True, "id": cur.lastrowid})
+
+
+@app.route("/api/operations/<int:op_id>/map-marks/<int:mark_id>",
+           methods=["DELETE"])
+def api_map_mark_delete(op_id, mark_id):
+    """Убрать свою точку.
+
+    Чужие точки может убирать только модератор: поставленная координатором
+    отметка «сюда идёт группа» -- это указание, и стирать его посторонний
+    не должен.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT viewer_name FROM map_marks WHERE id=? AND operation_id=?",
+        (mark_id, op_id)).fetchone()
+    if row is None:
+        return jsonify({"error": "точка не найдена"}), 404
+    if row["viewer_name"] != (session.get("viewer_name") or "—") \
+            and not is_moderator():
+        return jsonify({"error": "чужую точку может убрать только модератор"}), 403
+    conn.execute("DELETE FROM map_marks WHERE id=?", (mark_id,))
+    conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/operations/<int:op_id>/findings.<fmt>")
+def api_findings_export(op_id, fmt):
+    """Находки операции для карты или навигатора координатора."""
+    if fmt not in ("kml", "gpx"):
+        return "Неизвестный формат", 404
+    conn = get_db()
+    op = conn.execute("SELECT title FROM operations WHERE id=?", (op_id,)).fetchone()
+    if op is None:
+        return "Операция не найдена", 404
+    items = _findings_for_export(conn, op_id)
+    body = (_findings_kml(op["title"], items) if fmt == "kml"
+            else _findings_gpx(op["title"], items))
+    safe = re.sub(r"[^\w\-. ]+", "_", op["title"] or "operation").strip() or "operation"
+    resp = make_response(body)
+    resp.headers["Content-Type"] = (
+        "application/vnd.google-earth.kml+xml; charset=utf-8" if fmt == "kml"
+        else "application/gpx+xml; charset=utf-8")
+    resp.headers["Content-Disposition"] = (
+        "attachment; filename*=UTF-8''%s"
+        % urllib.parse.quote("%s — находки.%s" % (safe, fmt)))
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# СТРАНИЦА КАДРА НАХОДКИ
+#
+# Окно предпросмотра хорошо для беглого взгляда, но у него потолок: оно
+# маленькое, живёт по наведению курсора и исчезает, стоит его увести. Когда
+# находку надо РАЗГЛЯДЫВАТЬ -- нужен отдельный экран, который не закроется
+# сам, который можно открыть в новой вкладке и на который можно дать ссылку
+# другому человеку.
+#
+# Рамка здесь рисуется поверх кадра в SVG и выключается галочкой. Это не
+# украшение: обводка притягивает взгляд, и посмотреть на участок "своими
+# глазами", без подсказки, иначе невозможно.
+# ---------------------------------------------------------------------------
+
+def html_escape(value):
+    """Экранирование текста для вставки в HTML-шаблон.
+
+    В sar_server.py такой функции не было: страницы собираются через
+    .format(), а подписи находок пишут люди -- кавычка или угловая скобка
+    в подписи ломала бы разметку страницы.
+    """
+    return (str("" if value is None else value)
+            .replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+_EXTERNAL_BASE_CACHE = {"url": None, "bot": "", "at": 0.0}
+_EXTERNAL_BASE_TTL = 30.0
+
+
+@app.route("/api/external_base")
+def api_external_base():
+    """Внешний адрес платформы для постоянных ссылок.
+
+    Отдельным запросом, а не в шаблоне страницы: адрес быстрого туннеля
+    меняется при каждом падении канала, и страница, открытая до падения,
+    копировала бы мёртвые ссылки до перезагрузки.
+    """
+    return jsonify({"base": external_base(), "bot": bot_username()})
+
+
+def external_base():
+    """Внешний адрес платформы для постоянных ссылок, либо "".
+
+    Живёт в telegram_bot.service_url -- туда его пишет sar_tunnel.py при
+    каждом подъёме туннеля. Читаем файл заново (с коротким кэшем), а не
+    один раз при старте: быстрый туннель меняет адрес при каждом падении,
+    а сервер при этом не перезапускается. Прочитанное на старте значение
+    протухало бы, и кнопка "копировать ссылку" выдавала бы мёртвый адрес --
+    ровно то, ради чего эта кнопка и делалась.
+    """
+    now = time.time()
+    if _EXTERNAL_BASE_CACHE["url"] is not None and \
+            now - _EXTERNAL_BASE_CACHE["at"] < _EXTERNAL_BASE_TTL:
+        return _EXTERNAL_BASE_CACHE["url"]
+    url, bot = "", ""
+    try:
+        with open(os.path.join(SCRIPT_DIR, "sar_config.json"), encoding="utf-8") as f:
+            tb = json.load(f).get("telegram_bot") or {}
+        url = (tb.get("service_url") or "").strip()
+        bot = (tb.get("bot_username") or "").strip().lstrip("@")
+    except Exception:                                   # noqa: BLE001
+        # Конфига нет или он битый -- ссылка просто будет относительной.
+        # Ронять из-за этого страницу находки нельзя.
+        url, bot = "", ""
+    url = url.rstrip("/")
+    _EXTERNAL_BASE_CACHE.update({"url": url, "bot": bot, "at": now})
+    return url
+
+
+def bot_username():
+    """Имя бота для вечных ссылок. Заполняет сам бот при старте."""
+    external_base()          # заодно обновит кэш, если он протух
+    return _EXTERNAL_BASE_CACHE.get("bot") or ""
+
+
+def finding_share_link(obs_id):
+    """ВЕЧНАЯ ссылка на находку.
+
+    Прямой адрес платформы живёт только до следующего перезапуска туннеля:
+    имя быстрого туннеля случайное, старое исчезает из DNS, и перенаправить
+    с него невозможно -- домена больше нет, запрос до нас не доходит.
+
+    Адрес t.me не меняется никогда. Поэтому делимся ссылкой на бота: он
+    знает текущий адрес платформы (его туда пишет sar_tunnel.py) и выдаст
+    рабочую персональную ссылку прямо на эту находку.
+
+    Если имени бота ещё нет -- отдаём прямую ссылку: она хотя бы работает
+    сейчас, и это лучше, чем ничего.
+    """
+    bot = bot_username()
+    if bot:
+        return f"https://t.me/{bot}?start=finding_{int(obs_id)}"
+    base = external_base()
+    return f"{base}/finding/{int(obs_id)}/" if base else ""
+
+
+FINDING_FRAME_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Находка — {short}</title>
+<style>
+body {{ font-family:-apple-system,Arial,sans-serif; background:#111; color:#eee;
+        margin:0; padding:18px; }}
+a {{ color:#8ecbff; }}
+.crumbs {{ font-size:13px; color:#888; margin:0 0 10px; }}
+.crumbs a {{ color:#6bb; text-decoration:none; }}
+.crumbs a:hover {{ text-decoration:underline; }}
+h1 {{ font-size:17px; margin:6px 0 4px; }}
+.meta {{ font-size:13px; color:#9aa4ad; margin:0 0 12px; }}
+.meta b {{ color:#d7dee3; font-weight:600; }}
+.bar {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:0 0 12px;
+        font-size:13px; }}
+.btn {{ display:inline-flex; align-items:center; gap:7px; border:1px solid #3a4650;
+        background:#1b2229; color:#dfe7ec; border-radius:7px; padding:7px 12px;
+        cursor:pointer; font-size:13px; text-decoration:none; }}
+.btn:hover {{ background:#242e37; }}
+.btn.main {{ border-color:#2b6b74; background:#12363b; color:#c9f0f5; }}
+.btn.main:hover {{ background:#17454b; }}
+.chk {{ display:inline-flex; align-items:center; gap:6px; color:#c2cbd2;
+        user-select:none; cursor:pointer; }}
+.view {{ position:relative; width:100%; height:74vh; max-height:78vh; overflow:hidden; background:#000;
+         border:1px solid #2a333b; border-radius:8px; touch-action:none;
+         cursor:zoom-in; }}
+.zoom {{ position:absolute; top:0; left:0; transform-origin:0 0; will-change:transform; }}
+.zoom img {{ display:block; width:100%; user-select:none; -webkit-user-drag:none; }}
+.box {{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none;
+        overflow:visible; }}
+.box rect {{ fill:none; stroke:#ffd24a; stroke-width:1.5;
+             vector-effect:non-scaling-stroke; }}
+.box rect.under {{ stroke:rgba(0,0,0,.75); stroke-width:3; }}
+.hint {{ font-size:12px; color:#78838c; margin:9px 0 0; }}
+.cols {{ display:grid; grid-template-columns:1fr 330px; gap:18px; align-items:start; }}
+@media (max-width:900px) {{ .cols {{ grid-template-columns:1fr; }} }}
+.side {{ display:flex; flex-direction:column; gap:16px; }}
+.fld label {{ display:block; font-size:11px; letter-spacing:.08em;
+              text-transform:uppercase; color:#78838c; margin:0 0 6px; }}
+.fld select {{ width:100%; background:#1b2229; color:#dfe7ec; font-size:13px;
+               border:1px solid #3a4650; border-radius:7px; padding:7px 9px; }}
+.by {{ font-size:11.5px; color:#78838c; margin-top:5px; }}
+.note {{ background:#161d23; border:1px solid #26313a; border-radius:8px;
+         padding:10px 13px; font-size:13.5px; color:#d3dbe1;
+         white-space:pre-wrap; word-wrap:break-word; }}
+.gps {{ font-size:12.5px; color:#9aa4ad; line-height:1.7; }}
+.gps b {{ color:#d7dee3; font-weight:600; }}
+.gps a {{ color:#8ecbff; }}
+.gps .est {{ color:#c9f0f5; }}
+.cmts {{ display:flex; flex-direction:column; gap:9px; margin-bottom:9px; }}
+.cmt {{ background:#161d23; border:1px solid #26313a; border-radius:8px;
+        padding:8px 11px; }}
+.cmt-head {{ display:flex; gap:8px; align-items:baseline; font-size:11.5px;
+             color:#78838c; margin-bottom:4px; }}
+.cmt-author {{ color:#a9d6e5; font-weight:600; }}
+.cmt-del {{ margin-left:auto; background:none; border:none; color:#6b757e;
+            cursor:pointer; font-size:14px; line-height:1; }}
+.cmt-del:hover {{ color:#e0785f; }}
+.cmt-text {{ font-size:13.5px; color:#dfe7ec; white-space:pre-wrap;
+             word-wrap:break-word; }}
+.cmt-empty {{ font-size:12.5px; color:#6b757e; }}
+.cmt-form textarea {{ width:100%; background:#161d23; color:#dfe7ec;
+  border:1px solid #3a4650; border-radius:7px; padding:8px 10px;
+  font:13px/1.45 inherit; resize:vertical; }}
+.cmt-actions {{ display:flex; align-items:center; gap:9px; margin-top:6px; }}
+.cmt-actions button {{ border:1px solid #2b6b74; background:#12363b;
+  color:#c9f0f5; border-radius:7px; padding:6px 13px; font-size:13px;
+  cursor:pointer; }}
+.cmt-actions button:disabled {{ opacity:.45; cursor:default; }}
+.cmt-hint {{ font-size:11.5px; color:#6b757e; }}
+.cmt-locked {{ font-size:12.5px; color:#a68a5b; }}
+.toast {{ position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+          background:#12363b; border:1px solid #2b6b74; color:#c9f0f5;
+          padding:9px 16px; border-radius:8px; font-size:13px; opacity:0;
+          pointer-events:none; transition:opacity .18s; }}
+.toast.on {{ opacity:1; }}
+</style></head>
+<body>
+<p class="crumbs">{crumbs}</p>
+<h1>{label}</h1>
+<p class="meta">{meta}</p>
+
+<div class="bar">
+  {player_btn}
+  <button class="btn" onclick="copyLink()">🔗 Копировать ссылку</button>
+  <label class="chk"><input type="checkbox" id="showbox" checked> показывать рамку</label>
+</div>
+
+<div class="cols">
+  <div class="left">
+    <div class="view" id="view">
+      <div class="zoom" id="zoom">
+        <img id="shot" src="{img_src}" alt="Кадр находки">
+        <svg class="box" id="box" viewBox="0 0 1 1" preserveAspectRatio="none">
+          <rect class="under"></rect><rect></rect>
+        </svg>
+      </div>
+    </div>
+    <p class="hint">Клик — приблизить, Shift+клик — отдалить, колесо — масштаб,
+    перетаскивание — сдвиг кадра. Кадр показан целиком, без обрезки.</p>
+  </div>
+
+  <aside class="side">
+    {note_block}
+    <div class="fld">
+      <label for="prio">Статус проверки</label>
+      <select id="prio" onchange="setPriority(this.value)"></select>
+      <div class="by" id="prio-by"></div>
+    </div>
+    {coords_block}
+    <div class="fld">
+      <label>Обсуждение <span id="cmt-count"></span></label>
+      <div id="cmts" class="cmts"></div>
+      {comment_form}
+    </div>
+  </aside>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const BBOX = {bbox_json};
+const PERMALINK = {permalink_json};
+const REPORT_ID = {report_id_json};
+const OBS_ID = {obs_id};
+const VIEWER_NAME = {viewer_name_json};
+const IS_MODERATOR = {is_moderator_json};
+const CAN_COMMENT = {can_comment_json};
+const PRIORITY_LABELS = {priority_labels_json};
+const view = document.getElementById('view');
+const zoom = document.getElementById('zoom');
+const box = document.getElementById('box');
+let scale = 1, ox = 0, oy = 0, drag = null, press = null, pinch = 0;
+
+if (BBOX && BBOX.length === 4) {{
+  const x1 = Math.min(BBOX[0], BBOX[2]), x2 = Math.max(BBOX[0], BBOX[2]);
+  const y1 = Math.min(BBOX[1], BBOX[3]), y2 = Math.max(BBOX[1], BBOX[3]);
+  box.querySelectorAll('rect').forEach(r => {{
+    r.setAttribute('x', x1); r.setAttribute('y', y1);
+    r.setAttribute('width', Math.max(0, x2 - x1));
+    r.setAttribute('height', Math.max(0, y2 - y1));
+  }});
+}} else {{
+  box.style.display = 'none';
+  document.getElementById('showbox').disabled = true;
+}}
+
+document.getElementById('showbox').addEventListener('change', e => {{
+  box.style.display = e.target.checked ? '' : 'none';
+}});
+
+function apply() {{
+  const w = view.clientWidth, h = view.clientHeight;
+  ox = Math.min(0, Math.max(ox, w - w * scale));
+  oy = Math.min(0, Math.max(oy, h - h * scale));
+  zoom.style.transform = `translate(${{ox}}px, ${{oy}}px) scale(${{scale}})`;
+  view.style.cursor = scale > 1 ? (drag ? 'grabbing' : 'grab') : 'zoom-in';
+}}
+
+function zoomAt(factor, at) {{
+  const before = scale;
+  scale = Math.min(12, Math.max(1, scale * factor));
+  if (scale === before) return;
+  const r = view.getBoundingClientRect();
+  const cx = (at.clientX - r.left - ox) / before;
+  const cy = (at.clientY - r.top - oy) / before;
+  ox = at.clientX - r.left - cx * scale;
+  oy = at.clientY - r.top - cy * scale;
+  apply();
+}}
+
+view.addEventListener('wheel', e => {{
+  e.preventDefault();
+  zoomAt(e.deltaY < 0 ? 1.25 : 1 / 1.25, e);
+}}, {{ passive: false }});
+
+view.addEventListener('mousedown', e => {{
+  if (e.button !== 0) return;
+  e.preventDefault();
+  press = {{ x: e.clientX, y: e.clientY, moved: 0 }};
+  if (scale > 1) {{ drag = {{ x: e.clientX, y: e.clientY }}; apply(); }}
+}});
+document.addEventListener('mousemove', e => {{
+  if (press) press.moved = Math.max(press.moved,
+    Math.hypot(e.clientX - press.x, e.clientY - press.y));
+  if (!drag) return;
+  ox += e.clientX - drag.x; oy += e.clientY - drag.y;
+  drag = {{ x: e.clientX, y: e.clientY }};
+  apply();
+}});
+document.addEventListener('mouseup', e => {{
+  const p = press; press = null;
+  if (drag) {{ drag = null; apply(); }}
+  if (!p || p.moved > 5) return;
+  if (!e.target.closest('#view')) return;
+  zoomAt(e.shiftKey ? 1 / 1.6 : 1.6, e);
+}});
+
+view.addEventListener('touchstart', e => {{
+  if (e.touches.length === 1 && scale > 1)
+    drag = {{ x: e.touches[0].clientX, y: e.touches[0].clientY }};
+}}, {{ passive: true }});
+view.addEventListener('touchmove', e => {{
+  if (e.touches.length === 1 && drag) {{
+    e.preventDefault();
+    ox += e.touches[0].clientX - drag.x; oy += e.touches[0].clientY - drag.y;
+    drag = {{ x: e.touches[0].clientX, y: e.touches[0].clientY }};
+    apply(); return;
+  }}
+  if (e.touches.length !== 2) return;
+  e.preventDefault();
+  const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                       e.touches[0].clientY - e.touches[1].clientY);
+  if (pinch) zoomAt(d / pinch, {{
+    clientX: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+    clientY: (e.touches[0].clientY + e.touches[1].clientY) / 2 }});
+  pinch = d;
+}}, {{ passive: false }});
+view.addEventListener('touchend', () => {{ pinch = 0; drag = null; }});
+
+function toast(text) {{
+  const t = document.getElementById('toast');
+  t.textContent = text; t.classList.add('on');
+  setTimeout(() => t.classList.remove('on'), 2200);
+}}
+
+async function copyLink() {{
+  const link = PERMALINK || location.href;
+  try {{
+    await navigator.clipboard.writeText(link);
+    toast('Ссылка скопирована');
+  }} catch (err) {{
+    // Буфер обмена недоступен без защищённого соединения -- платформа
+    // ходит по http внутри сети. Показываем ссылку, чтобы человек мог
+    // скопировать руками, вместо молчаливого "ничего не произошло".
+    window.prompt('Скопируйте ссылку:', link);
+  }}
+}}
+
+// Высоту окна подгоняем под пропорции кадра: при фиксированной высоте
+// под кадром 16:9 оставалась широкая чёрная полоса. Пересчитываем и при
+// изменении размера окна -- иначе после поворота телефона полоса
+// возвращается.
+function fitView() {{
+  const img = document.getElementById('shot');
+  if (!img.naturalWidth) return;
+  const h = view.clientWidth * img.naturalHeight / img.naturalWidth;
+  view.style.height = Math.min(h, window.innerHeight * 0.78) + 'px';
+  apply();
+}}
+document.getElementById('shot').addEventListener('load', fitView);
+window.addEventListener('resize', fitView);
+if (document.getElementById('shot').complete) fitView();
+
+// --- статус проверки -------------------------------------------------------
+//
+// Тот же эндпоинт, что и в плеере, и та же пара (kind, ref_key). Поэтому
+// статус, поставленный здесь, виден в плеере и в таблице находок сразу --
+// синхронизировать отдельно нечего.
+function esc(t) {{
+  return String(t === null || t === undefined ? '' : t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}}
+
+function fmtWhen(iso) {{
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso || '').replace('T', ' ').slice(0, 16);
+  return d.toLocaleString('ru-RU', {{ day:'2-digit', month:'2-digit',
+    year:'numeric', hour:'2-digit', minute:'2-digit' }});
+}}
+
+async function loadPriority() {{
+  const sel = document.getElementById('prio');
+  sel.innerHTML = '<option value="">— не размечено —</option>' +
+    Object.keys(PRIORITY_LABELS).map(
+      v => `<option value="${{v}}">${{esc(PRIORITY_LABELS[v])}}</option>`).join('');
+  try {{
+    const r = await fetch(`/api/report/${{encodeURIComponent(REPORT_ID)}}/priorities`);
+    const rows = await r.json();
+    const mine = rows.find(x => x.kind === 'manual' && String(x.ref_key) === String(OBS_ID));
+    sel.value = mine ? mine.priority : '';
+    document.getElementById('prio-by').textContent =
+      mine ? `поставил ${{mine.set_by}} · ${{fmtWhen(mine.set_at)}}` : '';
+  }} catch (err) {{
+    document.getElementById('prio-by').textContent = 'не удалось загрузить статус';
+  }}
+}}
+
+async function setPriority(value) {{
+  const by = document.getElementById('prio-by');
+  try {{
+    const r = await fetch(`/api/report/${{encodeURIComponent(REPORT_ID)}}/priorities`, {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ kind: 'manual', ref_key: String(OBS_ID), priority: value }}),
+    }});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'отказ');
+    by.textContent = d.priority ? `поставил ${{d.set_by}} · ${{fmtWhen(d.set_at)}}` : '';
+    toast('Статус сохранён');
+  }} catch (err) {{
+    by.textContent = 'не сохранилось';
+  }}
+}}
+
+// --- обсуждение ------------------------------------------------------------
+
+async function loadComments() {{
+  const box = document.getElementById('cmts');
+  let list = [];
+  try {{
+    const r = await fetch(`/api/report/${{encodeURIComponent(REPORT_ID)}}/comments`);
+    const all = await r.json();
+    list = all.filter(c => c.kind === 'manual' && String(c.ref_key) === String(OBS_ID));
+  }} catch (err) {{
+    box.innerHTML = '<div class="cmt-empty">не удалось загрузить обсуждение</div>';
+    return;
+  }}
+  document.getElementById('cmt-count').textContent = list.length ? `· ${{list.length}}` : '';
+  box.innerHTML = list.length ? list.map(c => `
+    <div class="cmt">
+      <div class="cmt-head">
+        <span class="cmt-author">${{esc(c.author)}}</span>
+        <span>${{fmtWhen(c.created_at)}}</span>
+        ${{(c.author === VIEWER_NAME || IS_MODERATOR)
+          ? `<button class="cmt-del" title="Удалить"
+               onclick="deleteComment(${{c.id}})">×</button>` : ''}}
+      </div>
+      <div class="cmt-text">${{esc(c.text)}}</div>
+    </div>`).join('') : '<div class="cmt-empty">Пока никто не высказался</div>';
+}}
+
+async function addComment() {{
+  const ta = document.getElementById('cmt-text');
+  const text = (ta.value || '').trim();
+  if (!text) return;
+  const btn = document.getElementById('cmt-send');
+  btn.disabled = true;
+  try {{
+    const r = await fetch(`/api/report/${{encodeURIComponent(REPORT_ID)}}/comments`, {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ kind: 'manual', ref_key: String(OBS_ID), text }}),
+    }});
+    const d = await r.json();
+    if (!d.ok) {{ toast(d.message || 'не отправилось'); return; }}
+    ta.value = '';
+    await loadComments();
+  }} catch (err) {{
+    toast('не отправилось');
+  }} finally {{
+    btn.disabled = false;
+  }}
+}}
+
+async function deleteComment(id) {{
+  if (!confirm('Удалить это сообщение?')) return;
+  try {{
+    await fetch(`/api/report/${{encodeURIComponent(REPORT_ID)}}/comments/${{id}}`,
+                {{ method: 'DELETE' }});
+    await loadComments();
+  }} catch (err) {{ toast('не удалилось'); }}
+}}
+
+function onCommentKey(e) {{
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {{ e.preventDefault(); addComment(); }}
+}}
+
+if (CAN_COMMENT) {{
+  const ta = document.getElementById('cmt-text');
+  ta.addEventListener('input', () => {{
+    document.getElementById('cmt-send').disabled = !ta.value.trim();
+  }});
+}}
+
+loadPriority();
+loadComments();
+// Обсуждение общее с плеером: пока страница открыта, чужие сообщения
+// должны появляться сами, иначе разговор идёт вслепую.
+setInterval(loadComments, 15000);
+
+apply();
+</script>
+</body></html>
+"""
+
+
+FINDING_GONE_HTML = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Находка не найдена</title>
+<style>
+body {{ font-family:-apple-system,Arial,sans-serif; background:#111; color:#eee;
+        margin:0; padding:60px 20px; display:flex; justify-content:center; }}
+.box {{ max-width:520px; }}
+h1 {{ font-size:20px; margin:0 0 12px; }}
+p {{ color:#9aa4ad; line-height:1.6; margin:0 0 12px; font-size:14px; }}
+a {{ color:#8ecbff; }}
+.btn {{ display:inline-block; margin-top:8px; border:1px solid #2b6b74;
+        background:#12363b; color:#c9f0f5; border-radius:7px;
+        padding:8px 14px; text-decoration:none; font-size:13px; }}
+</style></head>
+<body><div class="box">
+<h1>Находки №{obs_id} больше нет</h1>
+<p>Скорее всего её удалили после проверки — например, признали ложной.
+Сама платформа работает, дело только в этой записи.</p>
+<p>Если ссылку прислали недавно и она должна работать — спросите у того,
+кто её прислал: возможно, находку убрали по ошибке.</p>
+<a class="btn" href="/operations">Ко всем операциям</a>
+</div></body></html>
+"""
+
+
+@app.route("/finding/<int:obs_id>/")
+def finding_frame(obs_id):
+    """Кадр находки на отдельной странице."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT o.*, r.rel_path, r.kind FROM manual_observations o "
+        "JOIN reports r ON r.report_id = o.report_id "
+        "WHERE o.id=?", (obs_id,)).fetchone()
+    if row is None:
+        # Сюда попадают по ссылке на удалённую находку. Голый текст "не
+        # найдено" оставлял человека в тупике: непонятно, ошибся ли он,
+        # сломалась ли платформа и куда идти дальше.
+        return FINDING_GONE_HTML.format(obs_id=int(obs_id)), 404
+
+    op = conn.execute(
+        "SELECT op.id, op.title FROM operations op "
+        "JOIN operation_materials m ON m.operation_id = op.id "
+        "WHERE m.report_id=?", (row["report_id"],)).fetchone()
+
+    crumbs = ('<a href="/operations">Операции</a> › '
+              + (f'<a href="/operation/{op["id"]}/">{html_escape(op["title"])}</a> › '
+                 if op else '')
+              + html_escape(os.path.basename(row["rel_path"] or "")))
+
+    seconds = row["timestamp_sec"]
+    tc = ""
+    if seconds is not None:
+        tc = "%02d:%02d" % (int(seconds) // 60, int(seconds) % 60)
+
+    player_btn = ""
+    if row["kind"] == "video":
+        href = f'/report/{row["report_id"]}/player/'
+        if seconds is not None:
+            href += f"?t={max(0, int(seconds))}"
+        player_btn = (f'<a class="btn main" href="{href}">▶ Открыть в плеере'
+                      + (f' на {tc}' if tc else '') + '</a>')
+
+    bits = []
+    if row["viewer_name"]:
+        bits.append(f'отметил <b>{html_escape(row["viewer_name"])}</b>')
+    if tc:
+        bits.append(f'таймкод <b>{tc}</b>')
+    if row["lat"] is not None and row["lon"] is not None:
+        bits.append(f'координаты <b>{row["lat"]:.5f}, {row["lon"]:.5f}</b>')
+
+    permalink = finding_share_link(obs_id)
+
+    note_block = ""
+    if row["note"]:
+        note_block = ('<div class="fld"><label>Описание</label>'
+                      f'<div class="note">{html_escape(row["note"])}</div></div>')
+
+    gps = []
+    if row["lat"] is not None and row["lon"] is not None:
+        gps.append(
+            f'📍 позиция дрона: <b>{row["lat"]:.6f}, {row["lon"]:.6f}</b> '
+            f'<a href="https://www.google.com/maps?q={row["lat"]},{row["lon"]}" '
+            f'target="_blank" rel="noopener">карта</a>')
+    if row["est_lat"] is not None and row["est_lon"] is not None:
+        dist = (f' (~{int(row["est_distance_m"])} м)'
+                if row["est_distance_m"] is not None else "")
+        gps.append(
+            f'<span class="est">🎯 вероятная точка объекта: '
+            f'<b>{row["est_lat"]:.6f}, {row["est_lon"]:.6f}</b>{dist} '
+            f'<a href="https://www.google.com/maps?q={row["est_lat"]},{row["est_lon"]}" '
+            f'target="_blank" rel="noopener">карта</a></span>')
+    coords_block = ""
+    if gps:
+        coords_block = ('<div class="fld"><label>Координаты</label>'
+                        '<div class="gps">' + "<br>".join(gps) + "</div></div>")
+
+    if can_comment():
+        comment_form = (
+            '<div class="cmt-form">'
+            '<textarea id="cmt-text" rows="3" placeholder="Ваш комментарий" '
+            'onkeydown="onCommentKey(event)"></textarea>'
+            '<div class="cmt-actions">'
+            '<button id="cmt-send" disabled onclick="addComment()">Отправить</button>'
+            '<span class="cmt-hint">Ctrl+Enter</span></div></div>')
+    elif current_role() == sar_common.ROLE_MUTED:
+        comment_form = ('<div class="cmt-locked">Координатор ограничил вам '
+                        'участие в обсуждениях.</div>')
+    else:
+        comment_form = ('<div class="cmt-locked">Чтобы писать в обсуждении, '
+                        'войдите по персональной ссылке из бота (команда /help).</div>')
+
+    return FINDING_FRAME_HTML.format(
+        short=html_escape(os.path.basename(row["rel_path"] or "")),
+        label=html_escape(row["label"] or "Находка без подписи"),
+        meta=" · ".join(bits) or "—",
+        crumbs=crumbs,
+        player_btn=player_btn,
+        img_src=f"/api/finding/{obs_id}/preview?full=1",
+        bbox_json=json.dumps(_finding_bbox(dict(row))),
+        permalink_json=json.dumps(permalink),
+        note_block=note_block,
+        coords_block=coords_block,
+        comment_form=comment_form,
+        report_id_json=json.dumps(row["report_id"]),
+        obs_id=int(obs_id),
+        viewer_name_json=json.dumps(session.get("viewer_name", "")),
+        is_moderator_json=json.dumps(bool(is_moderator())),
+        can_comment_json=json.dumps(bool(can_comment())),
+        priority_labels_json=json.dumps(sar_common.PRIORITY_LABELS,
+                                        ensure_ascii=False),
+    )
+
+
+# ---------------------------------------------------------------------------
 # ПУЛЬС ПРИСУТСТВИЯ ВО ВСЕ СТРАНИЦЫ
 #
 # Делается здесь, в конце модуля, а не рядом с самими шаблонами: так блок
@@ -5611,6 +8965,7 @@ def api_online():
 PAGES_WITH_PRESENCE = (
     "TREE_PAGE_HTML", "PROCESSING_PAGE_HTML", "PLAYER_PAGE_HTML",
     "OPERATIONS_PAGE_HTML", "OPERATION_CARD_HTML", "PHOTO_VIEWER_HTML",
+    "FINDING_FRAME_HTML",
 )
 
 for _page in PAGES_WITH_PRESENCE:
@@ -5629,7 +8984,8 @@ def main():
     global SERVER_CFG, DATA_DIR, DB_PATH, REPORTS_DIR, _TELEMETRY_INDEX
 
     SERVER_CFG, config_path = sar_common.load_server_config(SCRIPT_DIR)
-    SERVER_CFG["watch_dir"], DATA_DIR, DB_PATH, REPORTS_DIR = sar_common.resolve_paths(SERVER_CFG["watch_dir"])
+    SERVER_CFG["watch_dir"], DATA_DIR, DB_PATH, REPORTS_DIR = sar_common.resolve_paths(
+        SERVER_CFG["watch_dir"], SERVER_CFG.get("data_dir"))
 
     if SERVER_CFG["shared_password"] == "change_me":
         print("=" * 70)
