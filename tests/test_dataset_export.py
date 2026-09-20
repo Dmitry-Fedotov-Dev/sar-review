@@ -4,6 +4,7 @@ detection_priorities) в датасет YOLO для дообучения. Реа
 чтение/запись, мокать незачем (тот же принцип, что и в test_thumbnails.py/
 test_process_video_geolocation.py)."""
 import json
+import pathlib
 import sqlite3
 
 import cv2
@@ -40,8 +41,11 @@ def _make_frame_image(path, width=200, height=100, color=(255, 0, 0)):
 
 
 def _setup_report(tmp_path, report_id="rep1", hits=None, kind="video"):
-    out_dir = tmp_path / "out"
-    out_dir.mkdir(exist_ok=True)
+    # Папка отчёта там, где её ВЫЧИСЛИТ выгрузка: столбец out_dir больше
+    # не читается, иначе база была бы привязана к машине.
+    _, _, _, reports_dir = sar_common.resolve_paths(str(tmp_path))
+    out_dir = pathlib.Path(reports_dir) / report_id
+    out_dir.mkdir(parents=True, exist_ok=True)
     if hits is not None:
         (out_dir / "detections.json").write_text(json.dumps(hits, ensure_ascii=False), encoding="utf-8")
         for h in hits:
@@ -97,7 +101,8 @@ def test_confirmed_ai_scene_exports_positive_yolo_box(tmp_path):
     db_path, out_dir = _setup_report(tmp_path, hits=hits)
     _set_priority(db_path, "rep1", "ai_scene", _ref_key(hits[0]), "confirmed_person")
 
-    counts = export_mod.run_export(db_path, str(out_dir_export := tmp_path / "dataset"), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export := tmp_path / "dataset"), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["positive"] == 1
     assert counts["negative"] == 0
 
@@ -120,7 +125,8 @@ def test_rejected_ai_scene_exports_image_with_empty_label(tmp_path):
     _set_priority(db_path, "rep1", "ai_scene", _ref_key(hits[0]), "rejected")
 
     out_dir_export = tmp_path / "dataset"
-    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["positive"] == 0
     assert counts["negative"] == 1
 
@@ -138,7 +144,8 @@ def test_unset_and_likely_priorities_are_not_exported(tmp_path):
     _set_priority(db_path, "rep1", "ai_scene", _ref_key(hits[1]), "likely_object")
 
     out_dir_export = tmp_path / "dataset"
-    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["positive"] == 0
     assert counts["negative"] == 0
     assert list((out_dir_export / "images" / "train").iterdir()) == []
@@ -152,7 +159,8 @@ def test_all_hits_in_confirmed_scene_are_exported_not_just_peak(tmp_path):
     _set_priority(db_path, "rep1", "ai_scene", _ref_key(hits[0]), "confirmed_person")
 
     out_dir_export = tmp_path / "dataset"
-    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["positive"] == 2
 
 
@@ -160,8 +168,10 @@ def test_ai_scene_uses_full_frame_image_not_crop(tmp_path):
     # кроп и полный кадр -- РАЗНОЕ содержимое; в датасет должен пойти
     # полный кадр (детектор должен учиться на контексте сцены, не на
     # уже вырезанном пятне) -- проверяем по цвету пикселя
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
+    # папка отчёта -- там, где её вычислит выгрузка (см. _setup_report)
+    _, _, _, reports_dir = sar_common.resolve_paths(str(tmp_path))
+    out_dir = pathlib.Path(reports_dir) / "rep1"
+    out_dir.mkdir(parents=True, exist_ok=True)
     hit = _hit(10, 40, 20, 60, 40, image_path="crops/crop_10.jpg", full_image_path="frames/full_10.jpg")
     (out_dir / "detections.json").write_text(json.dumps([hit], ensure_ascii=False), encoding="utf-8")
     _make_frame_image(out_dir / hit["image_path"], color=(0, 255, 0))    # кроп -- зелёный
@@ -182,7 +192,8 @@ def test_ai_scene_uses_full_frame_image_not_crop(tmp_path):
     _set_priority(db_path, "rep1", "ai_scene", _ref_key(hit), "confirmed_person")
 
     out_dir_export = tmp_path / "dataset"
-    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     exported = cv2.imread(str(out_dir_export / "images" / "train" / f"{_stem('rep1', hit)}.jpg"))
     # BGR (255,0,0) -- синий канал максимален
     assert exported[0, 0, 0] > 200 and exported[0, 0, 2] < 50
@@ -196,7 +207,8 @@ def test_frame_size_falls_back_to_video_metadata_when_missing_on_hit(tmp_path):
     _set_priority(db_path, "rep1", "ai_scene", _ref_key(hits[0]), "confirmed_person")
 
     out_dir_export = tmp_path / "dataset"
-    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["positive"] == 1  # видео 320x240 из _make_video -- размер нашёлся
 
 
@@ -215,7 +227,8 @@ def test_confirmed_manual_observation_extracts_frame_and_writes_box(tmp_path):
     _set_priority(db_path, "rep1", "manual", str(obs_id), "confirmed_object")
 
     out_dir_export = tmp_path / "dataset"
-    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["positive"] == 1
 
     stem = f"rep1__manual__{obs_id}"
@@ -242,7 +255,8 @@ def test_rejected_manual_observation_writes_empty_label(tmp_path):
     _set_priority(db_path, "rep1", "manual", str(obs_id), "rejected")
 
     out_dir_export = tmp_path / "dataset"
-    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["negative"] == 1
     assert _label_lines(out_dir_export, "train", f"rep1__manual__{obs_id}") == []
 
@@ -258,7 +272,8 @@ def test_manual_observation_without_priority_is_not_exported(tmp_path):
     conn.close()
 
     out_dir_export = tmp_path / "dataset"
-    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    counts = export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert counts["positive"] == 0
     assert counts["negative"] == 0
 
@@ -274,7 +289,8 @@ def test_split_is_deterministic_for_the_same_key():
 def test_dataset_yaml_lists_class_names(tmp_path):
     db_path, out_dir = _setup_report(tmp_path, hits=None)
     out_dir_export = tmp_path / "dataset"
-    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     yaml_text = (out_dir_export / "dataset.yaml").read_text(encoding="utf-8")
     assert "0: person" in yaml_text
     assert "1: object" in yaml_text
@@ -288,7 +304,8 @@ def test_rerun_removes_stale_export_when_priority_changes(tmp_path):
     _set_priority(db_path, "rep1", "ai_scene", _ref_key(hits[0]), "confirmed_person")
 
     out_dir_export = tmp_path / "dataset"
-    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     stem_path = out_dir_export / "images" / "train" / f"{_stem('rep1', hits[0])}.jpg"
     assert stem_path.exists()
 
@@ -299,7 +316,8 @@ def test_rerun_removes_stale_export_when_priority_changes(tmp_path):
     conn.commit()
     conn.close()
 
-    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0)
+    export_mod.run_export(db_path, str(out_dir_export), val_split=0.0, watch_dir=str(tmp_path),
+                                   reports_dir=str(pathlib.Path(tmp_path) / 'sar_data' / 'reports'))
     assert not stem_path.exists()
 
 

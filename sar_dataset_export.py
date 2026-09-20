@@ -249,7 +249,17 @@ def export_manual_observations(conn, report, out_dir, val_split, counts):
         counts[split] += 1
 
 
-def run_export(db_path, out_dir, val_split, report_id_filter=None, grouping_cfg=None):
+def run_export(db_path, out_dir, val_split, report_id_filter=None, grouping_cfg=None,
+                watch_dir=None, reports_dir=None):
+    """Выгрузка датасета.
+
+    watch_dir и reports_dir ОБЯЗАТЕЛЬНЫ по смыслу: пути к материалу и к
+    папкам отчётов вычисляются от них, а не читаются из столбцов
+    abs_path/out_dir. Хранимый абсолютный путь записан на той машине, где
+    файл впервые увидели, и после переезда ведёт в никуда -- молча.
+    Значения по умолчанию оставлены только ради обратной совместимости
+    вызова; main() всегда передаёт их явно.
+    """
     conn = sar_common.get_db_connection(db_path)
     _reset_output_dirs(out_dir)
 
@@ -264,6 +274,10 @@ def run_export(db_path, out_dir, val_split, report_id_filter=None, grouping_cfg=
     for report_row in reports:
         report = dict(report_row)
         report_id = report["report_id"]
+        if watch_dir:
+            report["abs_path"] = sar_common.material_path(watch_dir, report["rel_path"])
+        if reports_dir:
+            report["out_dir"] = sar_common.report_dir(reports_dir, report_id)
 
         priority_rows = conn.execute(
             "SELECT ref_key, priority FROM detection_priorities "
@@ -290,7 +304,8 @@ def main():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     server_cfg, _ = sar_common.load_server_config(script_dir)
-    watch_dir, data_dir, db_path, reports_dir = sar_common.resolve_paths(server_cfg["watch_dir"])
+    watch_dir, data_dir, db_path, reports_dir = sar_common.resolve_paths(
+        server_cfg["watch_dir"], server_cfg.get("data_dir"))
     sar_common.init_db(db_path)  # идемпотентно -- та же миграция, что при старте воркера/сервера
 
     config_path = os.path.join(script_dir, "sar_config.json")
@@ -301,7 +316,8 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     counts = run_export(db_path, out_dir, args.val_split, report_id_filter=args.report_id,
-                         grouping_cfg=grouping_cfg)
+                         grouping_cfg=grouping_cfg,
+                         watch_dir=watch_dir, reports_dir=reports_dir)
 
     total = counts["train"] + counts["val"]
     print(f"Готово: {out_dir}")

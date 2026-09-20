@@ -435,3 +435,38 @@ def test_streams_table_absent_does_not_break_collect(conn):
     assert facts["streams_active"] is None
     text = h.render_prometheus(facts, h.evaluate(facts))
     assert "sar_streams_active" not in text
+
+
+# --- живость сторожа туннеля ----------------------------------------------
+
+def test_hung_tunnel_watchdog_is_visible(tmp_path):
+    """1 сентября сторож завис на внешнем вызове без таймаута и восемь
+    суток притворялся работающим: процесс есть, все проверки зелёные, а
+    платформа снаружи недоступна. Пульс отличает живого от повисшего."""
+    db = str(tmp_path / "t.db")
+    sar_common.init_db(db)
+    conn = sar_common.get_db_connection(db)
+
+    # ни разу не отмечался -- сторож не запущен
+    assert h.evaluate(h.collect(conn, "."))["tunnel"][0] == h.WARN
+
+    # свежий пульс -- всё в порядке
+    sar_common.touch_heartbeat(conn, "tunnel", "живы")
+    level, text = h.evaluate(h.collect(conn, "."))["tunnel"]
+    assert level == h.OK, text
+
+
+def test_tunnel_threshold_allows_a_missed_round():
+    """Сторож ходит раз в 120 с. Порог тревоги обязан пережить одну
+    пропущенную проверку, иначе тревога будет срабатывать на ровном месте."""
+    assert h.TUNNEL_WARN_SEC > 240
+    assert h.TUNNEL_CRIT_SEC > h.TUNNEL_WARN_SEC
+
+
+def test_tunnel_age_is_exported_as_a_metric():
+    """Без метрики проблему не увидеть на дашборде -- только в /healthz."""
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "sar_health.py")
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    assert "sar_tunnel_heartbeat_age_seconds" in src

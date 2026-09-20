@@ -31,7 +31,7 @@ def client(tmp_path, monkeypatch):
                         {"watch_dir": str(watch), "shared_password": "pw"}, raising=False)
     monkeypatch.setattr(sar_server, "DB_PATH", db, raising=False)
     monkeypatch.setattr(sar_common, "resolve_paths",
-                        lambda w: (str(watch), str(watch), db, str(watch)))
+                        lambda w, d=None: (str(watch), str(watch), db, str(watch)))
     sar_server.app.secret_key = "t"
     sar_server.app.testing = True
     return sar_server.app.test_client()

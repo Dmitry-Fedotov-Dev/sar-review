@@ -36,6 +36,9 @@ import sar_common
 # одно видео при обработке пишет отчёт на сотни мегабайт.
 DISK_WARN_GB = 10.0
 DISK_CRIT_GB = 3.0
+# Сторож проверяет туннель раз в 120 с. Полчаса молчания -- он повис.
+TUNNEL_WARN_SEC = 400
+TUNNEL_CRIT_SEC = 1800
 WORKER_WARN_SEC = 180          # цикл воркера -- секунды, 3 минуты это уже странно
 WORKER_CRIT_SEC = 600
 STUCK_REPORT_HOURS = 3.0       # дольше всякой разумной обработки одного файла
@@ -300,6 +303,39 @@ def dir_size_cached(path, ttl=DIR_SIZE_TTL_SEC, now=None):
     return cached[0] if cached is not None else None
 
 
+def _cloud_facts(conn, data_dir):
+    """Сколько занято временной папкой и сколько хранилищ подключено."""
+    out = {"staging_bytes": 0, "staging_files": 0,
+           "cloud_accounts": 0, "cloud_accounts_failing": 0,
+           "cloud_materials": 0}
+    try:
+        import sar_staging
+        root = sar_staging.staging_dir(data_dir)
+        total = files = 0
+        for dirpath, _, names in os.walk(root):
+            for n in names:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, n))
+                    files += 1
+                except OSError:
+                    pass
+        out["staging_bytes"], out["staging_files"] = total, files
+    except Exception:
+        # Урезанная установка без модуля -- не повод ронять весь сбор
+        # метрик: остальные показатели важнее этого.
+        pass
+    try:
+        accs = sar_common.cloud_accounts_public(conn)
+        out["cloud_accounts"] = len([a for a in accs if a.get("enabled")])
+        out["cloud_accounts_failing"] = len([a for a in accs if a.get("last_error")])
+        out["cloud_materials"] = conn.execute(
+            "SELECT COUNT(*) n FROM reports WHERE cloud_file_id IS NOT NULL"
+        ).fetchone()["n"]
+    except Exception:
+        pass
+    return out
+
+
 def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
     """Снимок состояния. Возвращает dict фактов -- без оценок и порогов."""
     now = datetime.now()
@@ -318,6 +354,17 @@ def collect(conn, watch_dir, backup_dir=None, reports_dir=None):
 
     facts["worker_heartbeat_sec"] = sar_common.heartbeat_age_sec(conn, "worker")
     facts["bot_heartbeat_sec"] = sar_common.heartbeat_age_sec(conn, "bot")
+    facts["tunnel_heartbeat_sec"] = sar_common.heartbeat_age_sec(conn, "tunnel")
+
+    # РАСХОД НА ОБЛАКО. Без этих чисел исчерпание квоты выглядит как
+    # «платформа странно тормозит» -- ровно тот молчаливый отказ, который в
+    # этом проекте повторяется чаще всего.
+    #
+    # data_dir выводим из reports_dir: отдельным параметром его сюда не
+    # передают, а заводить ВТОРОЙ способ его вычислить -- верный путь к
+    # расхождению (см. историю с папкой резервных копий).
+    facts.update(_cloud_facts(
+        conn, os.path.dirname(reports_dir) if reports_dir else watch_dir))
 
     facts["disk_free_gb"] = _disk_free_gb(watch_dir)
     # Папка копий берётся из общей точки правды, а не собирается здесь
@@ -382,6 +429,21 @@ def evaluate(facts):
     else:
         checks["worker"] = (OK, f"воркер жив ({hb:.0f} с назад)")
 
+    # Сторож туннеля. Проверять его особенно важно: 01.09.2026 он завис на
+    # внешнем вызове без таймаута и восемь суток притворялся работающим --
+    # процесс есть, мониторинг зелёный, а платформа снаружи недоступна.
+    # Пульс отличает живого сторожа от повисшего.
+    tb = facts.get("tunnel_heartbeat_sec")
+    if tb is None:
+        checks["tunnel"] = (WARN, "сторож туннеля не отмечался — не запущен?")
+    elif tb > TUNNEL_CRIT_SEC:
+        checks["tunnel"] = (CRIT, f"сторож туннеля молчит {tb/60:.0f} мин — "
+                                  f"снаружи платформа может быть недоступна")
+    elif tb > TUNNEL_WARN_SEC:
+        checks["tunnel"] = (WARN, f"сторож туннеля не отмечался {tb:.0f} с")
+    else:
+        checks["tunnel"] = (OK, f"сторож туннеля жив ({tb:.0f} с назад)")
+
     free = facts.get("disk_free_gb")
     if free is None:
         checks["disk"] = (WARN, "не удалось узнать свободное место")
@@ -441,6 +503,8 @@ def render_prometheus(facts, checks):
         out.append(f"{name}{lbl} {value}")
 
     add("sar_up", 1, "Платформа отвечает")
+    add("sar_tunnel_heartbeat_age_seconds", facts.get("tunnel_heartbeat_sec"),
+        "Сколько секунд назад отмечался сторож туннеля")
     add("sar_worker_heartbeat_age_seconds", facts.get("worker_heartbeat_sec"),
         "Секунд с последней отметки воркера")
     add("sar_disk_free_bytes", (facts["disk_free_gb"] * 1e9)
@@ -457,6 +521,18 @@ def render_prometheus(facts, checks):
         "Секунд отсмотрено людьми", "counter")
     add("sar_streams_active", facts.get("streams_active"), "Активных трансляций")
     add("sar_reports_bytes", facts.get("reports_bytes"), "Размер готовых отчётов")
+
+    # Облако и временная папка
+    add("sar_staging_bytes", facts.get("staging_bytes"),
+        "Занято временной папкой скачанных оригиналов")
+    add("sar_staging_files", facts.get("staging_files"),
+        "Файлов во временной папке")
+    add("sar_cloud_accounts", facts.get("cloud_accounts"),
+        "Подключённых облачных хранилищ")
+    add("sar_cloud_accounts_failing", facts.get("cloud_accounts_failing"),
+        "Хранилищ с ошибкой при последнем обращении")
+    add("sar_cloud_materials", facts.get("cloud_materials"),
+        "Материалов, которые лежат в облаке")
 
     # Железо. Отдаём и текущую загрузку, и потолок -- без потолка проценты
     # не читаются: 80% на двух ядрах и на двадцати это разные новости.
