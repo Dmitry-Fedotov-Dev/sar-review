@@ -211,3 +211,50 @@ def test_counts_include_operations(tmp_path):
     assert counts["operations"] == 1
     problems, got = sb.verify(dst, counts)
     assert problems == [] and got["operations"] == 1
+
+
+# --- буква диска не адрес ---------------------------------------------------
+
+def test_unmarked_folder_is_refused(tmp_path, capsys):
+    """20.09.2026: внешний SSD с копиями отключили, и буква E: тут же
+    досталась карте памяти камеры (2,1 ГБ, 83 МБ свободно). Повторный
+    запуск той же команды отправил бы туда архив с личными данными и
+    ДЕЙСТВУЮЩИМИ КЛЮЧАМИ ДОСТУПА -- а карту вынимают и дают посмотреть."""
+    assert sb.check_target(str(tmp_path / "чужая")) is False
+    out = capsys.readouterr().out
+    assert "ОТКАЗ" in out
+    assert "--init-target" in out, "отказ не говорит, что делать"
+
+
+def test_marked_folder_is_allowed(tmp_path):
+    d = tmp_path / "копии"
+    d.mkdir()
+    (d / sb.TARGET_MARKER).write_text("ok", encoding="utf-8")
+    assert sb.check_target(str(d)) is True
+
+
+def test_init_creates_the_marker(tmp_path):
+    d = str(tmp_path / "новая")
+    assert sb.check_target(d, init=True) is True
+    assert os.path.exists(os.path.join(d, sb.TARGET_MARKER))
+    assert sb.check_target(d) is True, "после пометки должна пускать"
+
+
+def test_marker_explains_itself(tmp_path):
+    """Файл найдут через год и должны понять, зачем он."""
+    d = str(tmp_path / "новая")
+    sb.check_target(d, init=True)
+    text = open(os.path.join(d, sb.TARGET_MARKER), encoding="utf-8").read()
+    assert "ключи доступа" in text
+    assert "буква диска" in text.lower()
+
+
+def test_default_folder_needs_no_marker():
+    """Папка по умолчанию внутри проекта не переезжает вместе с буквой --
+    требовать для неё метку значило бы мешать без причины."""
+    import inspect
+    src = inspect.getsource(sb.main)
+    i = src.index("check_target")
+    assert "args.out and" in src[max(0, i - 60):i], (
+        "метка спрашивается и у папки по умолчанию"
+    )

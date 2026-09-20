@@ -115,6 +115,51 @@ def verify(dst_path, expected):
     return problems, got
 
 
+TARGET_MARKER = ".sar_backup_target"
+
+
+def check_target(out_dir, init=False):
+    """Пускает писать копию только в ПОМЕЧЕННУЮ папку.
+
+    ЗАЧЕМ. Буква диска -- не адрес, а очередь. 20.09.2026 внешний SSD,
+    куда клали копию, отключили, и буква E: тут же досталась карте памяти
+    камеры (2,1 ГБ, 83 МБ свободно). Повторный запуск той же команды
+    отправил бы архив с личными данными и ДЕЙСТВУЮЩИМИ КЛЮЧАМИ ДОСТУПА на
+    эту карту -- а её вынимают, дают посмотреть, вставляют в чужой ноутбук.
+
+    Проверять метку тома тоже ненадёжно: их легко сделать одинаковыми.
+    Поэтому метка -- файл, который человек кладёт осознанно один раз. Тот
+    же приём, что и с .sar_operation для папок операций.
+
+    Папка по умолчанию (sar_backups/ внутри проекта) метки не требует: она
+    не перемещается вместе с буквой.
+    """
+    marker = os.path.join(out_dir, TARGET_MARKER)
+    if os.path.exists(marker):
+        return True
+
+    if init:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("Папка для резервных копий SAR Review.\n"
+                    "Этот файл помечает её как место, куда МОЖНО класть копию.\n"
+                    "Без него sar_backup.py сюда писать откажется: буква диска\n"
+                    "может достаться другому устройству, а в копии -- личные\n"
+                    "данные и действующие ключи доступа.\n")
+        print(f"Папка помечена как место для копий: {out_dir}")
+        return True
+
+    print("ОТКАЗ: папка не помечена как место для резервных копий.")
+    print(f"   {out_dir}")
+    print()
+    print("Буква диска может достаться другому устройству -- и копия с")
+    print("личными данными и ключами доступа уедет не туда. Если это")
+    print("действительно ваша папка для копий, пометьте её один раз:")
+    print()
+    print(f"   python sar_backup.py --out \"{out_dir}\" --init-target")
+    return False
+
+
 def prune_old(out_dir, keep):
     if keep <= 0:
         return 0
@@ -150,6 +195,9 @@ def main():
     ap = argparse.ArgumentParser(description="Резервная копия базы SAR Review")
     ap.add_argument("--root", default=".")
     ap.add_argument("--out", default=None, help="куда класть (по умолчанию sar_backups/)")
+    ap.add_argument("--init-target", action="store_true",
+                    help="пометить папку из --out как место для копий "
+                         "(делается один раз, осознанно)")
     ap.add_argument("--keep", type=int, default=10, help="сколько копий хранить, 0 = все")
     ap.add_argument("--no-key", action="store_true",
                     help="не класть secret.key (сессии после восстановления сбросятся)")
@@ -169,6 +217,8 @@ def main():
     # Считать её здесь отдельно нельзя: именно так скрипт и проверка
     # разъехались, и тревога о протухших копиях горела при свежих копиях.
     out_dir = args.out or sar_common.backups_dir()
+    if args.out and not check_target(out_dir, args.init_target):
+        return 1
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tmp_db = os.path.join(out_dir, f"_snapshot_{stamp}.db")
