@@ -1,6 +1,7 @@
 # SAR Review — поиск людей и снаряжения на видео с дрона
 
-## Demo: https://docs.google.com/presentation/d/1pQqPtfciejIxGGKs3Q5V5xdx2ObYsU6ebdu05y1SO4E/edit?usp=sharing
+## Book a Demo: dmitry.fedotov.dev@gmail.com
+## Presentation: https://docs.google.com/presentation/d/1pQqPtfciejIxGGKs3Q5V5xdx2ObYsU6ebdu05y1SO4E/edit?usp=sharing
 
 Self-hosted веб-сервис для поисково-спасательных работ: просматривает видео и
 фото с дрона, подсвечивает кадры, где вероятно есть человек или снаряжение, и
