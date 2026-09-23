@@ -1,5 +1,6 @@
-# SAR Review — поиск людей и снаряжения на видео с дрона
+# SAR Review — people searching from UAV in rescue operations | поиск людей и снаряжения на видео с дрона
 
+## Get access to application: https://t.me/wildhighbot
 ## Book a Demo: dmitry.fedotov.dev@gmail.com
 ## Presentation: https://docs.google.com/presentation/d/1pQqPtfciejIxGGKs3Q5V5xdx2ObYsU6ebdu05y1SO4E/edit?usp=sharing
 
