@@ -4,6 +4,8 @@
 ## Book a Demo: dmitry.fedotov.dev@gmail.com
 ## Presentation: https://docs.google.com/presentation/d/1pQqPtfciejIxGGKs3Q5V5xdx2ObYsU6ebdu05y1SO4E/edit?usp=sharing
 
+*[Read in English](README.en.md)*
+
 Self-hosted веб-сервис для поисково-спасательных работ: просматривает видео и
 фото с дрона, подсвечивает кадры, где вероятно есть человек или снаряжение, и
 помогает команде разобрать отснятый материал, не пересматривая часы записи
