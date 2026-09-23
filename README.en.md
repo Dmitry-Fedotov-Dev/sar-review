@@ -10,10 +10,19 @@
 
 *The manual player: mark findings straight on the frame, team observations on the right, and at the bottom a bar showing what a human has genuinely watched. Volunteer names are redacted in this screenshot.*
 
-Self-hosted web service for search and rescue: it reviews drone video and
-stills, highlights frames that probably contain a person or equipment, and
-helps a team work through the recorded material without watching hours of
-footage by hand.
+Self-hosted web service for **coordinating** search and rescue: a team of
+volunteers reviews drone video and stills together, and the platform keeps
+track of what a human has actually watched, what they found, and what nobody
+has opened yet.
+
+The question it answers is not "what did the model find" but **where has
+nobody looked**. A coordinator sees coverage per file, findings with
+coordinates and discussion, a map, and an operation report.
+
+Automatic detection is here too, but as a supporting signal rather than the
+product. On this operation's material the model produced 183,234 boxes, while
+the work was done by 31 marks placed by people. So the effort goes first into
+making manual review well organised.
 
 **Built during a real search and rescue operation** — the search for missing
 climbers in the Alay district of Kyrgyzstan, near Kurumdy peak. Not a teaching
@@ -28,6 +37,33 @@ by specific problems that surfaced on site (see the "traps" section in
 
 ## What it does
 
+### Organising the review — what everything else exists for
+
+- **Coverage measured by actual viewing.** Every played range is recorded per
+  person, so the platform can answer "which files has nobody opened at all" —
+  the question decisions are actually made on.
+- **Manual player** with mouse or touch marking of findings, bound to the
+  timecode, with coordinates pulled automatically from telemetry and a
+  team-wide coverage bar.
+- **Findings** — the frame, coordinates, triage status and discussion in one
+  place, so review does not drift into a group chat and lose its link to the
+  file.
+- **Triage** (confirmed person / likely / object / rejected). The status is set
+  by a human only; the system never assigns it.
+- **Operations** — material is grouped by operation, and several can run at
+  once.
+- **Map** of findings, drone tracks and free-standing ground marks. Printed
+  under the map is how many findings did not make it onto it: a map that
+  quietly hides half the marks is worse than no map.
+- **Operation report** that leads with what has *not* been reviewed rather than
+  with what was found. With optional anonymisation of volunteer names.
+- **KML and GPX export** — the coordinator works in their own map or handheld.
+- **Works without internet** — a fully local service on the operation's network.
+- Optional **Telegram bot** for granting volunteers access with coordinator
+  approval.
+
+### Detection — a supporting signal
+
 - **Multi-class detection** (YOLOX with no fine-tuning, or your own ONNX model)
   with frame tiling — plus a separate colour-anomaly detector for clothing and
   equipment that object detection often misses at small scale.
@@ -36,14 +72,12 @@ by specific problems that surfaced on site (see the "traps" section in
 - **Object coordinate estimation** from GPS, altitude and gimbal angles,
   accounting for the actual frame zoom. The precise drone coordinates are shown
   separately.
-- **Manual player** with mouse/touch marking of findings, bound to the timecode,
-  with GPS and a team-wide coverage bar showing what has genuinely been watched.
-- **Finding triage** (confirmed person / likely / object / rejected) — the
-  status is set by a human only, the system never assigns it.
 - **Dataset export** (YOLO) from confirmed findings for fine-tuning.
-- **Works without internet** — a fully local service on the operation's network.
-- Optional **Telegram bot** for granting volunteers access with coordinator
-  approval.
+
+> Honestly about the outcome: on this operation's material the detector did not
+> pay for itself. 183,234 boxes across 8,445 scenes; the colour detector fired
+> 0 times. Checking the model turned out to cost more than watching the footage
+> yourself.
 
 ## Requirements
 
