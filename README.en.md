@@ -6,6 +6,10 @@
 
 *[Читать по-русски](README.md)*
 
+![Manual player: a drone frame, the team observation panel and a coverage bar built from actual viewing](docs/img/player.jpg)
+
+*The manual player: mark findings straight on the frame, team observations on the right, and at the bottom a bar showing what a human has genuinely watched. Volunteer names are redacted in this screenshot.*
+
 Self-hosted web service for search and rescue: it reviews drone video and
 stills, highlights frames that probably contain a person or equipment, and
 helps a team work through the recorded material without watching hours of
