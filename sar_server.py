@@ -167,6 +167,39 @@ def _metrics_done(response):
     return response
 
 
+# Скрипт перевода подключается ОДНОЙ точкой, а не правкой четырнадцати
+# шаблонов: heartbeat присутствия однажды стоял на 3 страницах из 6 ровно
+# потому, что его разносили копированием. Здесь же любая новая страница
+# получает переключатель сама, без отдельного действия.
+_I18N_TAG = '<script src="/static/i18n.js" defer></script>'
+
+
+@app.after_request
+def _inject_i18n(response):
+    """Дописывает тег скрипта перевода в HTML-ответы.
+
+    Только HTML и только при наличии </body>: на JSON, картинки и видео
+    это не должно влиять никак. Сбой внедрения не имеет права уронить
+    ответ -- страница без переключателя языка работает, страница с
+    ошибкой 500 не работает.
+    """
+    try:
+        ctype = (response.headers.get("Content-Type") or "")
+        if "text/html" not in ctype:
+            return response
+        if response.direct_passthrough or not response.is_sequence:
+            return response
+        body = response.get_data(as_text=True)
+        if "</body>" not in body or _I18N_TAG in body:
+            return response
+        response.set_data(body.replace("</body>", _I18N_TAG + "</body>", 1))
+    except Exception:                    # noqa: BLE001
+        # Проглатываем осознанно: перевод -- удобство, а не работа
+        # платформы. Но молча не оставляем -- пишем в журнал сервера.
+        app.logger.warning("i18n: не удалось внедрить скрипт", exc_info=True)
+    return response
+
+
 @app.before_request
 def require_login():
     # /healthz и /metrics открыты намеренно: их опрашивает внешний монитор,
