@@ -23,6 +23,13 @@ VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".ts", ".m4v", ".wmv"}
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
 MEDIA_EXTS = VIDEO_EXTS | PHOTO_EXTS
 
+# Телеметрия -- НЕ материал: заводить на SRT запись в reports нельзя, иначе
+# он попадёт в список файлов, в очередь обработки и в счёт покрытия. Но и
+# отбрасывать его при облачном обходе (как было) неверно: рядом с видео в
+# Google Диске лежат SRT, и без них 14 облачных видео навсегда числились
+# «телеметрии нет», а пометки на них оставались без координат.
+TELEMETRY_EXTS = {".srt"}
+
 # Ранжирование детекций (ручных и модели) на странице плеера -- см.
 # detection_priorities в init_db. Только человек может проставить любое из
 # этих значений (включая CONFIRMED_PERSON) -- сервер никогда не пишет сюда
@@ -1728,10 +1735,15 @@ def cloud_timestamp(value):
         return 0.0
 
 
-def scan_cloud_materials(conn, list_folder=None, log=None):
+def scan_cloud_materials(conn, list_folder=None, log=None, telemetry_out=None):
     """Материал в подключённых облачных хранилищах.
 
     Возвращает [(rel_path, kind, account_id, file_id, size)].
+
+    telemetry_out -- необязательный список, куда складываются найденные
+    рядом SRT в том же виде. Отдельным списком, а не в общей выдаче:
+    телеметрия не материал, и попав в reports она стала бы «файлом» в
+    списке, в очереди обработки и в знаменателе покрытия.
 
     rel_path строится КАК У ЛОКАЛЬНОГО ФАЙЛА -- "Папка/Файл.MP4". Это не
     косметика: по rel_path ищется существующая запись в reports (см.
@@ -1753,7 +1765,8 @@ def scan_cloud_materials(conn, list_folder=None, log=None):
     for acc in cloud_accounts(conn, enabled_only=True):
         try:
             lister = list_folder or _cloud_lister(acc, conn)
-            _walk_cloud(lister, acc.get("root_id") or "", "", out, acc, depth=0)
+            _walk_cloud(lister, acc.get("root_id") or "", "", out, acc, depth=0,
+                        telemetry_out=telemetry_out)
             update_cloud_account(conn, acc["id"], last_error=None,
                                   last_ok_at=datetime.now().isoformat())
         except Exception as e:
@@ -1772,15 +1785,23 @@ def _cloud_lister(acc, conn=None):
     return provider_for_account(conn, acc).list_folder
 
 
-def _walk_cloud(list_folder, folder_id, prefix, out, acc, depth):
+def _walk_cloud(list_folder, folder_id, prefix, out, acc, depth,
+                telemetry_out=None):
     if depth > CLOUD_MAX_DEPTH:
         return
     for item in list_folder(folder_id):
         rel = (prefix + "/" + item.name) if prefix else item.name
         if item.is_folder:
-            _walk_cloud(list_folder, item.id, rel, out, acc, depth + 1)
+            _walk_cloud(list_folder, item.id, rel, out, acc, depth + 1,
+                        telemetry_out)
             continue
         ext = os.path.splitext(item.name)[1].lower()
+        if ext in TELEMETRY_EXTS:
+            # Собираем ОТДЕЛЬНО от материала: SRT не должен попасть в reports.
+            if telemetry_out is not None:
+                telemetry_out.append((rel, acc["id"], item.id, item.size,
+                                      cloud_timestamp(item.modified)))
+            continue
         if ext not in MEDIA_EXTS:
             continue
         kind = "video" if ext in VIDEO_EXTS else "photo"

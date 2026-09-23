@@ -1357,6 +1357,11 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 .thumb-wrap:hover {{ border-color:#3355aa; }}
 .thumb-wrap .kind-icon {{ width:auto; font-size:16px; }}
 .thumb-img {{ width:100%; height:100%; object-fit:cover; display:block; }}
+/* Ожидание превью -- тот же спиннер, что на карточке операции. Класс
+   снимается и при загрузке, и при отказе: крутилка над тем, чего не
+   будет, врёт. Файл свой, из static/ -- в поле интернета нет. */
+.thumb-wrap.spin {{ background:url(/static/spinner.gif) center/78% auto no-repeat; }}
+@media (prefers-reduced-motion:reduce) {{ .thumb-wrap.spin {{ background-image:none; }} }}
 .playerlink {{ font-size:14px; padding:4px 12px; border-radius:5px; border:1px solid #3355aa;
                color:#8ecbff; text-decoration:none; white-space:nowrap; display:flex; align-items:center;
                justify-content:center; flex-shrink:0; }}
@@ -1623,9 +1628,10 @@ function renderItems(items) {{
     const mediaHref = it.kind === 'video'
       ? `/report/${{it.report_id}}/player/`
       : `/report/${{it.report_id}}/viewer/`;
-    const thumb = `<a class="thumb-wrap" href="${{mediaHref}}" title="Открыть">
+    const thumb = `<a class="thumb-wrap spin" href="${{mediaHref}}" title="Открыть">
            <img class="thumb-img" src="/api/thumbnail/${{encodeURIComponent(it.name)}}" loading="lazy"
-                onerror="this.style.display='none'; this.nextElementSibling.style.display='';">
+                onload="this.parentNode.classList.remove('spin')"
+                onerror="this.parentNode.classList.remove('spin'); this.style.display='none'; this.nextElementSibling.style.display='';">
            <span class="kind-icon" style="display:none">${{icon}}</span>
          </a>`;
     let right = `<span class="badge ${{it.status}}">${{badgeLabel(it.status)}}</span>`;
@@ -2192,6 +2198,29 @@ table.rep td.dim{{color:var(--dim)}}
 .shot.noshot::after{{content:'▭';position:absolute;inset:0;display:flex;
   align-items:center;justify-content:center;color:var(--dim);
   font-size:calc(var(--thumb)*.4)}}
+
+/* ОЖИДАНИЕ КАДРА -- один спиннер на всю платформу (static/spinner.gif).
+   Лежит ПОД картинкой, как и запасной значок: строка не прыгает по высоте
+   и выглядит одинаково до и после загрузки.
+
+   Класс снимается И при успехе, И при отказе. При успехе -- чтобы браузер
+   не крутил анимацию под непрозрачной картинкой (в списке таких строк
+   двести). При отказе -- потому что крутилка над тем, что уже никогда не
+   загрузится, врёт: человек ждёт вместо того, чтобы понять, что ждать
+   нечего. Ровно тот молчаливый отказ, против которого весь проект.
+
+   Файл отдаётся своей же статикой, а не из сети: платформа обязана
+   работать в поле без интернета. */
+.spin{{background-image:url(/static/spinner.gif);background-repeat:no-repeat;
+  background-position:center;background-size:78% auto}}
+/* Анимацию GIF нельзя остановить из CSS, поэтому при просьбе убрать
+   движение просто не показываем её -- под ней остаётся статичный значок. */
+/* Скобки разнесены по строкам НАМЕРЕННО: страж test_no_template_braces_leaked
+   ищет в готовой странице «}}» как признак ошибки экранирования и не может
+   отличить её от двух подряд закрывающих скобок вложенного CSS. */
+@media (prefers-reduced-motion:reduce){{
+  .spin{{background-image:none}}
+}}
 .find:hover .shot{{outline:1px solid var(--accent);outline-offset:-1px}}
 
 /* Окно предпросмотра. Появляется по наведению на кадр, закрывается
@@ -2219,8 +2248,9 @@ table.rep td.dim{{color:var(--dim)}}
 .peek-box rect.under{{stroke:rgba(0,0,0,.75);stroke-width:3}}
 .peek-busy{{position:absolute;top:6px;left:6px;z-index:2;font-size:10.5px;
   color:#e8eeec;background:rgba(0,0,0,.5);padding:2px 6px;border-radius:4px;
-  display:none}}
-.peek-busy.on{{display:block}}
+  display:none;align-items:center;gap:5px}}
+.peek-busy.on{{display:flex}}
+.peek-busy i.spin{{width:20px;height:20px;flex-shrink:0;background-size:contain}}
 .peek-cap{{font-size:12px;color:var(--soft);padding:7px 10px;
   border-top:1px solid var(--line);white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}}
@@ -2359,9 +2389,10 @@ function fileRow(f) {{
   const glyph = f.kind === 'video' ? '▭' : '🖼';
   // onerror убирает картинку, и из-под неё показывается значок. Превью
   // может не быть законно: файл только положили, воркер до него не дошёл.
-  const thumb = `<span class="thumb"><span class="fb">${{glyph}}</span>` +
+  const thumb = `<span class="thumb spin"><span class="fb">${{glyph}}</span>` +
     `<img src="/api/thumbnail/${{key}}" alt="" loading="lazy" ` +
-    `decoding="async" onerror="this.remove()"></span>`;
+    `decoding="async" onload="this.parentNode.classList.remove('spin')" ` +
+    `onerror="this.parentNode.classList.remove('spin');this.remove()"></span>`;
   return `<a class="row" href="${{href}}">
     ${{thumb}}
     <span class="nm">${{esc(f.name)}}</span>
@@ -2419,10 +2450,14 @@ function render() {{
           // Кадр находки. Имена файлов с дрона неразличимы, подпись вроде
           // «резко чёрное» тоже мало что говорит -- узнаётся именно кадр.
           const cap = esc(f.label || '') + (tc ? ' · ' + tc : '');
+          // Спиннер ставим ТОЛЬКО когда кадр реально ожидается (f.preview
+          // есть). Если превью нет вовсе -- сразу ровный прямоугольник:
+          // крутить над тем, чего не будет, значит обещать несбыточное.
           const shot = f.preview
-            ? `<span class="shot" onmouseenter="showPeek(this,'${{f.preview}}','${{cap}}',${{f.obs_id || 'null'}},${{JSON.stringify(f.bbox || null)}})">
+            ? `<span class="shot spin" onmouseenter="showPeek(this,'${{f.preview}}','${{cap}}',${{f.obs_id || 'null'}},${{JSON.stringify(f.bbox || null)}})">
                  <img src="${{f.preview}}" alt="" loading="lazy" decoding="async"
-                      onerror="this.parentNode.classList.add('noshot');this.remove()">${{boxSvg(f.bbox)}}</span>`
+                      onload="this.parentNode.classList.remove('spin')"
+                      onerror="this.parentNode.classList.remove('spin');this.parentNode.classList.add('noshot');this.remove()">${{boxSvg(f.bbox)}}</span>`
             : `<span class="shot noshot"></span>`;
           const status = f.status
             ? `<span class="tag st ${{f.priority}}">${{esc(f.status)}}</span>` : '';
@@ -2970,7 +3005,7 @@ function peek() {{
   peekEl.innerHTML =
     `<div class="peek-view">
        <button class="peek-x" title="Закрыть">×</button>
-       <span class="peek-busy">загружаю кадр…</span>
+       <span class="peek-busy"><i class="spin"></i>загружаю кадр…</span>
        <span class="peek-hint">клик и колесо — масштаб, перетаскивание — сдвиг</span>
        <div class="peek-zoom">
          <img alt="">
@@ -4383,9 +4418,23 @@ def get_telemetry_for_report(report):
     парсер из sar_video_review.py."""
     report_id = report["report_id"]
     if report_id not in _telemetry_cache:
-        srt_path = os.path.splitext(report["abs_path"])[0] + ".srt"
+        # ПУТЬ ВЫЧИСЛЯЕТСЯ, а не берётся из abs_path.
+        #
+        # У облачного материала воркер пишет в abs_path пустую строку, и
+        # дальше всё рушилось молча: os.path.splitext("")[0] + ".srt" даёт
+        # ".srt", которого нет, а find_telemetry_for_video() сопоставляет по
+        # Path(video_path).stem -- у пустой строки он пустой и не совпадает
+        # ни с чем. То есть SRT не находился НИКОГДА: ни рядом с видео, ни в
+        # папке telemetry/, даже если человек положил его туда руками.
+        # Пометки на облачном видео оставались без координат, без ошибки.
+        #
+        # Пятый случай одной и той же ошибки -- «где файл» спрашивают у
+        # диска, а облако на это не отвечает. См. CLAUDE.md.
+        video_path = sar_common.material_path(
+            os.path.abspath(SERVER_CFG["watch_dir"]), report["rel_path"])
+        srt_path = os.path.splitext(video_path)[0] + ".srt"
         if not os.path.exists(srt_path):
-            match, reason = sar_common.find_telemetry_for_video(report["abs_path"], _TELEMETRY_INDEX)
+            match, reason = sar_common.find_telemetry_for_video(video_path, _TELEMETRY_INDEX)
             srt_path = str(match) if match else None
         if srt_path and os.path.exists(srt_path):
             detection_cfg = load_detection_config(
@@ -8505,6 +8554,26 @@ h1 {{ font-size:17px; margin:6px 0 4px; }}
           padding:9px 16px; border-radius:8px; font-size:13px; opacity:0;
           pointer-events:none; transition:opacity .18s; }}
 .toast.on {{ opacity:1; }}
+/* Кадр режет ВОРКЕР, и между созданием пометки и готовым превью проходит
+   до полуминуты (замерено на боевой находке: 24 с). Всё это время страница
+   показывала битую картинку -- то есть «сломалось», хотя на деле «ещё не
+   готово». В списке находок этот случай обрабатывался, а здесь нет. */
+/* ЭТА СТРОКА НЕСУЩАЯ, не убирать.
+   Атрибут hidden прячет элемент правилом БРАУЗЕРА [hidden]{{display:none}},
+   а любой авторский display его перебивает -- авторские стили сильнее
+   браузерных независимо от специфичности. Без неё display:flex ниже
+   означал, что блок виден ВСЕГДА: непрозрачный фон закрывал готовый кадр,
+   и над нормальным фото бесконечно крутился спиннер. */
+.shot-wait[hidden] {{ display:none; }}
+.shot-wait {{ position:absolute; inset:0; margin:0; display:flex;
+              flex-direction:column; gap:10px;
+              align-items:center; justify-content:center;
+              font-size:13px; color:#7c8790; background:#15181b; }}
+/* Тот же спиннер, что и в списках (static/spinner.gif) -- отдаётся своей
+   статикой, потому что платформа обязана работать в поле без интернета. */
+.shot-wait i {{ width:96px; height:96px; display:block; flex-shrink:0;
+                background:url(/static/spinner.gif) center/contain no-repeat; }}
+@media (prefers-reduced-motion:reduce) {{ .shot-wait i {{ display:none; }} }}
 </style></head>
 <body>
 <p class="crumbs">{crumbs}</p>
@@ -8521,11 +8590,24 @@ h1 {{ font-size:17px; margin:6px 0 4px; }}
   <div class="left">
     <div class="view" id="view">
       <div class="zoom" id="zoom">
-        <img id="shot" src="{img_src}" alt="Кадр находки">
+        <!-- onerror НЕ зовёт функцию: скрипт объявлен ниже по странице, и
+             картинка успевает отвалиться раньше, чем он разобран. Вызов
+             падал с «shotMissing is not defined», обработчик не выполнялся,
+             и оставалась ровно битая картинка. Здесь только пометка, а
+             разбирает её скрипт, когда бы тот ни загрузился. -->
+        <img id="shot" src="{img_src}" alt="Кадр находки" onerror="this.dataset.failed='1'">
         <svg class="box" id="box" viewBox="0 0 1 1" preserveAspectRatio="none">
           <rect class="under"></rect><rect></rect>
         </svg>
       </div>
+      <!-- Блок ожидания -- СОСЕД .zoom, а не его ребёнок. У .zoom нет
+           собственных размеров: он подстраивается под картинку, и пока та
+           не загрузилась, схлопывается почти в ноль. Внутри него inset:0
+           давал коробочку в угол, куда кот не помещался. Здесь же контейнер
+           во всю высоту просмотра. Заодно блок не уезжает вместе с
+           масштабированием и панорамированием -- их transform висит на
+           .zoom. -->
+      <p class="shot-wait" id="shotwait" hidden><i></i><span>Кадр готовится…</span></p>
     </div>
     <p class="hint">Клик — приблизить, Shift+клик — отдалить, колесо — масштаб,
     перетаскивание — сдвиг кадра. Кадр показан целиком, без обрезки.</p>
@@ -8653,6 +8735,66 @@ function toast(text) {{
   t.textContent = text; t.classList.add('on');
   setTimeout(() => t.classList.remove('on'), 2200);
 }}
+
+// Превью ещё не вырезано воркером. Это НЕ ошибка -- ждём и пробуем снова,
+// иначе человек видит битую картинку и уходит, считая находку испорченной.
+// Потолок нужен: если кадр не получился вовсе (исходника нет даже в облаке),
+// бесконечный опрос молча грузил бы сервер до закрытия вкладки.
+var shotTries = 0, shotTimer = null;
+function shotMissing() {{
+  var img = document.getElementById('shot'),
+      wait = document.getElementById('shotwait');
+  if (!img || !wait) return;
+  img.style.visibility = 'hidden';
+  wait.hidden = false;
+  if (shotTries >= 12) {{           // ~1 минута
+    // Спиннер УБИРАЕМ: крутилка над тем, что уже не придёт, обещает
+    // несбыточное. Меняем только подпись, не всю разметку.
+    var icon = wait.querySelector('i'), msg = wait.querySelector('span');
+    if (icon) icon.style.display = 'none';
+    if (msg) msg.textContent = 'Кадр не удалось подготовить';
+    return;
+  }}
+  shotTries++;
+  // ПОВТОР ПО ТАЙМЕРУ, А НЕ ПО СОБЫТИЮ 'error'.
+  //
+  // Раньше следующая попытка назначалась только из обработчика ошибки.
+  // Если запрос не падал, а ЗАВИСАЛ -- сервер перезапустили, сеть моргнула,
+  // туннель переподключился -- ошибки не происходило, и цепочка вставала
+  // навсегда. Снаружи это выглядело как бесконечное «Кадр готовится…»
+  // над кадром, который давно готов.
+  //
+  // Таймер идёт независимо и сам проверяет, появилась ли картинка.
+  clearTimeout(shotTimer);
+  shotTimer = setTimeout(function () {{
+    if (img.naturalWidth > 0) {{      // успели загрузить -- ждать больше нечего
+      img.style.visibility = '';
+      wait.hidden = true;
+      return;
+    }}
+    var base = img.src.split('&retry=')[0];
+    img.src = base + '&retry=' + shotTries;
+    shotMissing();                    // следующая попытка не ждёт ошибки
+  }}, 5000);
+}}
+document.addEventListener('DOMContentLoaded', function () {{
+  var img = document.getElementById('shot'),
+      wait = document.getElementById('shotwait');
+  if (!img || !wait) return;
+  img.addEventListener('load', function () {{
+    // Успех после ожидания: вернуть кадр и убрать сообщение.
+    img.style.visibility = '';
+    wait.hidden = true;
+  }});
+  img.addEventListener('error', shotMissing);
+  // Картинка могла отвалиться ДО того, как скрипт разобран -- тогда
+  // события 'error' мы уже не услышим. Два признака этого: пометка от
+  // inline-обработчика и загруженная «пустышка» нулевой ширины.
+  if (img.dataset.failed === '1' ||
+      (img.complete && img.naturalWidth === 0)) {{
+    shotMissing();
+  }}
+}});
 
 async function copyLink() {{
   const link = PERMALINK || location.href;

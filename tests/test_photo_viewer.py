@@ -131,7 +131,7 @@ def test_thumbnail_is_clickable_and_outside_the_row_anchor():
     # .format() -- иначе в сыром шаблоне скобки удвоены (${{thumb}})
     html = sar_server.TREE_PAGE_HTML.format(
         viewer_name="tester", upload_section="").replace("\n", " ")
-    assert '<a class="thumb-wrap"' in html
+    assert '<a class="thumb-wrap spin"' in html
     # в разметке строки превью идёт ДО открывающего <a class="${cls}">
     row = html[html.index('<div class="item-row">'):]
     assert row.index("${thumb}") < row.index('<a class="${cls}"')

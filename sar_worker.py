@@ -34,6 +34,7 @@ import atexit
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -456,6 +457,112 @@ def _srt_for_video(abs_path):
     match, _reason = sar_common.find_telemetry_for_video(
         abs_path, _telemetry_index_for_worker())
     return str(match) if match else None
+
+
+TELEMETRY_FETCHES_PER_PASS = 4   # SRT мелкие, но качать всю пачку разом незачем
+
+
+def fetch_cloud_telemetry(found):
+    """Кладёт облачные SRT в папку telemetry/, откуда их видит весь проект.
+
+    ЗАЧЕМ ОТДЕЛЬНЫЙ ПУТЬ. Телеметрия в Google Диске лежит рядом с видео, но
+    облачный обход отбрасывал всё, кроме видео и фото, -- то есть платформа
+    этих файлов не видела в принципе. На боевом подключении там 36 SRT, из
+    них 14 подходят к зарегистрированным видео. Все они числились
+    «телеметрии нет», и пометки на таком видео оставались без координат.
+
+    КУДА КЛАДЁМ. В telemetry/ рядом с проектом, а не в staging: staging
+    вытесняет по давности, и телеметрия, за которой сходили в облако,
+    исчезала бы, освобождая место под очередное видео. Файл мелкий
+    (медиана около 2 МБ), держать его постоянно дешевле, чем качать снова.
+
+    ИМЯ СОХРАНЯЕМ ИСХОДНОЕ: сопоставление видео и SRT идёт по имени файла
+    (find_telemetry_for_video), и переименование разорвало бы связь.
+    """
+    fetcher = get_fetcher()
+    if fetcher is None:
+        return 0
+    tdir = sar_common.resolve_telemetry_dir(
+        WATCH_DIR, CFG.get("telemetry_dir", sar_common.DEFAULT_TELEMETRY_DIR_NAME))
+    # Проверяем по ИНДЕКСУ, а не по конечному пути: telemetry/ сканируется
+    # рекурсивно, и та же телеметрия может уже лежать в подпапке (на боевой
+    # машине это «12.08.2026 Субтитры полетов»). Проверка «нет файла ровно
+    # по этому пути» скачала бы второй экземпляр, а дальше поиск SRT честно
+    # сообщал бы о неоднозначности имени и молча брал один из двух.
+    known = set(_telemetry_index_for_worker().get("by_stem", {}))
+    got = 0
+    for rel, _acc_id, file_id, size, _mtime in found:
+        if got >= TELEMETRY_FETCHES_PER_PASS:
+            break
+        base = os.path.basename(rel)
+        if os.path.splitext(base)[0].lower() in known:
+            continue                      # уже есть где-то в telemetry/
+        dest = os.path.join(str(tdir), base)
+        if os.path.exists(dest) and os.path.getsize(dest) > 0:
+            continue                      # уже лежит -- второй раз не качаем
+        key = "srt:" + rel
+        if not _may_try(key):
+            continue
+        local = None
+        try:
+            local = fetcher.ensure_local(rel, file_id=file_id,
+                                         expected_size=size or 0, pin=True)
+            # Через временный файл: оборванное копирование оставило бы
+            # обрезанный SRT, а он разбирается молча и даёт неполный трек.
+            tmp = dest + ".part"
+            shutil.copyfile(local, tmp)
+            os.replace(tmp, dest)
+            got += 1
+            print(f"[телеметрия] из облака: {os.path.basename(rel)}", flush=True)
+        except Exception as e:
+            _note_failure(key, str(e))
+            print(f"[телеметрия] не удалось забрать {rel}: {e}", flush=True)
+        finally:
+            if local is not None:
+                try:
+                    fetcher.release(rel)
+                except Exception:
+                    # Закрепление снимаем «по возможности»: не снятое займёт
+                    # место, но потерять уже скачанное хуже.
+                    pass
+    if got:
+        # Индекс строится один раз на запуск -- без сброса скачанное не
+        # заработало бы до перезапуска воркера.
+        global _telemetry_index
+        _telemetry_index = None
+        _forget_missing_telemetry()
+    return got
+
+
+def _forget_missing_telemetry():
+    """Снимает пометку «телеметрии нет» с видео, для которых SRT появился.
+
+    Пометка ставится намеренно и навсегда (иначе 95 видео без телеметрии
+    разбирались бы заново каждый проход). Но теперь файл ПОЯВИЛСЯ, и без
+    сброса он остался бы непрочитанным до конца времён -- та же ловушка,
+    от которой пометка защищает, только с другой стороны.
+    """
+    idx = _telemetry_index_for_worker()
+    stems = set(idx.get("by_stem", {}))
+    if not stems:
+        return 0
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT r.report_id, r.rel_path FROM reports r "
+            "JOIN telemetry_tracks t ON t.report_id = r.report_id "
+            "WHERE r.kind='video' AND t.raw_points = 0").fetchall()
+        hit = [r["report_id"] for r in rows
+               if os.path.splitext(os.path.basename(r["rel_path"]))[0].lower() in stems]
+        for rid in hit:
+            conn.execute("DELETE FROM telemetry_tracks WHERE report_id = ?", (rid,))
+        if hit:
+            conn.commit()
+            print(f"[телеметрия] появилась у {len(hit)} видео -- разберём заново",
+                  flush=True)
+        return len(hit)
+    finally:
+        conn.close()
 
 
 def _thin_track(points, limit=TRACK_MAX_POINTS):
@@ -1244,8 +1351,10 @@ def watcher_loop():
             # пометками, обсуждениями, отметками просмотра.
             cloud_ops = {a["id"]: a.get("operation_id")
                          for a in sar_common.cloud_accounts(get_db())}
+            cloud_srt = []
             for rel, kind, acc_id, file_id, size, mtime in sar_common.scan_cloud_materials(
-                    get_db(), log=lambda m: print(m, flush=True)):
+                    get_db(), log=lambda m: print(m, flush=True),
+                    telemetry_out=cloud_srt):
                 conn = get_db()
                 row, what = sar_common.match_existing_material(conn, rel, WATCH_DIR)
                 if what == "skip":
@@ -1301,6 +1410,12 @@ def watcher_loop():
                 else:
                     sar_common.attach_by_folder(conn, WATCH_DIR, report_id, rel)
                 conn.close()
+
+            # Телеметрия из облака -- ПОСЛЕ материала и в пределах того же
+            # обхода: списки собраны за один проход, второй раз ходить в
+            # API незачем.
+            if cloud_srt:
+                fetch_cloud_telemetry(cloud_srt)
 
         except Exception as e:
             print(f"[облако] обход не удался: {e}", flush=True)

@@ -138,7 +138,8 @@ def test_broken_preview_lookup_does_not_kill_the_findings_list():
 # --- разметка списка ------------------------------------------------------
 
 def test_findings_row_shows_the_frame():
-    assert 'class="shot"' in CARD
+    # класс дополнен spin -- спиннером ожидания кадра (см. test_spinner.py)
+    assert 'class="shot spin"' in CARD
     assert "f.preview" in CARD
 
 

@@ -31,7 +31,8 @@ CARD = sar_server.OPERATION_CARD_HTML
 def test_file_row_shows_a_real_preview_not_a_glyph():
     """Регрессия: строка файла рисовала символ ▭ вместо кадра."""
     assert "/api/thumbnail/" in CARD, "строка файла не запрашивает превью"
-    assert 'class="thumb"' in CARD
+    # класс дополнен spin -- спиннером ожидания кадра (см. test_spinner.py)
+    assert 'class="thumb spin"' in CARD
 
 
 def test_preview_is_requested_by_full_path():
@@ -99,7 +100,9 @@ def test_missing_preview_does_not_leave_a_hole():
     """Превью может законно не быть: файл только положили, воркер до него
     не дошёл. Строка при этом не должна ни прыгать, ни показывать
     сломанную картинку."""
-    assert "onerror=\"this.remove()\"" in CARD, (
+    # onerror теперь ещё и снимает спиннер: крутилка над тем, что уже не
+    # загрузится, обещала бы несбыточное (страж -- test_spinner.py).
+    assert "onerror=" in CARD and "this.remove()" in CARD, (
         "нет запасного пути: браузер покажет значок битой картинки")
     assert 'class="fb"' in CARD, "нет значка под картинкой"
 
