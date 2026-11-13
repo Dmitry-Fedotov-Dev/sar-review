@@ -1,0 +1,119 @@
+# Поставка SAR Review через cd (github.com/Dmitry-Fedotov-Dev/cd).
+#
+# Каждый push в master: тесты -> если зелёные, деплой на КАЖДЫЙ сервер из
+# списка. Ключей и паролей в репозитории нет: задание доказывает, кто оно,
+# OIDC-токеном GitHub, а сервер сам решает, пускать ли (cdctl project add).
+#
+# Куда деплоить -- переменные репозитория (Settings -> Secrets and variables
+# -> Actions -> Variables), подробно в deploy/cd/README.md:
+#
+#   CD_TARGETS  JSON-список серверов, например
+#               [{"server":"https://deploy.a.example","project":"sar"},
+#                {"server":"https://deploy.b.example","project":"sar-alai"}]
+#               необязательно: "environment" (по умолчанию production)
+#   или проще, для одного сервера:
+#   CD_SERVER   https://deploy.example.com
+#   CD_PROJECT  имя проекта на нём (по умолчанию sar-review)
+#
+# Ещё одно имя на ТОМ ЖЕ сервере сюда не добавляется: это клон
+# (`cdctl project clone`), он получает каждый релиз сам.
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: deploy | status | logs | rollback
+        type: choice
+        options: [deploy, status, logs, rollback]
+        default: deploy
+      only:
+        description: только этот проект (имя из CD_TARGETS); пусто -- все
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Статус, журнал и откат не трогают код -- тесты им не нужны.
+    if: github.event_name == 'push' || inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          CD_TARGETS: ${{ vars.CD_TARGETS }}
+          CD_SERVER: ${{ vars.CD_SERVER }}
+          CD_PROJECT: ${{ vars.CD_PROJECT }}
+          ONLY: ${{ inputs.only }}
+        shell: python
+        run: |
+          import json, os, sys
+          raw = os.environ.get("CD_TARGETS", "").strip()
+          if raw:
+              targets = json.loads(raw)
+          elif os.environ.get("CD_SERVER"):
+              targets = [{"server": os.environ["CD_SERVER"],
+                          "project": os.environ.get("CD_PROJECT") or "sar-review"}]
+          else:
+              targets = []
+          for t in targets:
+              if not t.get("server") or not t.get("project"):
+                  sys.exit(f"CD_TARGETS: у каждой записи нужны server и project: {t}")
+              t.setdefault("environment", "production")
+          only = os.environ.get("ONLY", "").strip()
+          if only:
+              targets = [t for t in targets if t["project"] == only]
+          if not targets:
+              # Не молчим: зелёный прогон без единого деплоя читался бы как
+              # «выкатили», хотя не выкатили никуда.
+              sys.exit("Некуда деплоить: задайте CD_TARGETS или CD_SERVER "
+                       "(см. deploy/cd/README.md)" + (f", или проекта {only} нет в списке" if only else ""))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"include": targets}) + "\n")
+          for t in targets:
+              print(f"-> {t['project']} @ {t['server']} ({t['environment']})")
+
+  deploy:
+    needs: [test, targets]
+    # test пропускается для status/logs/rollback -- это не провал.
+    if: always() && needs.targets.result == 'success' && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # OIDC-токен -- единственный пропуск на сервер
+    strategy:
+      fail-fast: false # отказ одного сервера не отменяет остальные
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    environment: ${{ matrix.environment }}
+    concurrency:
+      group: deploy-${{ matrix.server }}-${{ matrix.project }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Dmitry-Fedotov-Dev/cd@v1
+        with:
+          server: ${{ matrix.server }}
+          project: ${{ matrix.project }}
+          action: ${{ inputs.action || 'deploy' }}

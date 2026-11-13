@@ -1,0 +1,18 @@
+# В образ идёт только то, что нужно для работы. Тесты гоняются в CI до
+# отправки на сервер (.github/workflows/deploy.yml).
+.git
+.github
+tests
+docs
+monitoring
+deploy
+sar_data
+sar_backups
+sar_config.json
+sar_config.json.*
+telemetry
+**/__pycache__
+.pytest_cache
+.pytest_tmp
+*.db
+*.log

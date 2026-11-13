@@ -192,7 +192,10 @@ def repair_html(out_dir):
     fixed = 0
     for idx in broken:
         target = by_idx.get(idx)
-        if not target or os.path.basename(target) not in alive:
+        # Имя файла -- без os.path.basename: пути в отчётах написаны с
+        # обратным слэшем (отчёты делались на Windows), а на Linux-сервере
+        # basename его не режет и ни один кадр не считался бы уцелевшим.
+        if not target or target.replace("\\", "/").rsplit("/", 1)[-1] not in alive:
             continue
         old = os.path.join("frames", f"f{idx:07d}_full.jpg")
         for a, b in zip(path_variants(old), path_variants(target)):

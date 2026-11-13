@@ -16,6 +16,10 @@ import sar_worker
 
 def test_low_priority_kwargs_on_windows(monkeypatch):
     monkeypatch.setattr(os, "name", "nt")
+    # Константа есть только в subprocess на Windows. Подставляем настоящее
+    # значение, чтобы проверка логики шла и в CI на Linux, а не падала на
+    # отсутствующем атрибуте.
+    monkeypatch.setattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000, raising=False)
     kwargs = sar_worker._low_priority_kwargs()
     assert "creationflags" in kwargs
     assert kwargs["creationflags"] == subprocess.BELOW_NORMAL_PRIORITY_CLASS
