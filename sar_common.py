@@ -663,6 +663,234 @@ def display_name_for(row):
     return row["first_name"] or f"id{row['chat_id']}"
 
 
+# ---------------------------------------------------------------------------
+# ЛЮДИ И ДОСТУП -- одна логика для бота, командной строки (sar_people.py) и
+# раздела «Люди» в /admin.
+#
+# Раньше она жила только в боте, и без Telegram на платформе нельзя было
+# получить никакой роли: вход по общему паролю анонимен, а администратора
+# назначал только бот. Свежая установка оказывалась пустой и запертой.
+# Теперь бот -- лишь один из способов ДОСТАВИТЬ ссылку; решения о доступе
+# принимаются здесь, и второй копии этой логики нет нигде (тот же урок,
+# что с папкой резервных копий, посчитанной трижды).
+#
+# ЛЮДИ БЕЗ TELEGRAM. Человек в базе определяется chat_id -- первичным
+# ключом таблицы. У личного чата Telegram он всегда положительный, поэтому
+# людям, заведённым вручную, выдаются ОТРИЦАТЕЛЬНЫЕ номера: схема не
+# меняется, пересечений нет, а всё, что пишет в Telegram, обязано
+# пропускать chat_id < 0 (см. is_local_person). Это осознанно быстрый
+# вариант; отдельная таблица людей -- когда понадобится очередь работы.
+# ---------------------------------------------------------------------------
+
+PERSON_STATUSES = ("pending", "approved", "denied")
+
+
+class PersonError(ValueError):
+    """Действие с человеком невозможно -- текст для человека."""
+
+
+def is_local_person(chat_id):
+    """Заведён вручную, без Telegram: писать ему некуда."""
+    return int(chat_id) < 0
+
+
+def _now_iso():
+    from datetime import timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def person_get(conn, chat_id):
+    return conn.execute("SELECT * FROM telegram_access_requests WHERE chat_id=?",
+                        (int(chat_id),)).fetchone()
+
+
+def person_upsert_request(conn, chat_id, username, first_name):
+    """(row, is_new). Повторный /start от УЖЕ существующей заявки не
+    сбрасывает её статус обратно в pending -- иначе approved/denied
+    стирался бы каждым повторным /start."""
+    row = person_get(conn, chat_id)
+    if row is not None:
+        return row, False
+    conn.execute(
+        "INSERT INTO telegram_access_requests (chat_id, username, first_name, status, requested_at) "
+        "VALUES (?, ?, ?, 'pending', ?)", (chat_id, username, first_name, _now_iso()))
+    conn.commit()
+    return person_get(conn, chat_id), True
+
+
+def person_list(conn, status=None):
+    if status:
+        return conn.execute("SELECT * FROM telegram_access_requests WHERE status=? "
+                            "ORDER BY requested_at", (status,)).fetchall()
+    return conn.execute("SELECT * FROM telegram_access_requests "
+                        "ORDER BY requested_at").fetchall()
+
+
+def _approved_admins(conn):
+    return conn.execute(
+        "SELECT chat_id FROM telegram_access_requests WHERE status='approved' AND role=?",
+        (ROLE_ADMIN,)).fetchall()
+
+
+def _guard_last_admin(conn, chat_id):
+    """Последнего администратора не разжаловать и не отключить: после этого
+    раздавать доступ стало бы некому, кроме владельца сервера с консолью."""
+    admins = [r["chat_id"] for r in _approved_admins(conn)]
+    if admins == [int(chat_id)]:
+        raise PersonError("это последний администратор — сначала назначьте другого")
+
+
+def person_set_status(conn, chat_id, status, decided_by=None):
+    if status not in PERSON_STATUSES:
+        raise PersonError(f"неизвестный статус «{status}»")
+    row = person_get(conn, chat_id)
+    if row is None:
+        raise PersonError("нет такого человека")
+    if status != "approved" and row["status"] == "approved" and row["role"] == ROLE_ADMIN:
+        _guard_last_admin(conn, chat_id)
+    conn.execute("UPDATE telegram_access_requests SET status=?, decided_at=?, decided_by=? "
+                 "WHERE chat_id=?", (status, _now_iso(), decided_by, int(chat_id)))
+    conn.commit()
+
+
+def person_set_role(conn, chat_id, role):
+    if role not in VALID_ROLES:
+        raise PersonError(f"неизвестная роль «{role}»")
+    row = person_get(conn, chat_id)
+    if row is None:
+        raise PersonError("нет такого человека")
+    if role != ROLE_ADMIN and row["role"] == ROLE_ADMIN and row["status"] == "approved":
+        _guard_last_admin(conn, chat_id)
+    conn.execute("UPDATE telegram_access_requests SET role=? WHERE chat_id=?",
+                 (role, int(chat_id)))
+    conn.commit()
+
+
+def person_ensure_token(conn, chat_id):
+    """Персональный ключ. Создаётся один раз и переиспользуется, чтобы старая
+    ссылка у человека не переставала работать при каждом /help."""
+    row = person_get(conn, chat_id)
+    if row is None:
+        raise PersonError("нет такого человека")
+    if row["access_token"]:
+        return row["access_token"]
+    token = generate_access_token()
+    conn.execute("UPDATE telegram_access_requests SET access_token=? WHERE chat_id=?",
+                 (token, int(chat_id)))
+    conn.commit()
+    return token
+
+
+def person_drop_token(conn, chat_id):
+    """Сбрасывает ключ: старая ссылка сразу перестаёт пускать."""
+    conn.execute("UPDATE telegram_access_requests SET access_token=NULL WHERE chat_id=?",
+                 (int(chat_id),))
+    conn.commit()
+
+
+def person_new_token(conn, chat_id):
+    """Новая ссылка взамен старой (потеряна, попала не туда)."""
+    person_drop_token(conn, chat_id)
+    return person_ensure_token(conn, chat_id)
+
+
+def person_revoke(conn, chat_id, decided_by=None):
+    """Отозвать доступ: отказ + сброс ключа, ссылка перестаёт пускать сразу."""
+    person_set_status(conn, chat_id, "denied", decided_by)
+    person_drop_token(conn, chat_id)
+
+
+def _same_name(a, b):
+    """Сравнение имён без учёта регистра -- в Python, а не lower() в SQL:
+    SQLite приводит к нижнему регистру ТОЛЬКО латиницу, и «Саша»/«саша»
+    оказались бы разными людьми (поймано тестом)."""
+    return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+
+def _people_named(conn, name, field):
+    return [r for r in conn.execute("SELECT * FROM telegram_access_requests").fetchall()
+            if _same_name(r[field], name)]
+
+
+def person_find(conn, identifier):
+    """Человек по chat_id, @username или имени (без учёта регистра).
+
+    Имя -- для людей без Telegram: у них нет ни ника, ни запоминаемого
+    номера. Совпадение по имени должно быть ОДНОЗНАЧНЫМ, иначе ошибка с
+    подсказкой: угадывать, кому из двух «Саш» выдать права, нельзя.
+    """
+    ident = str(identifier).strip()
+    if not ident:
+        return None
+    if ident.lstrip("-").isdigit():
+        row = person_get(conn, int(ident))
+        if row is not None:
+            return row
+    rows = _people_named(conn, ident.lstrip("@"), "username")
+    if rows:
+        return rows[0]  # ник в Telegram уникален
+    rows = _people_named(conn, ident, "first_name")
+    if len(rows) > 1:
+        raise PersonError(f"«{ident}» — несколько человек, укажите номер: "
+                          + ", ".join(str(r["chat_id"]) for r in rows))
+    return rows[0] if rows else None
+
+
+def person_create_local(conn, name, role=None, decided_by=None):
+    """Завести человека без Telegram: сразу с доступом и с явной ролью.
+
+    Роль по умолчанию -- участник. Права администратора выдаются только
+    явно (role=ROLE_ADMIN): по имени или по догадке -- никогда.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise PersonError("не задано имя")
+    if len(name) > 60:
+        raise PersonError("имя длиннее 60 символов")
+    role = role or DEFAULT_ROLE
+    if role not in VALID_ROLES:
+        raise PersonError(f"неизвестная роль «{role}»")
+    clash = (_people_named(conn, name, "first_name")
+             or _people_named(conn, name.lstrip("@"), "username"))
+    clash = clash[0] if clash else None
+    if clash is not None:
+        raise PersonError(f"«{name}» уже есть (номер {clash['chat_id']}) — "
+                          f"выберите другое имя, иначе их не различить")
+    low = conn.execute("SELECT MIN(chat_id) m FROM telegram_access_requests").fetchone()["m"]
+    chat_id = min(int(low or 0), 0) - 1
+    now = _now_iso()
+    conn.execute(
+        "INSERT INTO telegram_access_requests (chat_id, username, first_name, status, "
+        "requested_at, decided_at, decided_by, role) VALUES (?, NULL, ?, 'approved', ?, ?, ?, ?)",
+        (chat_id, name, now, now, decided_by, role))
+    conn.commit()
+    return person_get(conn, chat_id)
+
+
+def personal_link_url(base, token, next_path=None):
+    """Ссылка входа. base -- адрес платформы; пустой -- относительная ссылка."""
+    import urllib.parse
+    url = f"{(base or '').rstrip('/')}/login?key={token}"
+    if next_path:
+        url += "&next=" + urllib.parse.quote(next_path, safe="")
+    return url
+
+
+def person_public(row):
+    """Запись для браузера и командной строки: БЕЗ ключа входа. Ключ --
+    это пароль человека; показывается только в момент выдачи."""
+    return {
+        "id": row["chat_id"],
+        "name": display_name_for(row),
+        "telegram": not is_local_person(row["chat_id"]),
+        "status": row["status"],
+        "role": row["role"] or DEFAULT_ROLE,
+        "role_label": ROLE_LABELS.get(row["role"] or DEFAULT_ROLE, row["role"]),
+        "has_link": bool(row["access_token"]),
+        "requested_at": row["requested_at"],
+    }
+
+
 def ai_scene_ref_key(object_class, source, first_frame_idx, first_bbox):
     """Стабильный отпечаток AI-сцены для detection_priorities -- НЕ
     позиционный group_id (см. group_hits_into_scenes), тот меняется при

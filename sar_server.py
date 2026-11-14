@@ -7278,6 +7278,24 @@ select, input[type=text], input[type=password] {{ background:#0d0d0d; color:#eee
     <span id="c_msg"></span>
   </div>
 </div>
+
+<h2 class="section">Люди</h2>
+<div class="lead">
+  Роль на платформе даёт только вход по личной ссылке; вход по общему
+  паролю — анонимный участник. Ссылку можно выдать здесь (человеку без
+  Telegram) или через бота. Ссылка — это пароль человека: она показывается
+  один раз, передайте её лично. Новая роль применится при следующем входе.
+</div>
+<div id="people"></div>
+<div class="card">
+  <h2>Добавить человека</h2>
+  <div class="row">
+    <input type="text" id="p_name" placeholder="имя" style="width:240px" maxlength="60">
+    <label class="fl">Роль <select id="p_role"></select></label>
+    <button onclick="addPerson()">Добавить и выдать ссылку</button>
+  </div>
+  <div id="p_msg" style="margin-top:10px"></div>
+</div>
 <script>
 let SCHEMA = {{}}, VALUES = {{}};
 
@@ -7483,8 +7501,116 @@ async function dropCloud(id) {{
   }}
 }}
 
+// --- люди -------------------------------------------------------------------
+let PEOPLE = {{people: [], roles: []}};
+const STATUS_LABEL = {{pending: 'ждёт одобрения', approved: 'доступ есть', denied: 'доступ отозван'}};
+
+function roleOptions(selected) {{
+  return PEOPLE.roles.map(r =>
+    `<option value="${{r.id}}"${{r.id === selected ? ' selected' : ''}}>${{esc(r.label)}}</option>`
+  ).join('');
+}}
+
+function renderPeople() {{
+  const box = document.getElementById('people');
+  if (!PEOPLE.people.length) {{
+    box.innerHTML = '<div class="card hint">Пока никого нет.</div>';
+  }} else {{
+    box.innerHTML = PEOPLE.people.map(p => `
+      <div class="card">
+        <div class="row">
+          <b>${{esc(p.name)}}</b>
+          <span class="hint">${{p.telegram ? 'Telegram' : 'без Telegram'}} · ${{STATUS_LABEL[p.status] || esc(p.status)}}
+            · ${{p.has_link ? 'ссылка выдана' : 'ссылки нет'}} · №${{p.id}}</span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <select onchange="setRole(${{p.id}}, this.value)">${{roleOptions(p.role)}}</select>
+          ${{p.status === 'approved'
+            ? `<button onclick="newLink(${{p.id}})">Новая ссылка</button>
+               <button class="danger" onclick="revokePerson(${{p.id}})">Отозвать доступ</button>`
+            : `<button onclick="approvePerson(${{p.id}})">Одобрить и выдать ссылку</button>`}}
+        </div>
+      </div>`).join('');
+  }}
+  document.getElementById('p_role').innerHTML = roleOptions('viewer');
+}}
+
+// Ссылку сервер отдаёт относительной: настоящий адрес знает только браузер
+// (за обратным прокси сервер видит внутренний http-порт).
+function showLink(path, who) {{
+  const url = location.origin + path;
+  document.getElementById('p_msg').innerHTML =
+    `<div>Ссылка для ${{esc(who)}} — передайте лично, она больше не будет показана:</div>
+     <input type="text" readonly value="${{esc(url)}}" style="width:100%" onclick="this.select()">`;
+}}
+
+async function peopleCall(url, body) {{
+  const r = await fetch(url, body === undefined ? {{}} : {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(body)
+  }});
+  const d = await r.json();
+  if (!r.ok || !d.ok) {{
+    document.getElementById('p_msg').textContent = d.error || 'Не получилось';
+    // список всё равно перечитываем: селект роли мог показать то, что не сохранилось
+    await loadPeople();
+    return null;
+  }}
+  PEOPLE = {{people: d.people, roles: d.roles}};
+  renderPeople();
+  return d;
+}}
+
+function personName(id) {{
+  const p = PEOPLE.people.find(x => x.id === id);
+  return p ? p.name : ('№' + id);
+}}
+
+async function loadPeople() {{
+  const r = await fetch('/api/admin/people');
+  const d = await r.json();
+  if (!d.ok) return;
+  PEOPLE = {{people: d.people, roles: d.roles}};
+  renderPeople();
+}}
+
+async function addPerson() {{
+  const name = document.getElementById('p_name').value;
+  const d = await peopleCall('/api/admin/people',
+    {{name: name, role: document.getElementById('p_role').value}});
+  if (!d) return;
+  document.getElementById('p_name').value = '';
+  showLink(d.link, d.person.name);
+}}
+
+async function setRole(id, role) {{
+  const d = await peopleCall('/api/admin/people/' + id + '/role', {{role: role}});
+  if (d) document.getElementById('p_msg').textContent =
+    personName(id) + ': роль изменена, применится при следующем входе.';
+}}
+
+async function newLink(id) {{
+  if (!confirm('Выдать новую ссылку? Прежняя перестанет действовать.')) return;
+  const who = personName(id);
+  const d = await peopleCall('/api/admin/people/' + id + '/link', {{}});
+  if (d) showLink(d.link, who);
+}}
+
+async function approvePerson(id) {{
+  const who = personName(id);
+  const d = await peopleCall('/api/admin/people/' + id + '/approve', {{}});
+  if (d) showLink(d.link, who);
+}}
+
+async function revokePerson(id) {{
+  if (!confirm('Отозвать доступ у ' + personName(id) + '? Ссылка перестанет пускать.')) return;
+  const d = await peopleCall('/api/admin/people/' + id + '/revoke', {{}});
+  if (d) document.getElementById('p_msg').textContent = 'Доступ отозван.';
+}}
+
 load();
 loadClouds();
+loadPeople();
 </script>
 </body></html>"""
 
@@ -7495,6 +7621,100 @@ def admin_page():
         return "Нужны права администратора", 403
     return ADMIN_PAGE_HTML.format(
         viewer_name=html_escape(session.get("viewer_name", "")))
+
+
+# --- люди и доступ (раздел «Люди» в /admin) ----------------------------------
+#
+# То же, что умеют бот и sar_people.py, той же логикой (sar_common.person_*).
+# Раньше роли раздавал только бот, и без Telegram платформа оставалась без
+# администратора. Ссылка входа отдаётся ОТНОСИТЕЛЬНОЙ: полный адрес
+# собирает браузер из location.origin -- за обратным прокси сервер видит
+# http и внутренний порт, а не тот адрес, по которому зашёл человек.
+# Ключ входа -- пароль человека: в списке его нет, только в ответе на выдачу.
+
+def _people_payload(conn):
+    rows = sar_common.person_list(conn)
+    return [sar_common.person_public(r) for r in rows]
+
+
+def _people_action(fn):
+    """Обёртка: только администратор, ошибки действия -- 400 с текстом."""
+    if not is_admin():
+        return jsonify({"ok": False, "error": "нужны права администратора"}), 403
+    conn = get_db()
+    try:
+        extra = fn(conn) or {}
+    except sar_common.PersonError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    roles = [{"id": r, "label": sar_common.ROLE_LABELS[r]} for r in
+             (sar_common.ROLE_VIEWER, sar_common.ROLE_MODERATOR,
+              sar_common.ROLE_ADMIN, sar_common.ROLE_MUTED)]
+    return jsonify(dict({"ok": True, "people": _people_payload(conn), "roles": roles}, **extra))
+
+
+def _link_path(token):
+    return sar_common.personal_link_url("", token)
+
+
+def _who_by_id(conn, person_id):
+    row = sar_common.person_get(conn, person_id)
+    if row is None:
+        raise sar_common.PersonError("нет такого человека")
+    return row
+
+
+# <int(signed=True)>, а не <int>: у людей без Telegram номер ОТРИЦАТЕЛЬНЫЙ
+# (sar_common.is_local_person), а обычный <int> его не принимает -- все
+# кнопки для них отвечали бы 404, молча. Поймано тестом.
+@app.route("/api/admin/people", methods=["GET", "POST"])
+def api_admin_people():
+    if request.method == "GET":
+        return _people_action(lambda conn: None)
+
+    def add(conn):
+        data = request.get_json(silent=True) or {}
+        row = sar_common.person_create_local(
+            conn, data.get("name"), (data.get("role") or "").strip() or None,
+            decided_by=session.get("tg_chat_id"))
+        token = sar_common.person_ensure_token(conn, row["chat_id"])
+        return {"person": sar_common.person_public(row), "link": _link_path(token)}
+    return _people_action(add)
+
+
+@app.route("/api/admin/people/<int(signed=True):person_id>/role", methods=["POST"])
+def api_admin_people_role(person_id):
+    def act(conn):
+        _who_by_id(conn, person_id)
+        sar_common.person_set_role(conn, person_id,
+                                   ((request.get_json(silent=True) or {}).get("role") or "").strip())
+    return _people_action(act)
+
+
+@app.route("/api/admin/people/<int(signed=True):person_id>/link", methods=["POST"])
+def api_admin_people_link(person_id):
+    def act(conn):
+        row = _who_by_id(conn, person_id)
+        if row["status"] != "approved":
+            raise sar_common.PersonError("доступ не выдан — сначала одобрите")
+        return {"link": _link_path(sar_common.person_new_token(conn, person_id))}
+    return _people_action(act)
+
+
+@app.route("/api/admin/people/<int(signed=True):person_id>/approve", methods=["POST"])
+def api_admin_people_approve(person_id):
+    def act(conn):
+        _who_by_id(conn, person_id)
+        sar_common.person_set_status(conn, person_id, "approved", session.get("tg_chat_id"))
+        return {"link": _link_path(sar_common.person_ensure_token(conn, person_id))}
+    return _people_action(act)
+
+
+@app.route("/api/admin/people/<int(signed=True):person_id>/revoke", methods=["POST"])
+def api_admin_people_revoke(person_id):
+    def act(conn):
+        _who_by_id(conn, person_id)
+        sar_common.person_revoke(conn, person_id, session.get("tg_chat_id"))
+    return _people_action(act)
 
 
 # --- подключение облачных хранилищ ------------------------------------------

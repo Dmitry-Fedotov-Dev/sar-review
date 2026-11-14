@@ -50,10 +50,12 @@ def recipients(conn):
 
     Заявки, которые ещё не одобрили или отклонили, пропускаем -- человек
     не получил доступа, и объявление про новые вкладки ему ни к чему.
+    Людей, заведённых без Telegram (chat_id < 0, sar_common.is_local_person),
+    тоже: писать им некуда, и каждый такой адрес был бы отказом в итоге.
     """
     rows = conn.execute(
         "SELECT chat_id, username, first_name FROM telegram_access_requests "
-        "WHERE status='approved' AND chat_id IS NOT NULL "
+        "WHERE status='approved' AND chat_id IS NOT NULL AND chat_id > 0 "
         "ORDER BY chat_id").fetchall()
     return [dict(r) for r in rows]
 

@@ -24,8 +24,7 @@ import json
 import logging
 import os
 import sqlite3
-import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -62,24 +61,15 @@ def _db():
     return conn
 
 
+# Решения о доступе -- в sar_common (person_*): та же логика нужна командной
+# строке и разделу «Люди» в /admin, и копия здесь разошлась бы с ними. Бот
+# только принимает заявки и доставляет ссылки.
+
 def upsert_request(chat_id, username, first_name):
-    """Возвращает (row, is_new). Повторный /start от УЖЕ существующей заявки
-    не сбрасывает её статус обратно в pending -- иначе approved/denied
-    стирался бы каждым повторным /start."""
+    """(row, is_new) -- см. sar_common.person_upsert_request."""
     conn = _db()
     try:
-        row = conn.execute("SELECT * FROM telegram_access_requests WHERE chat_id=?", (chat_id,)).fetchone()
-        if row is not None:
-            return row, False
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            "INSERT INTO telegram_access_requests (chat_id, username, first_name, status, requested_at) "
-            "VALUES (?, ?, ?, 'pending', ?)",
-            (chat_id, username, first_name, now),
-        )
-        conn.commit()
-        row = conn.execute("SELECT * FROM telegram_access_requests WHERE chat_id=?", (chat_id,)).fetchone()
-        return row, True
+        return sar_common.person_upsert_request(conn, chat_id, username, first_name)
     finally:
         conn.close()
 
@@ -87,7 +77,7 @@ def upsert_request(chat_id, username, first_name):
 def get_request(chat_id):
     conn = _db()
     try:
-        return conn.execute("SELECT * FROM telegram_access_requests WHERE chat_id=?", (chat_id,)).fetchone()
+        return sar_common.person_get(conn, chat_id)
     finally:
         conn.close()
 
@@ -95,8 +85,7 @@ def get_request(chat_id):
 def list_pending():
     conn = _db()
     try:
-        return conn.execute(
-            "SELECT * FROM telegram_access_requests WHERE status='pending' ORDER BY requested_at").fetchall()
+        return sar_common.person_list(conn, "pending")
     finally:
         conn.close()
 
@@ -104,11 +93,7 @@ def list_pending():
 def set_status(chat_id, status, decided_by):
     conn = _db()
     try:
-        conn.execute(
-            "UPDATE telegram_access_requests SET status=?, decided_at=?, decided_by=? WHERE chat_id=?",
-            (status, datetime.now(timezone.utc).isoformat(), decided_by, chat_id),
-        )
-        conn.commit()
+        sar_common.person_set_status(conn, chat_id, status, decided_by)
     finally:
         conn.close()
 
@@ -132,8 +117,7 @@ def auto_approve_active(now=None):
 
 
 def ensure_token(chat_id):
-    """Персональный ключ входа. Создаётся один раз и переиспользуется, чтобы
-    старая ссылка у человека не переставала работать при каждом /help.
+    """Персональный ключ входа (см. sar_common.person_ensure_token).
 
     Координаторам из admin_chat_ids роль администратора проставляется здесь
     же: они и так управляют доступом через бота, странно было бы заставлять
@@ -145,15 +129,7 @@ def ensure_token(chat_id):
                          "AND (role IS NULL OR role != ?)",
                          (sar_common.ROLE_ADMIN, chat_id, sar_common.ROLE_ADMIN))
             conn.commit()
-        row = conn.execute("SELECT access_token FROM telegram_access_requests WHERE chat_id=?",
-                           (chat_id,)).fetchone()
-        if row is not None and row["access_token"]:
-            return row["access_token"]
-        token = sar_common.generate_access_token()
-        conn.execute("UPDATE telegram_access_requests SET access_token=? WHERE chat_id=?",
-                     (token, chat_id))
-        conn.commit()
-        return token
+        return sar_common.person_ensure_token(conn, chat_id)
     finally:
         conn.close()
 
@@ -165,11 +141,7 @@ def personal_link(chat_id, next_path=None):
     вечной ссылке на находку, должен оказаться на этой находке, а не на
     общем экране, откуда её ещё надо искать.
     """
-    base = (CFG.get("service_url") or "").rstrip("/")
-    url = f"{base}/login?key={ensure_token(chat_id)}"
-    if next_path:
-        url += "&next=" + urllib.parse.quote(next_path, safe="")
-    return url
+    return sar_common.personal_link_url(CFG.get("service_url"), ensure_token(chat_id), next_path)
 
 
 def deep_link(payload):
@@ -239,24 +211,16 @@ def parse_start_payload(args):
 
 
 def find_person(identifier):
-    """Ищет человека по @username ИЛИ по chat_id.
+    """Ищет человека по @username, chat_id или имени -- sar_common.person_find.
 
     По chat_id -- не роскошь: username в Telegram НЕОБЯЗАТЕЛЕН, и у части
-    волонтёров его просто нет. Без поиска по id таким людям нельзя было бы
-    выдать никакую роль вообще. chat_id виден в /people.
-
-    Регистр ника не важен -- в Telegram он не значим."""
-    ident = str(identifier).strip()
+    волонтёров его просто нет. chat_id виден в /people. Неоднозначное имя
+    -- None: угадывать, кому выдать права, нельзя."""
     conn = _db()
     try:
-        if ident.lstrip("-").isdigit():
-            row = conn.execute("SELECT * FROM telegram_access_requests WHERE chat_id=?",
-                               (int(ident),)).fetchone()
-            if row is not None:
-                return row
-        uname = ident.lstrip("@").lower()
-        return conn.execute(
-            "SELECT * FROM telegram_access_requests WHERE lower(username)=?", (uname,)).fetchone()
+        return sar_common.person_find(conn, identifier)
+    except sar_common.PersonError:
+        return None
     finally:
         conn.close()
 
@@ -264,8 +228,7 @@ def find_person(identifier):
 def set_role(chat_id, role):
     conn = _db()
     try:
-        conn.execute("UPDATE telegram_access_requests SET role=? WHERE chat_id=?", (role, chat_id))
-        conn.commit()
+        sar_common.person_set_role(conn, chat_id, role)
     finally:
         conn.close()
 
@@ -274,9 +237,7 @@ def revoke_token(chat_id):
     """Сбрасывает ключ: старая ссылка сразу перестаёт пускать."""
     conn = _db()
     try:
-        conn.execute("UPDATE telegram_access_requests SET access_token=NULL WHERE chat_id=?",
-                     (chat_id,))
-        conn.commit()
+        sar_common.person_drop_token(conn, chat_id)
     finally:
         conn.close()
 
@@ -539,9 +500,15 @@ async def role_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Если у него нет @username — укажите его chat_id, он виден в /people.")
         return
 
-    set_role(row["chat_id"], role)
+    try:
+        set_role(row["chat_id"], role)
+    except sar_common.PersonError as e:
+        await update.message.reply_text(f"Не сделано: {e}")
+        return
     await update.message.reply_text(
         f"{requester_label(row)}\n→ роль: {sar_common.ROLE_LABELS[role]}")
+    if sar_common.is_local_person(row["chat_id"]):
+        return  # заведён без Telegram -- уведомлять некуда
     # человека предупреждаем -- иначе он не поймёт, почему перестал писать
     try:
         if role == sar_common.ROLE_MUTED:
@@ -574,7 +541,11 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row is None:
         await update.message.reply_text(f"{args[0]} не найден.")
         return
-    set_status(row["chat_id"], "denied", update.effective_chat.id)
+    try:
+        set_status(row["chat_id"], "denied", update.effective_chat.id)
+    except sar_common.PersonError as e:
+        await update.message.reply_text(f"Не сделано: {e}")
+        return
     revoke_token(row["chat_id"])
     await update.message.reply_text(f"Доступ отозван: {requester_label(row)}")
 
