@@ -7,7 +7,7 @@
 проверяет здоровье и откатывает, если новая версия не поднялась.
 
 ```
-push в master ──► тесты (pytest) ──► deploy на каждый сервер из CD_TARGETS
+push в master ──► тесты (pytest) ──► deploy на CD_SERVER
                                      └─ cdd: docker build → новый контейнер → /login 200? → иначе откат
 ```
 
@@ -39,7 +39,10 @@ data/
 cd уже установлен (`install.sh`, см. README cd). Для каждого экземпляра:
 
 ```bash
-# 1. env-файл с паролем и токеном бота (шаблон: deploy/cd/sar.env.example)
+# 1. env-файл с паролем (обязательно: SAR_SHARED_PASSWORD=...) и токеном бота
+#    (шаблон: deploy/cd/sar.env.example). Папку env новые версии install.sh
+#    создают сами; на сервере, поставленном раньше, -- первая строка.
+sudo install -d -m 700 /etc/cdd/env
 sudo install -m 600 /dev/null /etc/cdd/env/sar.env
 sudo nano /etc/cdd/env/sar.env
 
@@ -64,39 +67,38 @@ sudo cdctl project add sar \
 
 ## В репозитории — один раз
 
-Settings → Secrets and variables → Actions → **Variables**:
+Шаг 3 Quick Start cd, как есть — в папке репозитория, с залогиненным `gh`:
 
-- один сервер: `CD_SERVER` = `https://deploy.example.com`, `CD_PROJECT` = `sar`
-  (без `CD_PROJECT` — `sar-review`);
-- несколько серверов — `CD_TARGETS`:
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Dmitry-Fedotov-Dev/cd/v1/init.sh && bash init.sh sar https://deploy.example.com
+```
 
-  ```json
-  [{"server": "https://deploy.bishkek.example", "project": "sar"},
-   {"server": "https://deploy.osh.example",     "project": "sar-alai", "environment": "alai"}]
-  ```
+`.github/workflows/deploy.yml` в репозитории уже есть — это стартовый
+шаблон cd (проект `sar`, ветка `master`) с тестами на отведённой шаблоном
+строке. `init.sh` его не трогает: ставит переменную `CD_SERVER` из адреса в
+команде и запускает первый деплой. (Нужна версия cd, где `init.sh` умеет
+оставлять готовый workflow; со старой — то же одной командой:
+`gh variable set CD_SERVER --body https://deploy.example.com`.)
 
-  `environment` необязателен (по умолчанию `production`) и должен совпадать
-  с `--environment` в `cdctl project add` на том сервере.
+Дальше каждый push в `master` прогоняет тесты и деплоит. Вручную:
+Actions → Deploy → Run workflow (`deploy`, `status`, `logs`, `rollback`).
 
-Дальше каждый push в `master` прогоняет тесты и деплоит на все цели
-параллельно; отказ одного сервера не отменяет остальные. Если не задано
-ни `CD_TARGETS`, ни `CD_SERVER`, прогон **падает** с подсказкой — зелёный
-прогон без единого деплоя читался бы как «выкатили».
-
-Вручную (Actions → Deploy → Run workflow): `deploy`, `status`, `logs`,
-`rollback`; поле «только этот проект» — для одной цели.
+**Несколько серверов** инструкция cd не предусматривает: один репозиторий —
+один `CD_SERVER`. Другие ИМЕНА на том же сервере — клоны (ниже), в
+репозитории о них ничего не нужно.
 
 ## Под другим именем на том же сервере — клон
 
 Отдельная операция, отдельный адрес, свой пароль и бот, тот же код:
 
 ```bash
+sudo install -d -m 700 /etc/cdd/env
 sudo install -m 600 /dev/null /etc/cdd/env/sar-alai.env && sudo nano /etc/cdd/env/sar-alai.env
 sudo cdctl project clone sar-alai --from sar --env-file /etc/cdd/env/sar-alai.env --domain alai.example.com
 ```
 
 Клон стартует сразу на текущем образе `sar` и получает каждый следующий
-релиз сам — в `CD_TARGETS` его добавлять **не нужно**. У клона своя папка
+релиз сам — в репозитории для него ничего делать **не нужно**. У клона своя папка
 данных: база, отчёты, пользователи, `secret.key` не пересекаются.
 
 ## Материал
