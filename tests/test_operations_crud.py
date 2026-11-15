@@ -365,3 +365,45 @@ def test_upload_dialog_clears_and_blocks_repeat(env):
     page = cl.get(f"/operation/{op}/").get_data(as_text=True)
     assert "document.getElementById('upFiles').value = '';" in page
     assert "upGo').disabled = !e.target.files.length" in page
+
+
+# --- загруженное видно в списке сразу ------------------------------------------
+
+def test_uploaded_file_is_listed_immediately(env):
+    """Раньше файл появлялся только после прохода воркера (до минуты с
+    облачным обходом), и человек перезагружал страницу. Теперь сервер
+    регистрирует его сам -- той же функцией, что и воркер."""
+    cl = env["client"]
+    c = _conn(env)
+    op, folder = sar_common.create_operation_with_folder(c, env["watch"], "Сразу")
+    _as(cl, sar_common.ROLE_ADMIN)
+    _upload(cl, op, [("DJI_0003.MP4", b"v"), ("DJI_0003.SRT", b"1\n"), ("p.jpg", b"x")])
+    d = cl.get(f"/api/operations/{op}/browse?path=" + sar_server.UPLOAD_SUBDIR).get_json()
+    names = sorted(f["rel_path"].rsplit("/", 1)[-1] for f in d["files"])
+    assert names == ["DJI_0003.mp4", "p.jpg"], "SRT -- телеметрия, а не материал"
+    kinds = {r["kind"] for r in c.execute("SELECT kind FROM reports")}
+    assert kinds == {"video", "photo"}
+
+
+def test_worker_does_not_duplicate_uploaded_file(env):
+    """Воркер потом проходит по той же папке -- второй записи быть не должно:
+    ищет по тому же rel_path, тем же register_material."""
+    cl = env["client"]
+    c = _conn(env)
+    op, folder = sar_common.create_operation_with_folder(c, env["watch"], "Без дублей")
+    _as(cl, sar_common.ROLE_ADMIN)
+    _upload(cl, op, [("DJI_0004.MP4", b"v")])
+    for rel, abs_path, kind in sar_common.scan_all_materials(env["watch"]):
+        rid, created = sar_common.register_material(c, os.path.join(env["watch"], "r"),
+                                                    rel, abs_path, kind, False)
+        assert not created, rel
+    assert c.execute("SELECT COUNT(*) n FROM reports").fetchone()["n"] == 1
+
+
+def test_register_material_respects_auto_process(env):
+    c = _conn(env)
+    p = os.path.join(env["watch"], "x.mp4")
+    open(p, "wb").write(b"v")
+    rid, new = sar_common.register_material(c, env["watch"], "x.mp4", p, "video", True)
+    assert new and c.execute("SELECT status FROM reports").fetchone()["status"] == "queued"
+    assert sar_common.register_material(c, env["watch"], "x.mp4", p, "video", True) == (rid, False)

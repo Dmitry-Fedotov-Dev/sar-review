@@ -1906,6 +1906,41 @@ def init_db(db_path):
 # report_id: имя файла + дата создания файла + короткий хэш пути (уникальность)
 # ---------------------------------------------------------------------------
 
+def register_material(conn, reports_dir, rel_path, abs_path, kind, auto_process):
+    """Заводит запись материала, если её ещё нет. (report_id, новая ли).
+
+    ОДНА функция для воркера (обход папки) и сервера (загрузка через
+    браузер). Раньше регистрировал только воркер, раз в проход, а проход
+    -- это ещё и облачный обход с превью: загруженное видео появлялось в
+    списке через полминуты-минуту, и человек перезагружал страницу, не
+    понимая, загрузилось ли. Две копии этой логики разошлись бы -- как
+    расходились все прочие копии в этом проекте.
+
+    Запись ищется по rel_path, а НЕ по report_id: ctime большого файла
+    может не устояться между сканами, и report_id получится другим (см.
+    комментарий в watcher_loop). Вставка -- INSERT OR IGNORE: сервер и
+    воркер могут дойти до одного файла одновременно, и report_id у них
+    совпадёт (он считается из имени, даты и пути).
+    """
+    row = conn.execute("SELECT report_id FROM reports WHERE rel_path=?", (rel_path,)).fetchone()
+    if row is not None:
+        return row["report_id"], False
+    report_id = make_report_id(rel_path, abs_path)
+    now = datetime.now().isoformat()
+    # при выключенной авто-обработке файл всё равно регистрируется и сразу
+    # доступен для РУЧНОГО просмотра, но модель по нему не запускается
+    status = "queued" if auto_process else "idle"
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO reports (report_id, rel_path, abs_path, kind, status, "
+        "out_dir, file_ctime, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        # abs_path/out_dir остаются ради внешних разовых скриптов, платформа
+        # их не читает -- путь везде вычисляется
+        (report_id, rel_path, abs_path, kind, status,
+         report_dir(reports_dir, report_id), get_file_ctime(abs_path), now, now))
+    conn.commit()
+    return report_id, cur.rowcount == 1
+
+
 def make_report_id(name, abs_path):
     stem = os.path.splitext(os.path.basename(name))[0]
     safe_stem = re.sub(r"[^a-zA-Zа-яА-Я0-9_-]+", "_", stem)[:60] or "file"

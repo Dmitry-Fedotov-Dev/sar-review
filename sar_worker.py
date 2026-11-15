@@ -1284,27 +1284,14 @@ def watcher_loop():
                 row = conn.execute("SELECT report_id, duration_sec FROM reports WHERE rel_path=?",
                                     (name,)).fetchone()
                 if row is None:
-                    report_id = sar_common.make_report_id(name, abs_path)
-                    now = datetime.now().isoformat()
-                    # Столбец остаётся ради внешних разовых скриптов, но
-                    # платформа его не читает -- путь везде вычисляется.
-                    out_dir = sar_common.report_dir(REPORTS_DIR, report_id)
-                    file_ctime = sar_common.get_file_ctime(abs_path)
-                    # при выключенной авто-обработке файл всё равно
-                    # регистрируется и сразу доступен для РУЧНОГО просмотра,
-                    # но модель по нему не запускается, пока человек не
-                    # нажмёт "обработать" (см. auto_process в конфиге)
                     # Настройка из админки главнее конфига: подключая
                     # большое хранилище, автообработку выключают именно
                     # на ходу, а не правкой файла и перезапуском.
-                    initial_status = "queued" if settings["auto_process"] else "idle"
-                    conn.execute(
-                        "INSERT INTO reports (report_id, rel_path, abs_path, kind, status, "
-                        "out_dir, file_ctime, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (report_id, name, abs_path, kind, initial_status, out_dir, file_ctime, now, now))
-                    conn.commit()
-                    where = "в очереди" if initial_status == "queued" else "без авто-обработки"
-                    print(f"[watcher] новый файл ({where}): {name} -> {report_id}")
+                    report_id, created = sar_common.register_material(
+                        conn, REPORTS_DIR, name, abs_path, kind, settings["auto_process"])
+                    if created:
+                        where = "в очереди" if settings["auto_process"] else "без авто-обработки"
+                        print(f"[watcher] новый файл ({where}): {name} -> {report_id}")
                 else:
                     report_id = row["report_id"]
 

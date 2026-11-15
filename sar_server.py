@@ -2575,7 +2575,13 @@ function doUpload() {{
     }} else {{
       msg.textContent = text;
     }}
-    if (d.saved && d.saved.length) setTimeout(loadBrowse, 4000);
+    if (d.saved && d.saved.length) {{
+      // Файлы зарегистрированы сервером сразу -- список перечитываем
+      // немедленно. Превью и длительность воркер досчитывает позже, их
+      // подтягиваем ещё несколькими обновлениями.
+      loadBrowse();
+      [8000, 20000, 45000].forEach(ms => setTimeout(loadBrowse, ms));
+    }}
   }};
   x.onerror = () => {{
     uploading = false; go.disabled = false;
@@ -3992,6 +3998,18 @@ def api_operation_upload(op_id):
                 continue
             os.replace(tmp_path, final_path)
             saved.append(os.path.basename(final_path))
+            if target_dir == media_dir:
+                # Регистрируем СРАЗУ, той же функцией, что и воркер: иначе
+                # файл появлялся в списке только на его следующем проходе
+                # (вместе с облачным обходом это до минуты), и человек
+                # перезагружал страницу, не понимая, загрузилось ли.
+                # Превью и длительность воркер досчитает сам.
+                rel = os.path.relpath(final_path, watch_dir).replace(os.sep, "/")
+                rid, _ = sar_common.register_material(
+                    conn, os.path.join(_data_dir(), "reports"), rel, final_path,
+                    "video" if ext in sar_common.VIDEO_EXTS else "photo",
+                    sar_common.get_settings(conn)["auto_process"])
+                sar_common.attach_material(conn, op_id, rid)
         except OSError as e:
             if os.path.exists(tmp_path):
                 try:
@@ -5646,8 +5664,14 @@ h1 {{ font-size:16px; margin:12px 0; }}
 .video-col {{ flex:2; min-width:480px; }}
 .obs-col {{ flex:1; min-width:320px; }}
 
+/* ОКНО ПЛЕЕРА ФИКСИРОВАННОГО РАЗМЕРА: 16:9 по ширине колонки, но не выше
+   экрана. Раньше видео тянулось на всю ширину без ограничения высоты, и
+   вертикальное видео с телефона (9:16) занимало несколько экранов.
+   Кадр вписывается в окно ЦЕЛИКОМ (fitStage), лишнее -- чёрные поля. */
 .video-wrap {{ position:relative; width:100%; background:#000; border-radius:6px;
-               overflow:hidden; }}
+               overflow:hidden; aspect-ratio:16/9;
+               max-height:max(320px, calc(100vh - 230px));
+               display:flex; align-items:center; justify-content:center; }}
 /* Сцена -- то, что масштабируется. Видео и слой разметки внутри неё, поэтому
    при зуме рамки едут вместе с картинкой, а не отстают от неё. */
 /* will-change:transform здесь БЫЛО и это оказалось вредно.
@@ -5656,17 +5680,19 @@ h1 {{ font-size:16px; margin:12px 0; }}
    ему всё равно, а вот рамки разметки -- вектор, и они превращались в
    лесенку при первом же зуме. Без will-change браузер перерисовывает
    вектор в текущем масштабе, и линии остаются чистыми. */
-#stage {{ transform-origin:0 0; }}
+/* Ширину сцены ставит fitStage() ровно по пропорциям видео, высота
+   выходит сама. Именно сцена, а не <video> с object-fit:contain: слой
+   рамок равен размеру сцены, и при полях внутри <video> все рамки
+   разметки съехали бы с объектов -- молча. */
+#stage {{ transform-origin:0 0; flex:none; position:relative; }}
 #stage video {{ width:100%; display:block; }}
 
 /* В полном экране разворачивается ОБЁРТКА, а не <video>: иначе слой
    разметки остаётся в обычном документе (см. комментарий в разметке).
    Здесь же выравниваем видео по центру -- у экрана и кадра разные
    пропорции, и без этого видео прилипало бы к верхнему краю. */
-.video-wrap:fullscreen {{ border-radius:0; display:flex; align-items:center;
-                          justify-content:center; }}
-.video-wrap:fullscreen #stage {{ width:100%; }}
-.video-wrap:fullscreen #stage video {{ max-height:100vh; object-fit:contain; }}
+.video-wrap:fullscreen {{ border-radius:0; aspect-ratio:auto; max-height:none;
+                          width:100%; height:100%; }}
 
 
 /* pointer-events:none по умолчанию -- иначе оверлей перехватывает клики по
@@ -6266,10 +6292,33 @@ const videoWrap = document.getElementById('video-wrap');
 const stage = document.getElementById('stage');
 let vz = {{ scale: 1, x: 0, y: 0, drag: null, pinch: 0 }};
 
+// Вписать кадр в окно плеера целиком, по его НАСТОЯЩИМ пропорциям.
+// Пересчитывается при загрузке видео, смене размера окна и входе/выходе
+// из полного экрана -- ResizeObserver ловит всё это разом.
+function fitStage() {{
+  const ar = (video.videoWidth && video.videoHeight)
+    ? video.videoWidth / video.videoHeight : 16 / 9;
+  const W = videoWrap.clientWidth, H = videoWrap.clientHeight;
+  if (!W || !H) return;
+  stage.style.width = Math.floor(Math.min(W, H * ar)) + 'px';
+  applyStage();
+}}
+video.addEventListener('loadedmetadata', fitStage);
+if (window.ResizeObserver) new ResizeObserver(fitStage).observe(videoWrap);
+else window.addEventListener('resize', fitStage);
+
+// Начало сцены на экране БЕЗ учёта зума. Сцена теперь стоит по центру окна
+// (вертикальное видео -- с полями по бокам), и считать от угла обёртки
+// нельзя: увеличение уезжало бы от курсора на ширину поля.
+function stageOrigin() {{
+  const r = videoWrap.getBoundingClientRect();
+  return {{ left: r.left + stage.offsetLeft, top: r.top + stage.offsetTop }};
+}}
+
 function applyStage() {{
   // Не даём утащить кадр за края: увеличенное видео легко "потерять" и
   // смотреть в чёрное поле, не понимая, куда всё делось.
-  const w = videoWrap.clientWidth, h = stage.clientHeight;
+  const w = stage.clientWidth, h = stage.clientHeight;
   const maxX = 0, minX = w - w * vz.scale;
   const maxY = 0, minY = h - h * vz.scale;
   vz.x = Math.min(maxX, Math.max(minX, vz.x));
@@ -6294,7 +6343,7 @@ function zoomAt(factor, clientX, clientY) {{
   const before = vz.scale;
   const next = Math.min(8, Math.max(1, before * factor));
   if (next === before) return;
-  const r = videoWrap.getBoundingClientRect();
+  const r = stageOrigin();
   // Точка под курсором остаётся на месте -- иначе при увеличении уезжает
   // ровно то, что человек хотел рассмотреть.
   const cx = (clientX - r.left - vz.x) / before;
