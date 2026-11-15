@@ -53,6 +53,11 @@ class AuthExpired(CloudError):
     """Токен протух. Нужно обновить или переподключить диск."""
 
 
+class NotFound(CloudError):
+    """Объекта нет -- ИЛИ нет к нему доступа: Google отвечает 404 и на то, и
+    на другое, чтобы не раскрывать, существует ли чужой файл."""
+
+
 class RateLimited(CloudError):
     """Квота исчерпана или слишком частые запросы."""
 
@@ -113,6 +118,8 @@ def http_json(url, headers=None, data=None, method=None):
                     raise RateLimited(
                         "облако ограничивает частоту запросов и не успокоилось "
                         "за %d попыток. Загрузки приостановлены." % MAX_RETRIES)
+            if e.code == 404:
+                raise NotFound("облако ответило 404 на %s" % url)
             raise CloudError("облако ответило %d на %s" % (e.code, url))
         except urllib.error.URLError as e:
             last = e
@@ -252,6 +259,152 @@ def refresh_google_token(client_id, client_secret, refresh_token):
         raise CloudError("Google не вернул новый токен доступа")
     lifetime = int(out.get("expires_in") or 3600)
     return token, time.time() + lifetime
+
+
+# ---------------------------------------------------------------------------
+# СЕРВИСНЫЙ АККАУНТ GOOGLE
+#
+# Зачем. Токен из OAuth Playground живёт час, а для продления человеку
+# нужно завести своё приложение в консоли Google и перенести три значения
+# -- на боевом подключении на этом и споткнулись. Сервисный аккаунт проще и
+# надёжнее: ключ (JSON) загружается в платформу ОДИН раз, папки в Google
+# Диске просто расшариваются на адрес аккаунта (...@...iam.gserviceaccount.com),
+# а свежий токен платформа берёт сама, когда нужно, без участия человека.
+#
+# Как. Подписанное утверждение (JWT, RS256) меняется на токен доступа у
+# oauth2.googleapis.com. RS256 -- это RSA PKCS#1 v1.5 с SHA-256; написан
+# здесь на стандартной библиотеке, как и весь модуль (его импортируют
+# разовые скрипты и воркер, тянуть криптобиблиотеку ради одной подписи не
+# стоит). Подпись детерминирована, и тест сверяет её с openssl байт в байт.
+#
+# Право -- только ЧТЕНИЕ (drive.readonly): платформе нечего менять в
+# облаке, и ключ, утёкший с сервера, не даст ничего удалить.
+# ---------------------------------------------------------------------------
+
+GOOGLE_DRIVE_READONLY = "https://www.googleapis.com/auth/drive.readonly"
+
+
+def parse_service_account(text):
+    """Ключ сервисного аккаунта (содержимое JSON-файла) -> dict.
+
+    Проверяем то, без чего работать не будет, с понятной причиной:
+    человек легко загрузит не тот файл (например, OAuth client secret)."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        raise CloudError("это не JSON-файл ключа сервисного аккаунта")
+    if not isinstance(data, dict) or data.get("type") != "service_account":
+        raise CloudError("это не ключ сервисного аккаунта (в файле нет "
+                         "\"type\": \"service_account\"). Нужен JSON-ключ, "
+                         "созданный в Google Cloud: IAM → Сервисные аккаунты → "
+                         "Ключи → Добавить ключ → JSON")
+    for field in ("client_email", "private_key"):
+        if not data.get(field):
+            raise CloudError("в ключе нет поля %s" % field)
+    _rsa_private_key(data["private_key"])      # битый ключ -- сразу, а не при первом запросе
+    return {"client_email": data["client_email"],
+            "private_key": data["private_key"],
+            "private_key_id": data.get("private_key_id") or "",
+            "project_id": data.get("project_id") or "",
+            "token_uri": data.get("token_uri") or GOOGLE_TOKEN_URL}
+
+
+def _der_read(buf, pos):
+    """Один элемент DER: (тег, начало содержимого, конец)."""
+    tag = buf[pos]
+    length = buf[pos + 1]
+    pos += 2
+    if length & 0x80:
+        n = length & 0x7F
+        length = int.from_bytes(buf[pos:pos + n], "big")
+        pos += n
+    return tag, pos, pos + length
+
+
+def _der_children(buf, start, end):
+    out, pos = [], start
+    while pos < end:
+        tag, a, b = _der_read(buf, pos)
+        out.append((tag, a, b))
+        pos = b
+    return out
+
+
+def _rsa_private_key(pem):
+    """(n, d) из PEM: PKCS#8 (как в ключах Google) или PKCS#1."""
+    import base64
+    lines = [ln.strip() for ln in str(pem).replace("\\n", "\n").splitlines()]
+    body = "".join(ln for ln in lines if ln and not ln.startswith("-----"))
+    try:
+        der = base64.b64decode(body, validate=False)
+        tag, a, b = _der_read(der, 0)
+        items = _der_children(der, a, b)
+        # PKCS#8: version, AlgorithmIdentifier, OCTET STRING(RSAPrivateKey)
+        if len(items) >= 3 and items[1][0] == 0x30 and items[2][0] == 0x04:
+            _, oa, ob = items[2]
+            tag, a, b = _der_read(der, oa)
+            items = _der_children(der, a, b)
+        # RSAPrivateKey: version, n, e, d, p, q, dp, dq, qinv
+        ints = [int.from_bytes(der[x:y], "big") for t, x, y in items if t == 0x02]
+        n, d = ints[1], ints[3]
+    except (IndexError, ValueError):
+        raise CloudError("не удалось прочитать private_key из ключа -- файл повреждён?")
+    if n < (1 << 1023):
+        raise CloudError("ключ слишком короткий для RS256")
+    return n, d
+
+
+# DigestInfo для SHA-256 (RFC 8017, 9.2)
+_SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+def rs256_sign(pem, message):
+    """Подпись RSASSA-PKCS1-v1_5 / SHA-256."""
+    import hashlib
+    n, d = _rsa_private_key(pem)
+    k = (n.bit_length() + 7) // 8
+    t = _SHA256_PREFIX + hashlib.sha256(message).digest()
+    em = b"\x00\x01" + b"\xff" * (k - len(t) - 3) + b"\x00" + t
+    return pow(int.from_bytes(em, "big"), d, n).to_bytes(k, "big")
+
+
+def _b64url(raw):
+    import base64
+    return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+
+def service_account_assertion(sa, scope=GOOGLE_DRIVE_READONLY, now=None):
+    """Подписанный JWT для обмена на токен."""
+    now = int(now if now is not None else time.time())
+    header = {"alg": "RS256", "typ": "JWT"}
+    if sa.get("private_key_id"):
+        header["kid"] = sa["private_key_id"]
+    claims = {"iss": sa["client_email"], "scope": scope,
+              "aud": sa.get("token_uri") or GOOGLE_TOKEN_URL,
+              "iat": now, "exp": now + 3600}
+    signing_input = (_b64url(json.dumps(header, separators=(",", ":")).encode()) + b"." +
+                     _b64url(json.dumps(claims, separators=(",", ":")).encode()))
+    return (signing_input + b"." + _b64url(rs256_sign(sa["private_key"], signing_input))).decode()
+
+
+def service_account_token(sa, scope=GOOGLE_DRIVE_READONLY):
+    """Свежий токен доступа сервисного аккаунта: (token, expires_at)."""
+    data = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": service_account_assertion(sa, scope),
+    }).encode("ascii")
+    try:
+        out = http_json(sa.get("token_uri") or GOOGLE_TOKEN_URL, data=data, method="POST",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    except AuthExpired:
+        raise AuthExpired(
+            "Google не принял ключ сервисного аккаунта: ключ удалён или "
+            "отозван в Google Cloud, либо на сервере неверное время. "
+            "Загрузите новый ключ в настройках платформы.")
+    token = out.get("access_token")
+    if not token:
+        raise CloudError("Google не вернул токен для сервисного аккаунта")
+    return token, time.time() + int(out.get("expires_in") or 3600)
 
 
 def _check_token(token):
@@ -429,6 +582,10 @@ class GoogleDrive(Provider):
                 "q": "'%s' in parents and trashed = false" % folder_id,
                 "fields": "nextPageToken,files(id,name,size,mimeType,modifiedTime)",
                 "pageSize": "200",
+                # Без этих двух общие диски (Shared drives) не видны вовсе --
+                # а сервисному аккаунту папки чаще всего дают именно там.
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
             }
             if page:
                 params["pageToken"] = page
@@ -444,8 +601,23 @@ class GoogleDrive(Provider):
             if not page:
                 return out
 
+    def folder_info(self, folder_id):
+        """(имя, это ли папка) -- и ПРОВЕРКА ДОСТУПА.
+
+        Список файлов папки, к которой нет доступа, Google отдаёт ПУСТЫМ, без
+        ошибки: подключение выглядело бы удачным («найдено 0 файлов»), и
+        человек решил бы, что папка пуста. Запрос самой папки честно
+        отвечает 404 (NotFound) -- по нему и судим."""
+        def call():
+            params = urllib.parse.urlencode({"fields": "id,name,mimeType",
+                                             "supportsAllDrives": "true"})
+            return http_json("%s/files/%s?%s" % (self.API, urllib.parse.quote(folder_id), params),
+                             headers=self.auth_headers())
+        data = self._with_renew(call)
+        return data.get("name") or "", data.get("mimeType") == "application/vnd.google-apps.folder"
+
     def stream_source(self, file_id):
-        return ("%s/files/%s?alt=media" % (self.API, file_id),
+        return ("%s/files/%s?alt=media&supportsAllDrives=true" % (self.API, file_id),
                 self.auth_headers())
 
 

@@ -457,8 +457,16 @@ def provider_for_account(conn, acc):
     import sar_cloud
 
     account_id = acc["id"]
+    service = acc.get("auth") == "service"
 
     def renew():
+        if service:
+            sa = service_account(conn)
+            if sa is None:
+                raise sar_cloud.AuthExpired(
+                    "ключ сервисного аккаунта Google удалён из настроек "
+                    "платформы -- загрузите его снова в /admin")
+            return sar_cloud.service_account_token(sa)
         if not (acc.get("client_id") and acc.get("client_secret")
                 and acc.get("refresh_token")):
             raise sar_cloud.AuthExpired(
@@ -482,7 +490,7 @@ def provider_for_account(conn, acc):
     # токеном -- это лишний запрос к Google и лишняя запись об ошибке,
     # которую потом видит человек и пугается.
     exp = acc.get("expires_at")
-    if exp and acc.get("client_id"):
+    if exp and (acc.get("client_id") or service):
         try:
             left = (datetime.fromisoformat(exp) - datetime.now()).total_seconds()
         except (TypeError, ValueError):
@@ -496,6 +504,51 @@ def provider_for_account(conn, acc):
                 # здесь незачем: вызывающий сам обработает.
                 pass
     return prov
+
+
+SERVICE_ACCOUNT_SECRET = "google_service_account"
+
+
+def set_service_account(conn, key_text, who=None):
+    """Сохраняет ключ сервисного аккаунта Google (проверив его). Возвращает
+    публичную часть -- адрес аккаунта, на который расшаривают папки."""
+    import sar_cloud
+    sa = sar_cloud.parse_service_account(key_text)
+    conn.execute(
+        "INSERT INTO cloud_secrets (name, value, added_by, added_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET value=excluded.value, "
+        "added_by=excluded.added_by, added_at=excluded.added_at",
+        (SERVICE_ACCOUNT_SECRET, json.dumps(sa), who, datetime.now().isoformat()))
+    conn.commit()
+    return service_account_public(conn)
+
+
+def service_account(conn):
+    """Ключ целиком (С ПРИВАТНОЙ ЧАСТЬЮ) -- только для получения токена."""
+    try:
+        row = conn.execute("SELECT value FROM cloud_secrets WHERE name=?",
+                           (SERVICE_ACCOUNT_SECRET,)).fetchone()
+    except sqlite3.OperationalError:
+        return None                       # база старой версии, до init_db
+    return json.loads(row["value"]) if row else None
+
+
+def service_account_public(conn):
+    """Что можно показать в интерфейсе: адрес аккаунта и проект. Ключа нет.
+    Отдельная функция, как и cloud_accounts_public: фильтр на месте
+    использования однажды забудут."""
+    sa = service_account(conn)
+    if sa is None:
+        return None
+    row = conn.execute("SELECT added_by, added_at FROM cloud_secrets WHERE name=?",
+                       (SERVICE_ACCOUNT_SECRET,)).fetchone()
+    return {"email": sa["client_email"], "project": sa.get("project_id") or "",
+            "added_by": row["added_by"], "added_at": row["added_at"]}
+
+
+def drop_service_account(conn):
+    conn.execute("DELETE FROM cloud_secrets WHERE name=?", (SERVICE_ACCOUNT_SECRET,))
+    conn.commit()
 
 
 def cloud_display_roots(conn):
@@ -1343,15 +1396,15 @@ def set_setting(conn, key, value, who=None):
 
 def add_cloud_account(conn, provider, token, label=None, refresh_token=None,
                        expires_at=None, root_id=None, root_name=None, who=None,
-                       client_id=None, client_secret=None):
+                       client_id=None, client_secret=None, auth=None):
     cur = conn.execute(
         "INSERT INTO cloud_accounts (provider, label, token, refresh_token, "
         "expires_at, root_id, root_name, enabled, added_by, added_at, "
-        "client_id, client_secret) "
-        "VALUES (?,?,?,?,?,?,?,1,?,?,?,?)",
+        "client_id, client_secret, auth) "
+        "VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?)",
         (provider, label, token, refresh_token, expires_at, root_id,
          root_name, who, datetime.now().isoformat(),
-         client_id, client_secret))
+         client_id, client_secret, auth))
     conn.commit()
     return cur.lastrowid
 
@@ -1382,7 +1435,7 @@ def cloud_accounts_public(conn):
         # client_id секретом не считается (он виден в адресной строке при
         # авторизации), но и показывать его незачем -- в интерфейсе важно
         # другое: ЕСТЬ ли чем продлевать доступ.
-        a["can_refresh"] = bool(a.pop("client_id", None))
+        a["can_refresh"] = bool(a.pop("client_id", None)) or a.get("auth") == "service"
         out.append(a)
     return out
 
@@ -1390,7 +1443,7 @@ def cloud_accounts_public(conn):
 def update_cloud_account(conn, account_id, **fields):
     allowed = {"label", "token", "refresh_token", "expires_at", "root_id",
                "root_name", "enabled", "last_error", "last_ok_at",
-               "operation_id", "client_id", "client_secret"}
+               "operation_id", "client_id", "client_secret", "auth"}
     bad = set(fields) - allowed
     if bad:
         raise KeyError(", ".join(sorted(bad)))
@@ -1756,6 +1809,17 @@ def init_db(db_path):
         added_at TEXT
     );
 
+    -- Секреты уровня установки (не одного подключения). Сейчас -- ключ
+    -- сервисного аккаунта Google: загружается один раз в /admin, а все
+    -- подключения с auth='service' берут токен через него. Наружу не
+    -- отдаётся никогда (service_account_public -- только адрес аккаунта).
+    CREATE TABLE IF NOT EXISTS cloud_secrets (
+        name TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        added_by TEXT,
+        added_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS alert_state (
         check_name TEXT PRIMARY KEY,
         level TEXT NOT NULL,          -- текущее наблюдаемое состояние
@@ -1784,6 +1848,10 @@ def init_db(db_path):
                        # удаление: закрытый поиск нужен для отчёта заказчику
                        # и если его возобновят.
                        "ALTER TABLE operations ADD COLUMN archived_at TEXT",
+                       # Как подключение получает доступ: NULL -- токен,
+                       # введённый руками (с продлением по refresh token или
+                       # без), 'service' -- через сервисный аккаунт Google.
+                       "ALTER TABLE cloud_accounts ADD COLUMN auth TEXT",
                        # Для продления доступа к Google. Токен там живёт ЧАС,
                        # и без обновления диск приходится подключать заново
                        # каждый час -- на подготовку 150 файлов (около трёх

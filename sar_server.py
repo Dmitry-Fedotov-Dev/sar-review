@@ -2397,6 +2397,21 @@ table.rep td.dim{{color:var(--dim)}}
   </div>
 </dialog>
 
+<dialog class="opdlg" id="gdDlg">
+  <h3>Добавить с Google Диска</h3>
+  <p class="hint">Вставьте ссылку на папку с материалом — её видно в адресной строке,
+    когда папка открыта в Google Диске. Папка появится в этой операции со своей
+    структурой; файлы при этом не скачиваются, пока их не откроют.</p>
+  <p class="hint" id="gdShare"></p>
+  <input type="text" id="gdUrl" placeholder="https://drive.google.com/drive/folders/…">
+  <input type="text" id="gdLabel" placeholder="название в операции (необязательно — возьмём имя папки)">
+  <div class="msg" id="gdMsg"></div>
+  <div class="btns">
+    <button type="button" onclick="closeDlg('gdDlg')">Закрыть</button>
+    <button type="button" class="primary" id="gdGo" onclick="doGdrive()">Подключить</button>
+  </div>
+</dialog>
+
 <dialog class="opdlg" id="renDlg">
   <h3>Изменить операцию</h3>
   <label>Название</label><input type="text" id="renT" maxlength="120">
@@ -2520,9 +2535,9 @@ function doUpload() {{
     try {{ d = JSON.parse(x.responseText); }} catch (e) {{ d = {{error: 'сервер ответил ' + x.status}}; }}
     const parts = [];
     if (d.saved && d.saved.length) parts.push(`Загружено: ${{d.saved.length}}. Появятся в списке через несколько секунд.`);
-    if (d.errors && d.errors.length) parts.push('Не принято:\n' + d.errors.join('\n'));
+    if (d.errors && d.errors.length) parts.push('Не принято:\\n' + d.errors.join('\\n'));
     if (!parts.length) parts.push(d.error || 'Не получилось');
-    msg.textContent = parts.join('\n');
+    msg.textContent = parts.join('\\n');
     if (d.saved && d.saved.length) setTimeout(loadBrowse, 4000);
   }};
   x.onerror = () => {{
@@ -2530,6 +2545,40 @@ function doUpload() {{
     msg.textContent = 'Связь прервалась — загрузка не завершена. Попробуйте ещё раз.';
   }};
   x.send(fd);
+}}
+
+// Google Диск: адрес сервисного аккаунта показываем ЗАРАНЕЕ -- папку нужно
+// расшарить на него до подключения, и человек должен знать на какой.
+async function openGdrive() {{
+  ['gdUrl', 'gdLabel'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('gdMsg').textContent = '';
+  const share = document.getElementById('gdShare');
+  share.textContent = '';
+  document.getElementById('gdDlg').showModal();
+  const d = await fetch('/api/admin/google-service-account').then(r => r.json()).catch(() => ({{}}));
+  share.innerHTML = d.account
+    ? `Папка должна быть открыта (права «Читатель») для <b>${{esc(d.account.email)}}</b>.`
+    : `Сначала загрузите ключ сервисного аккаунта в <a href="/admin">Настройках</a> — один раз.`;
+}}
+
+let gdBusy = false;
+async function doGdrive() {{
+  if (gdBusy) return;
+  const msg = document.getElementById('gdMsg'), go = document.getElementById('gdGo');
+  gdBusy = true; go.disabled = true; msg.textContent = 'Проверяю доступ к папке…';
+  let d = {{}};
+  try {{
+    const r = await fetch(`/api/operations/${{OP}}/gdrive`, {{method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{url: document.getElementById('gdUrl').value,
+                            label: document.getElementById('gdLabel').value}})}});
+    d = await r.json();
+  }} catch (e) {{ d = {{error: 'Нет связи с сервером'}}; }}
+  gdBusy = false; go.disabled = false;
+  if (!d.ok) {{ msg.textContent = d.error || 'Не получилось'; return; }}
+  msg.textContent = `Подключено: «${{d.label}}» — файлов ${{d.found - d.folders}}, папок ${{d.folders}} ` +
+    `на верхнем уровне. Содержимое появится в операции после ближайшего обхода (до минуты).`;
+  setTimeout(loadBrowse, 20000);
 }}
 
 function openRename() {{
@@ -2560,7 +2609,7 @@ async function doRename() {{
 }}
 
 async function setArchived(on) {{
-  if (on && !confirm('Скрыть операцию из общего списка?\n\nНичего не удаляется: материалы, ' +
+  if (on && !confirm('Скрыть операцию из общего списка?\\n\\nНичего не удаляется: материалы, ' +
                      'пометки и отчёт остаются, вернуть можно в любой момент.')) return;
   const r = await fetch(`/api/operations/${{OP}}`, {{method: 'PATCH',
     headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{archived: on}})}});
@@ -2571,7 +2620,7 @@ async function setArchived(on) {{
 
 async function deleteOp() {{
   const t = data.operation.title;
-  if (!confirm(`Удалить операцию «${{t}}»?\n\nМатериалы, пометки и обсуждения НЕ удаляются — ` +
+  if (!confirm(`Удалить операцию «${{t}}»?\\n\\nМатериалы, пометки и обсуждения НЕ удаляются — ` +
                `файлы останутся на месте и попадут в «Не разобрано».`)) return;
   const r = await fetch(`/api/operations/${{OP}}`, {{method: 'DELETE'}});
   const d = await r.json().catch(() => ({{}}));
@@ -7607,6 +7656,22 @@ select, input[type=text], input[type=password] {{ background:#0d0d0d; color:#eee
   перезапуске туннеля, и зарегистрированная ссылка возврата протухала бы
   вместе с ним.
 </div>
+<div class="card">
+  <h2>Сервисный аккаунт Google</h2>
+  <div class="hint">
+    Самый простой способ подключать Google Диск: ключ загружается один раз,
+    дальше папка добавляется в операцию одной ссылкой (кнопка «Добавить с
+    Google Диска» на странице операции). Нужно только открыть папку в Google
+    Диске для адреса аккаунта — с правами «Читатель». Ключ хранится на
+    сервере и наружу не отдаётся.
+  </div>
+  <div id="sa_state" style="margin:10px 0"></div>
+  <div class="row">
+    <input type="file" id="sa_file" accept=".json,application/json">
+    <button onclick="uploadSa()">Загрузить ключ</button>
+    <span id="sa_msg"></span>
+  </div>
+</div>
 <div id="clouds"></div>
 <div class="card">
   <h2>Подключить хранилище</h2>
@@ -7881,6 +7946,40 @@ async function dropCloud(id) {{
   }}
 }}
 
+// --- сервисный аккаунт Google -------------------------------------------------
+function renderSa(a) {{
+  const el = document.getElementById('sa_state');
+  el.innerHTML = a
+    ? `Загружен: <b>${{esc(a.email)}}</b>${{a.project ? ' · проект ' + esc(a.project) : ''}}
+       <button class="danger" onclick="dropSa()" style="margin-left:10px">Удалить ключ</button>`
+    : '<span class="hint">Ключ не загружен.</span>';
+}}
+async function loadSa() {{
+  const d = await fetch('/api/admin/google-service-account').then(r => r.json()).catch(() => ({{}}));
+  renderSa(d.account);
+}}
+async function uploadSa() {{
+  const f = document.getElementById('sa_file').files[0];
+  const msg = document.getElementById('sa_msg');
+  if (!f) {{ msg.textContent = 'Выберите JSON-файл ключа'; return; }}
+  const fd = new FormData(); fd.append('key', f);
+  msg.textContent = 'Проверяю ключ…';
+  const r = await fetch('/api/admin/google-service-account', {{method: 'POST', body: fd}});
+  const d = await r.json().catch(() => ({{}}));
+  // Файл из поля убираем сразу: ключ -- секрет, не держим его в форме.
+  document.getElementById('sa_file').value = '';
+  if (!d.ok) {{ msg.textContent = d.error || 'Не получилось'; return; }}
+  msg.textContent = 'Ключ принят Google.';
+  renderSa(d.account);
+}}
+async function dropSa() {{
+  if (!confirm('Удалить ключ? Подключения через сервисный аккаунт перестанут обновляться.')) return;
+  const d = await fetch('/api/admin/google-service-account', {{method: 'DELETE'}}).then(r => r.json());
+  renderSa(null);
+  if (d.orphaned) document.getElementById('sa_msg').textContent =
+    `Подключений через этот аккаунт: ${{d.orphaned}} — они остановятся до загрузки нового ключа.`;
+}}
+
 // --- люди -------------------------------------------------------------------
 let PEOPLE = {{people: [], roles: []}};
 const STATUS_LABEL = {{pending: 'ждёт одобрения', approved: 'доступ есть', denied: 'доступ отозван'}};
@@ -7990,6 +8089,7 @@ async function revokePerson(id) {{
 
 load();
 loadClouds();
+loadSa();
 loadPeople();
 </script>
 </body></html>"""
@@ -8229,6 +8329,103 @@ def api_admin_cloud():
                                   for p in sar_cloud.PROVIDERS.values()],
                     "operations": ops,
                     "accounts": sar_common.cloud_accounts_public(conn)})
+
+
+# --- сервисный аккаунт Google ------------------------------------------------
+#
+# Ключ загружается ОДИН раз (JSON-файл из Google Cloud), дальше любая папка
+# Google Диска, расшаренная на адрес аккаунта, подключается к операции одной
+# ссылкой -- кнопкой «Добавить с Google Диска» на странице операции. Ни
+# токенов из OAuth Playground, ни продления руками: свежий токен платформа
+# берёт сама (sar_common.provider_for_account, auth='service').
+# Наружу уходит только адрес аккаунта -- на него и расшаривают папки.
+
+@app.route("/api/admin/google-service-account", methods=["GET", "POST", "DELETE"])
+def api_google_service_account():
+    if not is_admin():
+        return jsonify({"ok": False, "error": "нужны права администратора"}), 403
+    conn = get_db()
+    if request.method == "POST":
+        f = request.files.get("key")
+        text = f.read().decode("utf-8", "replace") if f else \
+            ((request.get_json(silent=True) or {}).get("key") or "")
+        try:
+            pub = sar_common.set_service_account(conn, text, who=session.get("viewer_name"))
+            # Проверяем сразу, что Google ключ принимает: иначе ошибка
+            # всплыла бы при первом подключении папки, и неясно где.
+            sar_cloud.service_account_token(sar_common.service_account(conn))
+        except sar_cloud.CloudError as e:
+            sar_common.drop_service_account(conn)
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, "account": pub})
+    if request.method == "DELETE":
+        used = conn.execute("SELECT COUNT(*) n FROM cloud_accounts WHERE auth='service'").fetchone()["n"]
+        sar_common.drop_service_account(conn)
+        return jsonify({"ok": True, "account": None, "orphaned": used})
+    return jsonify({"ok": True, "account": sar_common.service_account_public(conn)})
+
+
+@app.route("/api/operations/<int:op_id>/gdrive", methods=["POST"])
+def api_operation_gdrive(op_id):
+    """Подключить папку Google Диска к операции по ссылке."""
+    if not is_admin():
+        return jsonify({"ok": False, "error": "подключать хранилища может администратор"}), 403
+    conn = get_db()
+    op = sar_common.get_operation(conn, op_id)
+    if op is None:
+        return jsonify({"ok": False, "error": "операции нет"}), 404
+    sa = sar_common.service_account(conn)
+    if sa is None:
+        return jsonify({"ok": False, "need_key": True,
+                        "error": "не загружен ключ сервисного аккаунта Google — "
+                                 "это делается один раз в Настройках платформы"}), 400
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "вставьте ссылку на папку"}), 400
+    try:
+        root = sar_cloud.folder_ref("google", url)
+    except sar_cloud.CloudError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if not root or root == "root":
+        # Весь диск сервисного аккаунта -- это не то, что человек имел в виду,
+        # и на боевом подключении «корень» дважды затягивал личные файлы.
+        return jsonify({"ok": False, "error": "нужна ссылка на конкретную папку"}), 400
+    dup = conn.execute("SELECT id, label FROM cloud_accounts WHERE provider='google' AND root_id=?",
+                       (root,)).fetchone()
+    if dup is not None:
+        return jsonify({"ok": False, "error": f"эта папка уже подключена («{dup['label']}»)"}), 409
+
+    try:
+        token, expires = sar_cloud.service_account_token(sa)
+        prov = sar_cloud.make_provider("google", token)
+        name, is_folder = prov.folder_info(root)
+        if not is_folder:
+            return jsonify({"ok": False, "error": "по ссылке файл, а не папка — "
+                                                  "нужна ссылка на папку с материалом"}), 400
+        items = prov.list_folder(root)
+    except sar_cloud.NotFound:
+        return jsonify({"ok": False, "share_with": sa["client_email"],
+                        "error": "у платформы нет доступа к этой папке. Откройте папку в "
+                                 "Google Диске → «Настройки доступа» и добавьте адрес "
+                                 f"{sa['client_email']} (права «Читатель»)."}), 400
+    except sar_cloud.CloudError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    label = (data.get("label") or "").strip() or name or "Google Диск"
+    clash = conn.execute("SELECT 1 FROM cloud_accounts WHERE label=?", (label,)).fetchone()
+    if clash is not None:
+        # Имя подключения -- это имя папки в дереве операции; два одинаковых
+        # слились бы в одну папку.
+        label = f"{label} ({root[:6]})"
+    acc_id = sar_common.add_cloud_account(
+        conn, provider="google", token=token, label=label, root_id=root,
+        root_name=name or None, who=session.get("viewer_name"), auth="service",
+        expires_at=datetime.fromtimestamp(expires).isoformat())
+    sar_common.update_cloud_account(conn, acc_id, operation_id=op_id,
+                                    last_ok_at=datetime.now().isoformat())
+    return jsonify({"ok": True, "id": acc_id, "label": label, "found": len(items),
+                    "folders": sum(1 for i in items if i.is_folder)})
 
 
 def _default_root(provider):
