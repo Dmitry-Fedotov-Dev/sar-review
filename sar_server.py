@@ -9517,7 +9517,9 @@ h1 {{ font-size:17px; margin:6px 0 4px; }}
 .cmt-text {{ font-size:13.5px; color:#dfe7ec; white-space:pre-wrap;
              word-wrap:break-word; }}
 .cmt-empty {{ font-size:12.5px; color:#6b757e; }}
-.cmt-form textarea {{ width:100%; background:#161d23; color:#dfe7ec;
+/* border-box: при width:100% отступы и рамка поля добавлялись СВЕРХУ, поле
+   вылезало за колонку, и вся страница прокручивалась вбок. */
+.cmt-form textarea {{ box-sizing:border-box; width:100%; background:#161d23; color:#dfe7ec;
   border:1px solid #3a4650; border-radius:7px; padding:8px 10px;
   font:13px/1.45 inherit; resize:vertical; }}
 .cmt-actions {{ display:flex; align-items:center; gap:9px; margin-top:6px; }}
@@ -9640,7 +9642,9 @@ document.getElementById('showbox').addEventListener('change', e => {{
 }});
 
 function apply() {{
-  const w = view.clientWidth, h = view.clientHeight;
+  // Пределы сдвига -- по самому кадру, а не по окну: у вертикального кадра
+  // по бокам поля, и считать от окна значило бы упираться не туда.
+  const w = zoom.offsetWidth || view.clientWidth, h = zoom.offsetHeight || view.clientHeight;
   ox = Math.min(0, Math.max(ox, w - w * scale));
   oy = Math.min(0, Math.max(oy, h - h * scale));
   zoom.style.transform = `translate(${{ox}}px, ${{oy}}px) scale(${{scale}})`;
@@ -9651,11 +9655,14 @@ function zoomAt(factor, at) {{
   const before = scale;
   scale = Math.min(12, Math.max(1, scale * factor));
   if (scale === before) return;
+  // От начала КАДРА, а не окна: кадр стоит по центру, и счёт от угла окна
+  // уводил бы увеличение от курсора на ширину поля.
   const r = view.getBoundingClientRect();
-  const cx = (at.clientX - r.left - ox) / before;
-  const cy = (at.clientY - r.top - oy) / before;
-  ox = at.clientX - r.left - cx * scale;
-  oy = at.clientY - r.top - cy * scale;
+  const left = r.left + zoom.offsetLeft, top = r.top + zoom.offsetTop;
+  const cx = (at.clientX - left - ox) / before;
+  const cy = (at.clientY - top - oy) / before;
+  ox = at.clientX - left - cx * scale;
+  oy = at.clientY - top - cy * scale;
   apply();
 }}
 
@@ -9791,11 +9798,24 @@ async function copyLink() {{
 // под кадром 16:9 оставалась широкая чёрная полоса. Пересчитываем и при
 // изменении размера окна -- иначе после поворота телефона полоса
 // возвращается.
+// Кадр вписывается в окно ЦЕЛИКОМ. Размер ставится блоку «кадр + рамка»
+// (#zoom) ровно по пропорциям кадра, и блок встаёт по центру окна.
+// Раньше у блока не было размера: картинка шла в натуральную величину, и
+// вертикальный кадр с телефона обрезался почти наполовину -- рамка уходила
+// за нижний край, а подпись внизу при этом обещала «кадр целиком»
+// (15.11.2026). Тот же приём, что fitStage() в плеере.
 function fitView() {{
   const img = document.getElementById('shot');
   if (!img.naturalWidth) return;
-  const h = view.clientWidth * img.naturalHeight / img.naturalWidth;
-  view.style.height = Math.min(h, window.innerHeight * 0.78) + 'px';
+  const ar = img.naturalWidth / img.naturalHeight;
+  const W = view.clientWidth;
+  const H = Math.min(W / ar, window.innerHeight * 0.78);
+  view.style.height = H + 'px';
+  const zw = Math.min(W, H * ar), zh = zw / ar;
+  zoom.style.width = zw + 'px';
+  zoom.style.height = zh + 'px';
+  zoom.style.left = ((W - zw) / 2) + 'px';
+  zoom.style.top = ((H - zh) / 2) + 'px';
   apply();
 }}
 document.getElementById('shot').addEventListener('load', fitView);
