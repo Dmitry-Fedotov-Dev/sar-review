@@ -41,6 +41,10 @@ def _client(app, db_path, monkeypatch):
     with client.session_transaction() as sess:
         sess["authed"] = True
         sess["viewer_name"] = "tester"
+        # Запуск обработки -- право администратора (с 14.11.2026; отказ
+        # остальным проверяется в test_operations_crud.py).
+        sess["verified"] = True
+        sess["role"] = sar_common.ROLE_ADMIN
     return client
 
 

@@ -126,15 +126,17 @@ def test_folder_name_never_empty():
 
 
 def test_two_operations_do_not_share_a_folder(env):
-    """Одинаковые названия -- разные операции, но папка одна. Метка при
-    этом укажет на последнюю: случай редкий, но молчать о нём нельзя."""
+    """Одинаковое название -- одна операция. Раньше (до 14.11.2026) второе
+    нажатие заводило дубль с ТОЙ ЖЕ папкой, и метка указывала на последнюю:
+    материалы первой молча уезжали во вторую. Теперь второй запрос получает
+    409 с номером существующей, а метка остаётся за первой."""
     client, watch, db = env
     _login(client)
     a = client.post("/api/operations", json={"title": "Поиск"}).get_json()
-    b = client.post("/api/operations", json={"title": "Поиск"}).get_json()
-    assert a["id"] != b["id"]
+    r = client.post("/api/operations", json={"title": "Поиск"})
+    assert r.status_code == 409 and r.get_json()["existing_id"] == a["id"]
     marker = sar_common.read_operation_marker(os.path.join(watch, "Поиск"))
-    assert marker == b["id"]
+    assert marker == a["id"]
 
 
 # --- список и сводка ------------------------------------------------------

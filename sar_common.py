@@ -185,9 +185,66 @@ def materials_of_operation(conn, operation_id):
         (operation_id,)).fetchall()
 
 
+class OperationError(ValueError):
+    """Действие с операцией невозможно -- текст для человека.
+
+    existing_id -- если причина в том, что такая операция уже есть: тогда
+    интерфейс ведёт в неё, а не заставляет искать."""
+    def __init__(self, text, existing_id=None):
+        super().__init__(text)
+        self.existing_id = existing_id
+
+
+OPERATION_TITLE_MAX = 120
+
+
+def _clean_title(title):
+    title = " ".join(str(title or "").split())
+    if not title:
+        raise OperationError("не задано название")
+    if len(title) > OPERATION_TITLE_MAX:
+        raise OperationError("название слишком длинное")
+    return title
+
+
+def find_operation_by_title(conn, title, exclude_id=None):
+    """Операция с таким же названием (без учёта регистра и лишних пробелов).
+
+    Сравнение в Python: lower() в SQLite не понижает кириллицу, и
+    «Курумды»/«курумды» считались бы разными операциями."""
+    want = " ".join(str(title or "").split()).casefold()
+    for row in conn.execute("SELECT * FROM operations").fetchall():
+        if row["id"] != exclude_id and " ".join((row["title"] or "").split()).casefold() == want:
+            return row
+    return None
+
+
+def free_operation_folder_name(watch_dir, title):
+    """Имя папки под новую операцию, не занятое ЧУЖОЙ меткой.
+
+    Разные названия могут дать одно имя папки («Поиск 12/08» и
+    «Поиск 12_08»): без проверки вторая операция переписала бы метку
+    первой, и материалы первой молча уехали бы во вторую."""
+    base = folder_name_for(title)
+    name, n = base, 2
+    while True:
+        path = os.path.join(watch_dir, name)
+        if not os.path.exists(path) or (os.path.isdir(path) and read_operation_marker(path) is None):
+            return name
+        name, n = f"{base} ({n})", n + 1
+
+
 def create_operation_with_folder(conn, watch_dir, title, area=None, client=None,
                                   coordinator=None):
-    """Заводит операцию и её папку разом.
+    """Заводит операцию и её папку разом. (id, папка).
+
+    ДУБЛИ. Двойное нажатие «Создать» заводило две одинаковые операции
+    (14.11.2026): кнопка не блокировалась, сервер не проверял. А две
+    операции с одним названием -- это ещё и одна папка на диске, где метка
+    второй затирает первую. Поэтому название уникально, и проверка с
+    вставкой идут под одной блокировкой записи (BEGIN IMMEDIATE): второй
+    запрос, пришедший в ту же миллисекунду, ждёт первого и видит его
+    результат, а не пустую таблицу.
 
     Порядок важен: сначала запись в базе (нужен id для метки), потом папка,
     потом метка. Если папку создать не удалось -- запись остаётся, операция
@@ -195,9 +252,25 @@ def create_operation_with_folder(conn, watch_dir, title, area=None, client=None,
     лучше, чем откатывать: пустая операция чинится одним движением, а
     потерянная -- нет.
     """
-    op_id = create_operation(conn, title, area=area, client=client,
-                             coordinator=coordinator)
-    folder = folder_name_for(title)
+    title = _clean_title(title)
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        dup = find_operation_by_title(conn, title)
+        if dup is not None:
+            raise OperationError(f"операция «{dup['title']}» уже есть", existing_id=dup["id"])
+        now = datetime.now().isoformat()
+        cur = conn.execute(
+            "INSERT INTO operations (title, area, client, coordinator, folder, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+            (title, area, client, coordinator, None, now, now))
+        op_id = cur.lastrowid
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    folder = free_operation_folder_name(watch_dir, title)
     path = os.path.join(watch_dir, folder)
     try:
         os.makedirs(path, exist_ok=True)
@@ -207,6 +280,89 @@ def create_operation_with_folder(conn, watch_dir, title, area=None, client=None,
     except OSError:
         folder = None
     return op_id, folder
+
+
+def update_operation(conn, operation_id, title=None, area=None, client=None):
+    """Правка названия и описания. Папка НЕ переименовывается: операция
+    опознаётся по метке внутри папки, а не по имени, и переименование папки
+    на диске под человеком, который как раз копирует туда материал, --
+    верный способ его потерять."""
+    op = get_operation(conn, operation_id)
+    if op is None:
+        raise OperationError("операции нет")
+    fields = {}
+    if title is not None:
+        title = _clean_title(title)
+        dup = find_operation_by_title(conn, title, exclude_id=operation_id)
+        if dup is not None:
+            raise OperationError(f"операция «{dup['title']}» уже есть", existing_id=dup["id"])
+        fields["title"] = title
+    if area is not None:
+        fields["area"] = area.strip() or None
+    if client is not None:
+        fields["client"] = client.strip() or None
+    if not fields:
+        return op
+    fields["updated_at"] = datetime.now().isoformat()
+    conn.execute("UPDATE operations SET " + ", ".join(f"{k}=?" for k in fields) + " WHERE id=?",
+                 list(fields.values()) + [operation_id])
+    conn.commit()
+    return get_operation(conn, operation_id)
+
+
+def set_operation_archived(conn, operation_id, archived):
+    """Скрыть операцию из общего списка или вернуть. Ничего не удаляет:
+    материалы, пометки, отчёт и папка остаются, ссылки продолжают работать."""
+    if get_operation(conn, operation_id) is None:
+        raise OperationError("операции нет")
+    now = datetime.now().isoformat()
+    conn.execute("UPDATE operations SET archived_at=?, updated_at=? WHERE id=?",
+                 (now if archived else None, now, operation_id))
+    conn.commit()
+    return get_operation(conn, operation_id)
+
+
+def delete_operation(conn, watch_dir, operation_id):
+    """Удаляет операцию, НЕ трогая материалы и работу людей над ними.
+
+    Что происходит:
+      * связи материал -> операция снимаются; сами материалы, их пометки,
+        триаж, обсуждения и просмотры остаются (они привязаны к материалу)
+        и попадают в «Не разобрано» или остаются в других операциях;
+      * подключённые к ней облачные хранилища отвязываются от операции;
+      * метка .sar_operation в её папке убирается, папка и файлы -- нет.
+
+    Отказ, если на карте операции есть отметки (map_marks): это работа
+    координатора, привязанная именно к операции, и удаление стёрло бы её
+    молча. Их убирают сначала явно.
+    """
+    op = get_operation(conn, operation_id)
+    if op is None:
+        raise OperationError("операции нет")
+    marks = conn.execute("SELECT COUNT(*) n FROM map_marks WHERE operation_id=?",
+                         (operation_id,)).fetchone()["n"]
+    if marks:
+        raise OperationError(
+            f"на карте операции {marks} отмет(ок) — их нужно убрать вручную, "
+            f"иначе удаление стёрло бы работу координатора")
+    detached = conn.execute("SELECT COUNT(*) n FROM operation_materials WHERE operation_id=?",
+                            (operation_id,)).fetchone()["n"]
+    conn.execute("DELETE FROM operation_materials WHERE operation_id=?", (operation_id,))
+    conn.execute("UPDATE cloud_accounts SET operation_id=NULL WHERE operation_id=?",
+                 (operation_id,))
+    conn.execute("DELETE FROM operations WHERE id=?", (operation_id,))
+    conn.commit()
+    if op["folder"]:
+        path = os.path.join(watch_dir, op["folder"])
+        if read_operation_marker(path) == operation_id:
+            try:
+                os.remove(os.path.join(path, OPERATION_MARKER))
+            except OSError:
+                # Не страшно: воркер не привяжет материалы к метке
+                # удалённой операции (attach_by_folder проверяет, что
+                # операция существует). Папку человек увидит как обычную.
+                pass
+    return {"detached": detached, "folder": op["folder"]}
 
 
 def merged_length(segments):
@@ -1623,6 +1779,11 @@ def init_db(db_path):
                        # структура в облаке своя, и по имени папки операцию
                        # не угадать
                        "ALTER TABLE cloud_accounts ADD COLUMN operation_id INTEGER",
+                       # Скрытая (в архиве) операция: из общего списка
+                       # убрана, но цела -- материалы, пометки, отчёт. Не
+                       # удаление: закрытый поиск нужен для отчёта заказчику
+                       # и если его возобновят.
+                       "ALTER TABLE operations ADD COLUMN archived_at TEXT",
                        # Для продления доступа к Google. Токен там живёт ЧАС,
                        # и без обновления диск приходится подключать заново
                        # каждый час -- на подготовку 150 файлов (около трёх

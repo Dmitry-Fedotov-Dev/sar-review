@@ -94,7 +94,7 @@ def test_tree_page_player_link_not_restricted_to_done_or_processing():
     что эта строка больше не ограничивает видимость плеера только этими
     статусами (простая проверка исходника сгенерированной страницы, т.к.
     JS-движка для полноценного рендера в тестах нет)."""
-    html = sar_server.TREE_PAGE_HTML.format(viewer_name="tester", upload_section="")
+    html = sar_server.TREE_PAGE_HTML.format(viewer_name="tester", upload_section="", can_run="false")
     assert "it.status === 'done' || it.status === 'processing'))" not in html.replace(" ", "").replace("\n", "")
     # ссылка на материал строится безусловно, без оглядки на статус: для
     # видео -- плеер, для фото -- просмотр снимка

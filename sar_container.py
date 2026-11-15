@@ -140,6 +140,14 @@ def build_config(current, env, data_root, port):
         cfg.setdefault(section, {})[key] = parse(name, value) if parse else value
 
     srv = cfg["server"]
+    # Адрес из SAR_SERVICE_URL ПОСТОЯННЫЙ (домен cd), в отличие от адреса
+    # туннеля на Windows-машине, который sar_tunnel.py переписывает при
+    # каждом перезапуске. server.public_url -- признак именно постоянного
+    # адреса: по нему платформа даёт прямые ссылки на находки, а не
+    # обходные через бота (см. sar_server.public_url).
+    svc = (env.get("SAR_SERVICE_URL") or "").strip().rstrip("/")
+    if svc:
+        srv["public_url"] = svc
     srv["watch_dir"] = os.path.join(data_root, "material")
     srv["data_dir"] = os.path.join(data_root, "sar_data")
     srv["host"] = "0.0.0.0"

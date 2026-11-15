@@ -14,7 +14,7 @@ import sar_server
 
 
 def _tree_js():
-    return sar_server.TREE_PAGE_HTML.format(viewer_name="tester", upload_section="")
+    return sar_server.TREE_PAGE_HTML.format(viewer_name="tester", upload_section="", can_run="false")
 
 
 def test_row_markup_has_exactly_seven_grid_cells():

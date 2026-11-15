@@ -1437,6 +1437,8 @@ h1 {{ font-size:18px; display:flex; justify-content:space-between; align-items:c
 {upload_section}
 <div id="tree">Загрузка...</div>
 <script>
+// Кнопку запуска модели видит только тот, кому сервер её разрешит.
+const CAN_RUN = {can_run};
 let sortKey = localStorage.getItem('sar_sort_key') || 'date';
 let sortDesc = (localStorage.getItem('sar_sort_desc') ?? 'true') === 'true';
 document.getElementById('sort-key').value = sortKey;
@@ -1566,7 +1568,7 @@ async function enqueue(reportId, btn) {{
   try {{
     const res = await fetch(`/api/report/${{reportId}}/enqueue`, {{ method: 'POST' }});
     const data = await res.json();
-    if (!data.ok) {{ btn.textContent = 'ошибка'; btn.disabled = false; return; }}
+    if (!data.ok) {{ btn.textContent = 'ошибка'; btn.title = data.error || ''; btn.disabled = false; return; }}
     loadTree();
   }} catch (e) {{
     btn.textContent = old;
@@ -1731,7 +1733,7 @@ function renderItems(items) {{
     const playerLink =
       `<a class="playerlink" href="${{mediaHref}}" title="${{it.kind === 'video' ? 'Ручной просмотр с плеером' : 'Посмотреть снимок'}}">▶</a>`;
     // кнопка ручного запуска модели -- для файлов, которые она ещё не смотрела
-    const runLink = (it.status === 'idle' || it.status === 'error')
+    const runLink = (CAN_RUN && (it.status === 'idle' || it.status === 'error'))
       ? `<button class="runlink" onclick="enqueue('${{it.report_id}}', this)" title="Прогнать через модель">🤖</button>`
       : '';
     // ВАЖНО для сетки: пустые ячейки нельзя пропускать -- иначе следующие
@@ -1783,7 +1785,8 @@ UPLOAD_SECTION_HTML = """<div class="upload-box">
 @app.route("/")
 def index():
     upload_section = UPLOAD_SECTION_HTML if can_upload() else ""
-    return TREE_PAGE_HTML.format(viewer_name=session.get("viewer_name", ""), upload_section=upload_section)
+    return TREE_PAGE_HTML.format(viewer_name=session.get("viewer_name", ""), upload_section=upload_section,
+                                 can_run="true" if can_upload() else "false")
 
 
 OPERATIONS_PAGE_HTML = """<!DOCTYPE html>
@@ -1840,6 +1843,11 @@ input[type=text]{{width:100%;background:var(--bg);color:var(--ink);
 input[type=text]:focus{{outline:2px solid var(--accent);outline-offset:-1px}}
 .row{{display:flex;gap:10px;justify-content:flex-end;margin-top:22px}}
 .err{{color:#ff9d7a;font-size:13px;margin-top:10px;min-height:18px}}
+.op.archived{{opacity:.6}}
+.arch{{font-size:12px;font-weight:500;color:var(--soft);border:1px solid var(--line);
+  border-radius:6px;padding:1px 6px;margin-left:6px;vertical-align:middle}}
+.archtoggle{{grid-column:1/-1;font-size:13px;margin-top:6px}}
+.archtoggle a{{color:var(--accent)}}
 </style></head><body>
 <div class="wrap">
   <div class="top">
@@ -1881,8 +1889,10 @@ const hhmm = s => {{
   return h ? `${{h}} ч ${{m}} мин` : `${{m}} мин`;
 }};
 
+// Скрытые (архив) по умолчанию не показываются; переключатель внизу.
+let showArchived = false;
 async function load() {{
-  const r = await fetch('/api/operations');
+  const r = await fetch('/api/operations' + (showArchived ? '?archived=1' : ''));
   const d = await r.json();
   document.getElementById('new').style.display = d.can_manage ? '' : 'none';
   const list = document.getElementById('list');
@@ -1901,8 +1911,8 @@ async function load() {{
     // Считать его здесь делением было бы неверно -- watched_sec это уже
     // уникальное покрытие, а человеко-часы лежат отдельно в viewer_sec.
     const pct = o.coverage_pct || 0;
-    return `<a class="op" href="/operation/${{o.id}}/">
-      <h2>${{esc(o.title)}}</h2>
+    return `<a class="op${{o.archived_at ? ' archived' : ''}}" href="/operation/${{o.id}}/">
+      <h2>${{esc(o.title)}}${{o.archived_at ? ' <span class="arch">в архиве</span>' : ''}}</h2>
       <div class="area">${{esc(o.area || '')}}</div>
       <div class="nums">
         <span>материалов <b>${{o.materials}}</b></span>
@@ -1922,6 +1932,10 @@ async function load() {{
       <div class="area">материалы, которые ещё не отнесены к операции</div>
       <div class="nums"><span>файлов <b>${{d.unsorted}}</b></span></div>
     </a>`;
+  }}
+  if (d.archived_hidden || showArchived) {{
+    html += `<div class="archtoggle"><a href="#" onclick="showArchived=!showArchived;load();return false">` +
+      (showArchived ? 'Скрыть архив' : `Показать скрытые (${{d.archived_hidden}})`) + `</a></div>`;
   }}
   list.innerHTML = html;
 }}
@@ -1946,19 +1960,37 @@ document.getElementById('cancel').onclick = () => {{
   dlg.close();
 }};
 
+// Кнопка блокируется на время запроса: двойное нажатие заводило две
+// одинаковые операции (14.11.2026). Сервер дубль тоже не пропустит (409),
+// но человек не должен даже видеть такой ошибки от собственного клика.
+let creating = false;
 document.getElementById('create').addEventListener('click', async (e) => {{
-  const title = document.getElementById('t').value.trim();
-  if (!title) {{ e.preventDefault(); document.getElementById('err').textContent =
-    'Название обязательно'; return; }}
   e.preventDefault();
-  const r = await fetch('/api/operations', {{
-    method: 'POST', headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{title,
-      area: document.getElementById('a').value.trim(),
-      client: document.getElementById('c').value.trim()}})
-  }});
-  const d = await r.json();
-  if (!d.ok) {{ document.getElementById('err').textContent = d.error || 'Не вышло'; return; }}
+  if (creating) return;
+  const btn = document.getElementById('create');
+  const err = document.getElementById('err');
+  const title = document.getElementById('t').value.trim();
+  if (!title) {{ err.textContent = 'Название обязательно'; return; }}
+  creating = true; btn.disabled = true; btn.textContent = 'Создаю…';
+  let d = {{}};
+  try {{
+    const r = await fetch('/api/operations', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{title,
+        area: document.getElementById('a').value.trim(),
+        client: document.getElementById('c').value.trim()}})
+    }});
+    d = await r.json();
+  }} catch (x) {{
+    d = {{ok: false, error: 'Нет связи с сервером — операция не создана'}};
+  }} finally {{
+    creating = false; btn.disabled = false; btn.textContent = 'Создать';
+  }}
+  if (!d.ok) {{
+    err.innerHTML = esc(d.error || 'Не вышло') + (d.existing_id
+      ? ` — <a href="/operation/${{d.existing_id}}/">открыть её</a>` : '');
+    return;
+  }}
   dlg.close();
   document.getElementById('t').value = '';
   document.getElementById('a').value = '';
@@ -2009,6 +2041,30 @@ a{{color:inherit}}
 .top a{{color:var(--accent);text-decoration:none}}
 h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .area{{font-size:13px;color:var(--soft);margin-bottom:12px}}
+/* Панель действий над операцией. Кнопки видны только тем, кому сервер их
+   разрешит (rights из /browse) -- иначе человек жмёт и получает отказ. */
+.optools{{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}}
+.optools button{{background:var(--card2);color:var(--ink);border:1px solid var(--line);
+  border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer;display:inline-flex;
+  align-items:center;gap:6px}}
+.optools button:hover{{border-color:var(--accent)}}
+.optools button.primary{{background:var(--accent);color:#0d1417;border-color:var(--accent);font-weight:600}}
+.optools button.danger{{color:#ff9d7a}}
+.optools button:disabled{{opacity:.5;cursor:default}}
+.ic svg{{width:58%;height:58%}}
+dialog.opdlg{{background:var(--card);color:var(--ink);border:1px solid var(--line);
+  border-radius:12px;padding:20px;width:min(520px,92vw)}}
+dialog.opdlg::backdrop{{background:rgba(0,0,0,.6)}}
+.opdlg h3{{margin:0 0 6px}}
+.opdlg .hint{{color:var(--soft);font-size:13px;margin:0 0 12px}}
+.opdlg input[type=text]{{width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);
+  border-radius:8px;padding:8px 10px;font-size:14px;margin:4px 0 10px}}
+.opdlg .btns{{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}}
+.opdlg .btns button{{background:var(--card2);color:var(--ink);border:1px solid var(--line);
+  border-radius:8px;padding:7px 14px;cursor:pointer}}
+.opdlg .btns button.primary{{background:var(--accent);color:#0d1417;border-color:var(--accent);font-weight:600}}
+.opdlg .msg{{font-size:13px;margin-top:10px;min-height:18px;white-space:pre-line}}
+.opdlg progress{{width:100%;margin-top:10px}}
 
 .sum{{display:flex;flex-wrap:wrap;gap:4px 22px;font-size:13px;
   color:var(--soft);margin-bottom:8px}}
@@ -2306,6 +2362,7 @@ table.rep td.dim{{color:var(--dim)}}
   </div>
   <h1 id="title">…</h1>
   <div class="area" id="area"></div>
+  <div class="optools" id="optools"></div>
   <div class="sum" id="sum"></div>
   <div class="cov"><i id="covbar" style="width:0%"></i></div>
 
@@ -2325,6 +2382,32 @@ table.rep td.dim{{color:var(--dim)}}
   </div>
   <div id="body"></div>
 </div>
+
+<dialog class="opdlg" id="upDlg">
+  <h3>Добавить материалы</h3>
+  <p class="hint">Видео, фото и телеметрия (.srt). Файлы лягут в папку операции
+    («загружено»), дальше их подхватит обработка: в списке они появятся через
+    несколько секунд, превью и лёгкая копия — позже.</p>
+  <input type="file" id="upFiles" multiple accept="video/*,image/*,.srt">
+  <progress id="upProg" max="100" value="0" hidden></progress>
+  <div class="msg" id="upMsg"></div>
+  <div class="btns">
+    <button type="button" onclick="closeDlg('upDlg')" id="upClose">Закрыть</button>
+    <button type="button" class="primary" id="upGo" onclick="doUpload()">Загрузить</button>
+  </div>
+</dialog>
+
+<dialog class="opdlg" id="renDlg">
+  <h3>Изменить операцию</h3>
+  <label>Название</label><input type="text" id="renT" maxlength="120">
+  <label>Район работ</label><input type="text" id="renA">
+  <label>Заказчик</label><input type="text" id="renC" placeholder="необязательно">
+  <div class="msg" id="renMsg"></div>
+  <div class="btns">
+    <button type="button" onclick="closeDlg('renDlg')">Отмена</button>
+    <button type="button" class="primary" id="renGo" onclick="doRename()">Сохранить</button>
+  </div>
+</dialog>
 
 <script>
 const OP = Number(location.pathname.split('/').filter(Boolean)[1]);
@@ -2377,7 +2460,7 @@ async function loadBrowse() {{
   const r = await fetch(`/api/operations/${{OP}}/browse?path=` + encodeURIComponent(path));
   data = await r.json();
   const o = data.operation, s = data.summary;
-  document.getElementById('title').textContent = o.title;
+  document.getElementById('title').textContent = o.title + (o.archived ? ' · в архиве' : '');
   document.getElementById('area').textContent = o.area || '';
   document.getElementById('sum').innerHTML =
     `<span>материалов <b>${{s.materials}}</b></span>` +
@@ -2386,8 +2469,127 @@ async function loadBrowse() {{
     `<span>человеко-часов <b>${{hhmm(s.viewer_sec)}}</b></span>` +
     `<span>пометок <b>${{s.marks}}</b></span>`;
   document.getElementById('covbar').style.width = (s.coverage_pct || 0) + '%';
+  renderTools(data.rights || {{}});
   render();
 }}
+
+// --- действия над операцией ------------------------------------------------
+// Права приходят с сервера (operation_rights) -- те же, по которым он
+// проверяет запросы, поэтому кнопки и проверки не расходятся.
+function renderTools(r) {{
+  const t = [];
+  if (r.upload) t.push(`<button class="primary" onclick="openUpload()">＋ Добавить материалы</button>`);
+  if (r.admin) t.push(`<button onclick="openGdrive()">${{GDRIVE_SVG}} Добавить с Google Диска</button>`);
+  if (r.manage) t.push(`<button onclick="openRename()">Изменить</button>`);
+  if (r.manage) t.push(data.operation.archived
+    ? `<button onclick="setArchived(false)">Вернуть из архива</button>`
+    : `<button onclick="setArchived(true)">Скрыть в архив</button>`);
+  if (r.delete) t.push(`<button class="danger" onclick="deleteOp()">Удалить операцию</button>`);
+  document.getElementById('optools').innerHTML = t.join('');
+}}
+
+function closeDlg(id) {{ document.getElementById(id).close(); }}
+
+function openUpload() {{
+  document.getElementById('upFiles').value = '';
+  document.getElementById('upMsg').textContent = '';
+  document.getElementById('upProg').hidden = true;
+  document.getElementById('upDlg').showModal();
+}}
+
+// XMLHttpRequest, а не fetch: только он сообщает ход ОТПРАВКИ. Видео с
+// дрона -- гигабайты, и полоса, стоящая на месте десять минут, выглядит
+// как зависание; человек закрывает вкладку и теряет загрузку.
+let uploading = false;
+function doUpload() {{
+  if (uploading) return;
+  const files = document.getElementById('upFiles').files;
+  const msg = document.getElementById('upMsg');
+  if (!files.length) {{ msg.textContent = 'Выберите файлы'; return; }}
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  const prog = document.getElementById('upProg'), go = document.getElementById('upGo');
+  uploading = true; go.disabled = true; prog.hidden = false; prog.value = 0;
+  msg.textContent = `Загружаю ${{files.length}} файл(ов)…`;
+  const x = new XMLHttpRequest();
+  x.open('POST', `/api/operations/${{OP}}/upload`);
+  x.upload.onprogress = e => {{ if (e.lengthComputable) prog.value = e.loaded / e.total * 100; }};
+  x.onload = () => {{
+    uploading = false; go.disabled = false;
+    let d = {{}};
+    try {{ d = JSON.parse(x.responseText); }} catch (e) {{ d = {{error: 'сервер ответил ' + x.status}}; }}
+    const parts = [];
+    if (d.saved && d.saved.length) parts.push(`Загружено: ${{d.saved.length}}. Появятся в списке через несколько секунд.`);
+    if (d.errors && d.errors.length) parts.push('Не принято:\n' + d.errors.join('\n'));
+    if (!parts.length) parts.push(d.error || 'Не получилось');
+    msg.textContent = parts.join('\n');
+    if (d.saved && d.saved.length) setTimeout(loadBrowse, 4000);
+  }};
+  x.onerror = () => {{
+    uploading = false; go.disabled = false;
+    msg.textContent = 'Связь прервалась — загрузка не завершена. Попробуйте ещё раз.';
+  }};
+  x.send(fd);
+}}
+
+function openRename() {{
+  document.getElementById('renT').value = data.operation.title || '';
+  document.getElementById('renA').value = data.operation.area || '';
+  document.getElementById('renC').value = data.operation.client || '';
+  document.getElementById('renMsg').textContent = '';
+  document.getElementById('renDlg').showModal();
+}}
+
+let renaming = false;
+async function doRename() {{
+  if (renaming) return;
+  renaming = true; document.getElementById('renGo').disabled = true;
+  let d = {{}};
+  try {{
+    const r = await fetch(`/api/operations/${{OP}}`, {{method: 'PATCH',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{title: document.getElementById('renT').value,
+                            area: document.getElementById('renA').value,
+                            client: document.getElementById('renC').value}})}});
+    d = await r.json();
+  }} catch (e) {{ d = {{error: 'Нет связи с сервером'}}; }}
+  renaming = false; document.getElementById('renGo').disabled = false;
+  if (!d.ok) {{ document.getElementById('renMsg').textContent = d.error || 'Не получилось'; return; }}
+  closeDlg('renDlg');
+  loadBrowse();
+}}
+
+async function setArchived(on) {{
+  if (on && !confirm('Скрыть операцию из общего списка?\n\nНичего не удаляется: материалы, ' +
+                     'пометки и отчёт остаются, вернуть можно в любой момент.')) return;
+  const r = await fetch(`/api/operations/${{OP}}`, {{method: 'PATCH',
+    headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{archived: on}})}});
+  const d = await r.json().catch(() => ({{}}));
+  if (!d.ok) {{ alert(d.error || 'Не получилось'); return; }}
+  loadBrowse();
+}}
+
+async function deleteOp() {{
+  const t = data.operation.title;
+  if (!confirm(`Удалить операцию «${{t}}»?\n\nМатериалы, пометки и обсуждения НЕ удаляются — ` +
+               `файлы останутся на месте и попадут в «Не разобрано».`)) return;
+  const r = await fetch(`/api/operations/${{OP}}`, {{method: 'DELETE'}});
+  const d = await r.json().catch(() => ({{}}));
+  if (!d.ok) {{ alert(d.error || 'Не получилось'); return; }}
+  location.href = '/operations';
+}}
+
+// Значок Google Диска -- у корня подключённой папки в дереве операции и на
+// кнопке добавления: облачное видно сразу, а не по названию.
+const GDRIVE_SVG = '<svg viewBox="0 0 87.3 78" width="16" height="15" aria-label="Google Диск">' +
+  '<path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/>' +
+  '<path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/>' +
+  '<path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/>' +
+  '<path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/>' +
+  '<path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/>' +
+  '<path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/>' +
+  '</svg>';
+const FOLDER_ICON = {{google: GDRIVE_SVG, yandex: '☁️'}};
 
 // Крошки: путь с возвратом на любой уровень. Без них человек, провалившись
 // в третью вложенную папку, не понимает, где он и как выйти.
@@ -2447,7 +2649,7 @@ function render() {{
     let html = crumbs();
     const rows = data.folders.map(f =>
       `<a class="row" href="#" onclick="go('${{esc(path ? path + '/' + f.name : f.name)}}');return false">
-        <span class="ic">📁</span><span class="nm">${{esc(f.name)}}</span>
+        <span class="ic">${{FOLDER_ICON[f.provider] || '📁'}}</span><span class="nm">${{esc(f.name)}}</span>
         <span class="meta">${{f.files ? f.files + ' файл(ов)' : '—'}}</span></a>`
       // значок папки того же размера, что превью: иначе имена файлов и
       // имена папок встанут в разные колонки и список поедет
@@ -3183,16 +3385,19 @@ function zoomPeek(factor, at) {{
 // загрузку страницы, дальше держим в памяти.
 let EXTERNAL_BASE = '';
 let BOT_NAME = '';
+let STABLE_BASE = false;
 fetch('/api/external_base')
   .then(r => r.json())
-  .then(d => {{ EXTERNAL_BASE = d.base || ''; BOT_NAME = d.bot || ''; }})
+  .then(d => {{ EXTERNAL_BASE = d.base || ''; BOT_NAME = d.bot || '';
+                STABLE_BASE = !!d.stable; }})
   .catch(() => {{}});
 
 function findingLink(obsId, reportId, seconds) {{
   // ВЕЧНАЯ ссылка идёт через бота: адрес t.me не меняется никогда, а имя
   // быстрого туннеля -- при каждом перезапуске, и старое исчезает из DNS
   // без всякой возможности перенаправить.
-  if (obsId && BOT_NAME) return `https://t.me/${{BOT_NAME}}?start=finding_${{obsId}}`;
+  // Постоянный адрес (свой домен) -- прямая ссылка, обход через бота не нужен.
+  if (obsId && BOT_NAME && !STABLE_BASE) return `https://t.me/${{BOT_NAME}}?start=finding_${{obsId}}`;
   const base = EXTERNAL_BASE || location.origin;
   if (obsId) return `${{base}}/finding/${{obsId}}/`;
   if (!reportId) return '';
@@ -3551,32 +3756,164 @@ def can_manage_operations():
 def api_operations():
     conn = get_db()
     if request.method == "GET":
-        out = []
+        # Скрытые (архив) по умолчанию не показываются: закрытые поиски
+        # мешают видеть идущие. ?archived=1 -- показать и их.
+        show_archived = request.args.get("archived") in ("1", "true", "yes")
+        out, hidden = [], 0
         for o in sar_common.list_operations(conn):
+            if o["archived_at"] and not show_archived:
+                hidden += 1
+                continue
             item = dict(o)
             item.update(sar_common.operation_summary(conn, o["id"]))
             out.append(item)
-        return jsonify({"operations": out,
+        return jsonify({"operations": out, "archived_hidden": hidden,
                          "unsorted": len(sar_common.unsorted_materials(conn)),
-                         "can_manage": can_manage_operations()})
+                         "can_manage": can_manage_operations(),
+                         "rights": operation_rights()})
 
     if not can_manage_operations():
         return jsonify({"ok": False, "error": "нужны права модератора"}), 403
 
     data = request.get_json(silent=True) or request.form
-    title = (data.get("title") or "").strip()
-    if not title:
-        return jsonify({"ok": False, "error": "не задано название"}), 400
-    if len(title) > 120:
-        return jsonify({"ok": False, "error": "название слишком длинное"}), 400
+    watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
+    try:
+        op_id, folder = sar_common.create_operation_with_folder(
+            conn, watch_dir, data.get("title"),
+            area=(data.get("area") or "").strip() or None,
+            client=(data.get("client") or "").strip() or None,
+            coordinator=session.get("viewer_name"))
+    except sar_common.OperationError as e:
+        return _operation_error(e)
+    op = sar_common.get_operation(conn, op_id)
+    return jsonify({"ok": True, "id": op_id, "title": op["title"], "folder": folder})
+
+
+def _operation_error(e):
+    """Отказ по операции. Дубль -- 409 с адресом существующей: интерфейс
+    ведёт туда, а не оставляет человека искать её в списке."""
+    body = {"ok": False, "error": str(e)}
+    if e.existing_id is not None:
+        body["existing_id"] = e.existing_id
+        return jsonify(body), 409
+    return jsonify(body), 400
+
+
+def operation_rights():
+    """Что текущему человеку можно делать с операциями. ОДНО место: и
+    проверки на сервере, и кнопки в интерфейсе спрашивают отсюда, иначе
+    кнопка показывалась бы тому, кому сервер откажет (или наоборот)."""
+    return {"manage": can_manage_operations(),      # создать, переименовать
+            "delete": is_admin(),                   # удалить
+            "upload": can_upload(),                 # добавить материалы
+            "admin": is_admin()}
+
+
+@app.route("/api/operations/<int:op_id>", methods=["PATCH", "DELETE"])
+def api_operation_one(op_id):
+    conn = get_db()
+    if request.method == "DELETE":
+        if not operation_rights()["delete"]:
+            return jsonify({"ok": False, "error": "удалять операции может администратор"}), 403
+        try:
+            res = sar_common.delete_operation(conn, os.path.abspath(SERVER_CFG["watch_dir"]), op_id)
+        except sar_common.OperationError as e:
+            return _operation_error(e)
+        return jsonify(dict({"ok": True}, **res))
+
+    if not operation_rights()["manage"]:
+        return jsonify({"ok": False, "error": "нужны права модератора"}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        op = sar_common.update_operation(conn, op_id, title=data.get("title"),
+                                         area=data.get("area"), client=data.get("client"))
+        if "archived" in data:
+            op = sar_common.set_operation_archived(conn, op_id, bool(data["archived"]))
+    except sar_common.OperationError as e:
+        return _operation_error(e)
+    return jsonify({"ok": True, "operation": {"id": op["id"], "title": op["title"],
+                                               "area": op["area"], "client": op["client"],
+                                               "archived": bool(op["archived_at"])}})
+
+
+@app.route("/api/operations/<int:op_id>/upload", methods=["POST"])
+def api_operation_upload(op_id):
+    """Добавить материалы в операцию из браузера: видео, фото, телеметрию.
+
+    Видео и фото ложатся в ПАПКУ ОПЕРАЦИИ (подпапка «загружено»), а дальше
+    всё как с файлом, скопированным руками: воркер находит его, привязывает
+    к операции по метке и делает превью и лёгкую копию. Отдельного пути
+    «загружено через браузер» нет -- два пути означали бы два набора
+    правил, которые разойдутся. SRT -- в папку телеметрии, сопоставление
+    с видео идёт по имени файла.
+
+    Запись атомарная (временное имя + os.replace): воркер не подхватит
+    недописанный файл.
+    """
+    if not operation_rights()["upload"]:
+        return jsonify({"ok": False, "error": "добавлять материалы может администратор"}), 403
+    conn = get_db()
+    op = sar_common.get_operation(conn, op_id)
+    if op is None:
+        return jsonify({"ok": False, "error": "операции нет"}), 404
+    files = [f for f in request.files.getlist("files") if f and f.filename]
+    if not files:
+        return jsonify({"ok": False, "error": "файлы не переданы"}), 400
 
     watch_dir = os.path.abspath(SERVER_CFG["watch_dir"])
-    op_id, folder = sar_common.create_operation_with_folder(
-        conn, watch_dir, title,
-        area=(data.get("area") or "").strip() or None,
-        client=(data.get("client") or "").strip() or None,
-        coordinator=session.get("viewer_name"))
-    return jsonify({"ok": True, "id": op_id, "title": title, "folder": folder})
+    folder = op["folder"]
+    if not folder or sar_common.read_operation_marker(os.path.join(watch_dir, folder)) != op_id:
+        # Операция без папки (или папку убрали руками): заводим заново,
+        # иначе файлу некуда лечь так, чтобы воркер отнёс его к операции.
+        folder = sar_common.free_operation_folder_name(watch_dir, op["title"])
+        os.makedirs(os.path.join(watch_dir, folder), exist_ok=True)
+        sar_common.write_operation_marker(os.path.join(watch_dir, folder), op_id)
+        conn.execute("UPDATE operations SET folder=? WHERE id=?", (folder, op_id))
+        conn.commit()
+    media_dir = os.path.join(watch_dir, folder, UPLOAD_SUBDIR)
+    os.makedirs(media_dir, exist_ok=True)
+
+    telemetry_dir = None
+    saved, errors = [], []
+    for f in files:
+        stem, ext = _sanitize_upload_filename(f.filename)
+        if ext in sar_common.VIDEO_EXTS or ext in sar_common.PHOTO_EXTS:
+            target_dir = media_dir
+        elif ext == ".srt":
+            if telemetry_dir is None:
+                detection_cfg = load_detection_config(
+                    os.path.join(SCRIPT_DIR, "sar_config.json") if os.path.exists(
+                        os.path.join(SCRIPT_DIR, "sar_config.json")) else None)
+                telemetry_dir = sar_common.resolve_telemetry_dir(
+                    watch_dir, detection_cfg.get("telemetry_dir",
+                                                 sar_common.DEFAULT_TELEMETRY_DIR_NAME))
+            target_dir = telemetry_dir
+        else:
+            errors.append(f"{f.filename}: такой тип не принимается (видео, фото или .srt)")
+            continue
+        final_path = _unique_upload_path(target_dir, stem, ext)
+        tmp_path = final_path + ".uploading"
+        try:
+            f.save(tmp_path)
+            os.replace(tmp_path, final_path)
+            saved.append(os.path.basename(final_path))
+        except OSError as e:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass   # недописанный хвост с .uploading воркер всё равно не возьмёт
+            errors.append(f"{f.filename}: не удалось сохранить ({e})")
+    if telemetry_dir is not None:
+        global _TELEMETRY_INDEX
+        _TELEMETRY_INDEX = sar_common.build_telemetry_index(telemetry_dir)
+    return jsonify({"ok": not errors, "saved": saved, "errors": errors, "folder": folder})
+
+
+# Подпапка для загруженного через браузер внутри папки операции: так видно,
+# что пришло не из облака и не скопировано руками, и имена не мешаются с
+# раскладкой, которую человек сделал сам.
+UPLOAD_SUBDIR = "загружено"
 
 
 @app.route("/api/operations/<int:op_id>/materials")
@@ -3620,16 +3957,31 @@ def api_operation_browse(op_id):
             item.update(get_report_stats(conn, r["report_id"], r.get("duration_sec")))
         return item
 
+    # Корни подключённых облаков на верхнем уровне операции -- с отметкой
+    # хранилища: интерфейс рисует им значок Google Диска / Яндекс.Диска,
+    # чтобы облачную папку было видно сразу, а не по названию.
+    if not data["path"]:
+        roots = sar_common.cloud_display_roots(conn)
+        prov = {}
+        for a in sar_common.cloud_accounts(conn, enabled_only=False):
+            if a["id"] in roots:
+                prov.setdefault(roots[a["id"]], a["provider"])
+        for f in data["folders"]:
+            if f["name"] in prov:
+                f["provider"] = prov[f["name"]]
     return jsonify({
         "operation": {"id": data["operation"]["id"],
                        "title": data["operation"]["title"],
                        "area": data["operation"]["area"],
+                       "client": data["operation"].get("client"),
+                       "archived": bool(data["operation"].get("archived_at")),
                        "folder": data["operation"]["folder"]},
         "path": data["path"],
         "folders": data["folders"],
         "files": [short(r) for r in data["files"]],
         "outside": [short(r) for r in data["outside"]],
         "summary": sar_common.operation_summary(conn, op_id),
+        "rights": operation_rights(),
     })
 
 
@@ -4991,7 +5343,21 @@ def api_observations(report_id):
 
 @app.route("/api/report/<report_id>/observations/<int:obs_id>", methods=["DELETE"])
 def api_delete_observation(report_id, obs_id):
+    """Удалить ручную пометку: СВОЮ -- любому, чужую -- модератору.
+
+    До 14.11.2026 проверки не было вовсе: любой вошедший, включая анонима по
+    общему паролю, мог одним запросом на каждую стереть всю разметку
+    команды. Пометка -- это работа человека, и терять её молча нельзя.
+    «Своя» -- по имени, под которым человек вошёл: другой опоры у анонима
+    нет, а опознанный (по ссылке) имя подделать не может."""
     conn = get_db()
+    row = conn.execute("SELECT viewer_name FROM manual_observations WHERE id=? AND report_id=?",
+                       (obs_id, report_id)).fetchone()
+    if row is None:
+        return jsonify({"ok": False, "error": "пометки нет"}), 404
+    own = (row["viewer_name"] or "") == (session.get("viewer_name") or "")
+    if not (own or is_moderator()):
+        return jsonify({"ok": False, "error": "чужую пометку может удалить только модератор"}), 403
     conn.execute("DELETE FROM manual_observations WHERE id=? AND report_id=?", (obs_id, report_id))
     conn.commit()
     return jsonify({"ok": True})
@@ -5004,7 +5370,13 @@ def api_enqueue(report_id):
     Нужно, когда авто-обработка выключена (auto_process=false): файлы
     появляются в списке со статусом 'idle' и доступны для ручного просмотра,
     а через модель прогоняются только те, что человек выбрал сам. На CPU
-    минута видео считается ~30 минут, поэтому выбирать осмысленно."""
+    минута видео считается ~30 минут, поэтому выбирать осмысленно.
+
+    Только администратор (ROLE_ADMIN -- «загрузка файлов и запуск
+    обработки»). До 14.11.2026 проверки не было: любой вошедший мог
+    поставить в очередь всё подряд и занять машину на сутки."""
+    if not can_upload():
+        return jsonify({"ok": False, "error": "запускать обработку может администратор"}), 403
     conn = get_db()
     row = conn.execute("SELECT status FROM reports WHERE report_id=?", (report_id,)).fetchone()
     if row is None:
@@ -6330,15 +6702,18 @@ async function loadAiScenes() {{
 // загрузку страницы, дальше держим в памяти.
 let EXTERNAL_BASE = '';
 let BOT_NAME = '';
+let STABLE_BASE = false;
 fetch('/api/external_base')
   .then(r => r.json())
-  .then(d => {{ EXTERNAL_BASE = d.base || ''; BOT_NAME = d.bot || ''; }})
+  .then(d => {{ EXTERNAL_BASE = d.base || ''; BOT_NAME = d.bot || '';
+                STABLE_BASE = !!d.stable; }})
   .catch(() => {{}});
 
 function findingLink(obsId, seconds) {{
   // См. страницу операции: вечная ссылка -- через бота, потому что имя
   // туннеля перестаёт существовать при каждом его перезапуске.
-  if (obsId && BOT_NAME) return `https://t.me/${{BOT_NAME}}?start=finding_${{obsId}}`;
+  // Постоянный адрес (свой домен) -- прямая ссылка, обход через бота не нужен.
+  if (obsId && BOT_NAME && !STABLE_BASE) return `https://t.me/${{BOT_NAME}}?start=finding_${{obsId}}`;
   const base = EXTERNAL_BASE || location.origin;
   if (obsId) return `${{base}}/finding/${{obsId}}/`;
   const t = (seconds !== null && seconds !== undefined)
@@ -6638,7 +7013,12 @@ async function deleteObservation(id) {{
   // с удалением сообщения, поэтому и в вопросе теперь сказано, что именно
   // исчезнет.
   if (!confirm('Удалить это наблюдение? Оно исчезнет у всех.')) return;
-  await fetch(`/api/report/${{reportId}}/observations/${{id}}`, {{ method: 'DELETE' }});
+  const r = await fetch(`/api/report/${{reportId}}/observations/${{id}}`, {{ method: 'DELETE' }});
+  // Отказ показываем: молча оставшаяся пометка выглядела бы как сбой.
+  if (!r.ok) {{
+    const d = await r.json().catch(() => ({{}}));
+    alert(d.error || 'Не получилось удалить');
+  }}
   loadObservations();
 }}
 
@@ -7538,7 +7918,7 @@ function renderPeople() {{
 // Ссылку сервер отдаёт относительной: настоящий адрес знает только браузер
 // (за обратным прокси сервер видит внутренний http-порт).
 function showLink(path, who) {{
-  const url = location.origin + path;
+  const url = /^https?:/.test(path) ? path : location.origin + path;
   document.getElementById('p_msg').innerHTML =
     `<div>Ссылка для ${{esc(who)}} — передайте лично, она больше не будет показана:</div>
      <input type="text" readonly value="${{esc(url)}}" style="width:100%" onclick="this.select()">`;
@@ -7653,7 +8033,9 @@ def _people_action(fn):
 
 
 def _link_path(token):
-    return sar_common.personal_link_url("", token)
+    # При постоянном адресе -- полная ссылка; иначе относительная, адрес
+    # дописывает браузер (см. showLink в странице /admin).
+    return sar_common.personal_link_url(public_url(), token)
 
 
 def _who_by_id(conn, person_id):
@@ -8659,7 +9041,7 @@ def html_escape(value):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-_EXTERNAL_BASE_CACHE = {"url": None, "bot": "", "at": 0.0}
+_EXTERNAL_BASE_CACHE = {"url": None, "bot": "", "public": "", "at": 0.0}
 _EXTERNAL_BASE_TTL = 30.0
 
 
@@ -8671,7 +9053,8 @@ def api_external_base():
     меняется при каждом падении канала, и страница, открытая до падения,
     копировала бы мёртвые ссылки до перезагрузки.
     """
-    return jsonify({"base": external_base(), "bot": bot_username()})
+    return jsonify({"base": external_base(), "bot": bot_username(),
+                    "stable": bool(public_url())})
 
 
 def external_base():
@@ -8688,19 +9071,34 @@ def external_base():
     if _EXTERNAL_BASE_CACHE["url"] is not None and \
             now - _EXTERNAL_BASE_CACHE["at"] < _EXTERNAL_BASE_TTL:
         return _EXTERNAL_BASE_CACHE["url"]
-    url, bot = "", ""
+    url, bot, public = "", "", ""
     try:
         with open(os.path.join(SCRIPT_DIR, "sar_config.json"), encoding="utf-8") as f:
-            tb = json.load(f).get("telegram_bot") or {}
+            full = json.load(f)
+        tb = full.get("telegram_bot") or {}
         url = (tb.get("service_url") or "").strip()
         bot = (tb.get("bot_username") or "").strip().lstrip("@")
+        public = ((full.get("server") or {}).get("public_url") or "").strip()
     except Exception:                                   # noqa: BLE001
         # Конфига нет или он битый -- ссылка просто будет относительной.
         # Ронять из-за этого страницу находки нельзя.
-        url, bot = "", ""
-    url = url.rstrip("/")
-    _EXTERNAL_BASE_CACHE.update({"url": url, "bot": bot, "at": now})
+        url, bot, public = "", "", ""
+    public = public.rstrip("/")
+    url = public or url.rstrip("/")
+    _EXTERNAL_BASE_CACHE.update({"url": url, "bot": bot, "public": public, "at": now})
     return url
+
+
+def public_url():
+    """ПОСТОЯННЫЙ адрес платформы (server.public_url), либо "".
+
+    Отличается от external_base() тем, что за ним стоит обещание: адрес не
+    поменяется. Его задаёт установка с собственным доменом (контейнер cd
+    берёт его из SAR_SERVICE_URL). Адрес туннеля сюда не попадает никогда --
+    sar_tunnel.py пишет только telegram_bot.service_url. Только при
+    постоянном адресе ссылки на находки идут напрямую, а не через бота."""
+    external_base()          # обновит кэш, если он протух
+    return _EXTERNAL_BASE_CACHE.get("public") or ""
 
 
 def bot_username():
@@ -8722,7 +9120,15 @@ def finding_share_link(obs_id):
 
     Если имени бота ещё нет -- отдаём прямую ссылку: она хотя бы работает
     сейчас, и это лучше, чем ничего.
+
+    При ПОСТОЯННОМ адресе (public_url, установка со своим доменом) обход
+    через бота не нужен: прямая ссылка не протухнет, открывается без
+    Telegram, а человек без сессии попадёт на вход и после него -- на
+    находку (параметр next).
     """
+    stable = public_url()
+    if stable:
+        return f"{stable}/finding/{int(obs_id)}/"
     bot = bot_username()
     if bot:
         return f"https://t.me/{bot}?start=finding_{int(obs_id)}"
