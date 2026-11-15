@@ -2051,6 +2051,9 @@ h1{{font-size:20px;margin:0 0 3px;font-weight:700}}
 .optools button.primary{{background:var(--accent);color:#0d1417;border-color:var(--accent);font-weight:600}}
 .optools button.danger{{color:#ff9d7a}}
 .optools button:disabled{{opacity:.5;cursor:default}}
+.opnote{{background:var(--card2);border:1px solid var(--line);border-radius:8px;
+  padding:8px 12px;margin:0 0 12px;font-size:13px;white-space:pre-line}}
+.opdlg .btns button:disabled{{opacity:.5;cursor:default}}
 .ic svg{{width:58%;height:58%}}
 dialog.opdlg{{background:var(--card);color:var(--ink);border:1px solid var(--line);
   border-radius:12px;padding:20px;width:min(520px,92vw)}}
@@ -2363,6 +2366,7 @@ table.rep td.dim{{color:var(--dim)}}
   <h1 id="title">…</h1>
   <div class="area" id="area"></div>
   <div class="optools" id="optools"></div>
+  <div class="opnote" id="opnote" hidden></div>
   <div class="sum" id="sum"></div>
   <div class="cov"><i id="covbar" style="width:0%"></i></div>
 
@@ -2505,12 +2509,28 @@ function renderTools(r) {{
 
 function closeDlg(id) {{ document.getElementById(id).close(); }}
 
+// Итог действия на самой странице -- когда окно уже закрыто.
+function opNote(text) {{
+  const el = document.getElementById('opnote');
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(opNote.t);
+  opNote.t = setTimeout(() => {{ el.hidden = true; }}, 12000);
+}}
+
 function openUpload() {{
   document.getElementById('upFiles').value = '';
   document.getElementById('upMsg').textContent = '';
   document.getElementById('upProg').hidden = true;
+  document.getElementById('upGo').disabled = true;
   document.getElementById('upDlg').showModal();
 }}
+// «Загрузить» доступна, только когда выбраны НОВЫЕ файлы: после загрузки
+// выбор очищается, и повторное нажатие не отправит те же файлы ещё раз.
+document.getElementById('upFiles').addEventListener('change', e => {{
+  document.getElementById('upGo').disabled = !e.target.files.length;
+  document.getElementById('upMsg').textContent = '';
+}});
 
 // XMLHttpRequest, а не fetch: только он сообщает ход ОТПРАВКИ. Видео с
 // дрона -- гигабайты, и полоса, стоящая на месте десять минут, выглядит
@@ -2530,14 +2550,31 @@ function doUpload() {{
   x.open('POST', `/api/operations/${{OP}}/upload`);
   x.upload.onprogress = e => {{ if (e.lengthComputable) prog.value = e.loaded / e.total * 100; }};
   x.onload = () => {{
-    uploading = false; go.disabled = false;
+    uploading = false;
     let d = {{}};
     try {{ d = JSON.parse(x.responseText); }} catch (e) {{ d = {{error: 'сервер ответил ' + x.status}}; }}
     const parts = [];
     if (d.saved && d.saved.length) parts.push(`Загружено: ${{d.saved.length}}. Появятся в списке через несколько секунд.`);
+    if (d.skipped && d.skipped.length) parts.push('Пропущено, уже есть в операции:\\n' + d.skipped.join('\\n'));
     if (d.errors && d.errors.length) parts.push('Не принято:\\n' + d.errors.join('\\n'));
     if (!parts.length) parts.push(d.error || 'Не получилось');
-    msg.textContent = parts.join('\\n');
+    const text = parts.join('\\n');
+    const answered = d.saved !== undefined;      // сервер файлы принял и разобрал
+    if (answered) {{
+      // Выбор очищаем ВСЕГДА, когда сервер ответил по существу: те же
+      // файлы второй раз отправлять незачем, а кнопка оживёт при новом выборе.
+      document.getElementById('upFiles').value = '';
+      go.disabled = true;
+      prog.hidden = true;
+    }} else {{
+      go.disabled = false;                       // связь/права -- можно повторить
+    }}
+    if (answered && !(d.errors && d.errors.length)) {{
+      closeDlg('upDlg');
+      opNote(text);
+    }} else {{
+      msg.textContent = text;
+    }}
     if (d.saved && d.saved.length) setTimeout(loadBrowse, 4000);
   }};
   x.onerror = () => {{
@@ -3923,7 +3960,7 @@ def api_operation_upload(op_id):
     os.makedirs(media_dir, exist_ok=True)
 
     telemetry_dir = None
-    saved, errors = [], []
+    saved, skipped, errors = [], [], []
     for f in files:
         stem, ext = _sanitize_upload_filename(f.filename)
         if ext in sar_common.VIDEO_EXTS or ext in sar_common.PHOTO_EXTS:
@@ -3944,6 +3981,15 @@ def api_operation_upload(op_id):
         tmp_path = final_path + ".uploading"
         try:
             f.save(tmp_path)
+            twin = _already_uploaded(target_dir, stem, ext, os.path.getsize(tmp_path))
+            if twin:
+                # Тот же файл второй раз (форма не очистилась, нажали
+                # ещё раз, выбрали ту же папку снова). Сохранить рядом как
+                # «имя_1» значило бы завести ВТОРОЙ материал: воркер видит
+                # новый путь, и работа людей разойдётся по двум записям.
+                os.remove(tmp_path)
+                skipped.append(f"{f.filename} — уже загружен ({twin})")
+                continue
             os.replace(tmp_path, final_path)
             saved.append(os.path.basename(final_path))
         except OSError as e:
@@ -3956,7 +4002,31 @@ def api_operation_upload(op_id):
     if telemetry_dir is not None:
         global _TELEMETRY_INDEX
         _TELEMETRY_INDEX = sar_common.build_telemetry_index(telemetry_dir)
-    return jsonify({"ok": not errors, "saved": saved, "errors": errors, "folder": folder})
+    return jsonify({"ok": not errors, "saved": saved, "skipped": skipped,
+                    "errors": errors, "folder": folder})
+
+
+def _already_uploaded(target_dir, stem, ext, size):
+    """Имя уже лежащего в папке файла с тем же именем (или его «_N»-копией)
+    и тем же размером, либо None.
+
+    Имя + размер, а не хэш: видео с дрона -- гигабайты, считать хэш на
+    каждой загрузке значит заставить человека ждать второй раз. Совпадение
+    имени DJI (дата и номер до секунды) и размера до байта у РАЗНЫХ файлов
+    на практике не встречается."""
+    pat = re.compile(r"^%s(?:_\d+)?%s$" % (re.escape(stem), re.escape(ext)))
+    try:
+        names = os.listdir(target_dir)
+    except OSError:
+        return None
+    for name in names:
+        if pat.match(name):
+            try:
+                if os.path.getsize(os.path.join(target_dir, name)) == size:
+                    return name
+            except OSError:
+                continue
+    return None
 
 
 # Подпапка для загруженного через браузер внутри папки операции: так видно,

@@ -319,3 +319,49 @@ def test_run_button_hidden_for_non_admin(env):
     assert "const CAN_RUN = false;" in cl.get("/").get_data(as_text=True)
     _as(cl, sar_common.ROLE_ADMIN)
     assert "const CAN_RUN = true;" in cl.get("/").get_data(as_text=True)
+
+
+# --- повторная загрузка того же файла -----------------------------------------
+
+def _upload(cl, op, files):
+    return cl.post(f"/api/operations/{op}/upload", content_type="multipart/form-data",
+                   data={"files": [(io.BytesIO(b), n) for n, b in files]}).get_json()
+
+
+def test_same_file_twice_is_not_saved_again(env):
+    """Форма не очищалась после загрузки, и повторное «Загрузить» клало тот
+    же файл рядом как «имя_1» -- воркер завёл бы второй материал, и работа
+    людей разошлась бы по двум записям."""
+    cl = env["client"]
+    c = _conn(env)
+    op, folder = sar_common.create_operation_with_folder(c, env["watch"], "Повтор загрузки")
+    _as(cl, sar_common.ROLE_ADMIN)
+    first = _upload(cl, op, [("DJI_0001.MP4", b"video-bytes"), ("DJI_0001.SRT", b"1\n")])
+    assert len(first["saved"]) == 2 and first["skipped"] == []
+    again = _upload(cl, op, [("DJI_0001.MP4", b"video-bytes"), ("DJI_0001.SRT", b"1\n")])
+    assert again["ok"] and again["saved"] == [] and len(again["skipped"]) == 2
+    up = os.path.join(env["watch"], folder, sar_server.UPLOAD_SUBDIR)
+    assert os.listdir(up) == ["DJI_0001.mp4"]
+    assert not any(n.endswith(".uploading") for n in os.listdir(up))
+
+
+def test_same_name_different_content_is_kept(env):
+    cl = env["client"]
+    c = _conn(env)
+    op, folder = sar_common.create_operation_with_folder(c, env["watch"], "Тёзки")
+    _as(cl, sar_common.ROLE_ADMIN)
+    _upload(cl, op, [("a.mp4", b"first")])
+    r = _upload(cl, op, [("a.mp4", b"second, longer")])
+    assert r["saved"] == ["a_1.mp4"] and r["skipped"] == []
+    # и повтор второго тоже распознаётся
+    assert _upload(cl, op, [("a.mp4", b"second, longer")])["skipped"]
+
+
+def test_upload_dialog_clears_and_blocks_repeat(env):
+    cl = env["client"]
+    c = _conn(env)
+    op, _ = sar_common.create_operation_with_folder(c, env["watch"], "Окно")
+    _as(cl, sar_common.ROLE_ADMIN)
+    page = cl.get(f"/operation/{op}/").get_data(as_text=True)
+    assert "document.getElementById('upFiles').value = '';" in page
+    assert "upGo').disabled = !e.target.files.length" in page
