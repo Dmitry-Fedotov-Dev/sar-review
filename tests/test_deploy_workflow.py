@@ -34,8 +34,38 @@ def test_is_the_cd_starter():
         assert own not in s, f"{own}: своё поверх шаблона cd"
 
 
+def _action():
+    with open(os.path.join(ROOT, ".github", "actions", "checks", "action.yml"), encoding="utf-8") as f:
+        return f.read()
+
+
 def test_tests_run_before_deploy():
     s = _wf()
-    assert s.index("python -m pytest") < s.index("uses: Dmitry-Fedotov-Dev/cd@v1")
-    # на отведённой шаблоном строке, а не где придётся
-    assert s.index("# tests, lint, build checks go here") < s.index("python -m pytest")
+    # проверки -- общим действием, на отведённой шаблоном строке, ДО деплоя
+    assert s.index("# tests, lint, build checks go here") < s.index("uses: ./.github/actions/checks")
+    assert s.index("uses: ./.github/actions/checks") < s.index("uses: Dmitry-Fedotov-Dev/cd@v1")
+    a = _action()
+    assert "python -m pytest" in a and "--junitxml" in a
+
+
+def test_checks_keep_exit_code_after_summary():
+    """Сводка пишется и при падении, но красные тесты обязаны оставаться
+    красными -- иначе деплой ушёл бы с упавшими тестами."""
+    a = _action()
+    assert "|| rc=$?" in a and "exit $rc" in a
+
+
+def test_ci_project_action_is_pinned():
+    """Шаг из проекта ci -- с точной версией: неудачный релиз ci не должен
+    останавливать выкладку. (@v1 к тому же в ci нет как тега.)"""
+    import re
+    refs = re.findall(r"uses: Dmitry-Fedotov-Dev/ci/[^@\s]+@(\S+)", _action())
+    assert refs and all(re.fullmatch(r"v\d+\.\d+\.\d+", r) for r in refs), refs
+
+
+def test_ci_workflow_does_not_duplicate_master():
+    with open(os.path.join(ROOT, ".github", "workflows", "ci.yml"), encoding="utf-8") as f:
+        ci = f.read()
+    assert "pull_request" in ci and "branches-ignore: [master]" in ci
+    assert "uses: ./.github/actions/checks" in ci
+    assert "Dmitry-Fedotov-Dev/cd" not in ci, "ci.yml не деплоит"

@@ -1,0 +1,27 @@
+# Проверки на pull request и на ветках, кроме master. На master те же
+# проверки идут в deploy.yml перед деплоем -- второй раз гонять незачем.
+# Шаги -- в .github/actions/checks, общие с deploy.yml.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checks
+      # отчёт JUnit целиком -- на случай, если сводки мало
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: test-results/junit.xml
+          if-no-files-found: ignore

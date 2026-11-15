@@ -1,0 +1,36 @@
+# Проверки SAR Review -- ОДНО место для обоих workflow: deploy.yml вызывает
+# его на отведённой шаблоном cd строке перед деплоем, ci.yml -- на pull
+# request и прочих ветках. Две копии шагов разошлись бы.
+name: SAR Review checks
+description: pytest с отчётом JUnit и сводкой на странице запуска; promtool для monitoring/.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: requirements*.txt
+    - name: ffmpeg
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+    - shell: bash
+      run: pip install -r requirements-dev.txt
+    # Отчёт JUnit -- чтобы упавший тест было видно на странице запуска, а не
+    # искать в логе. Сводка пишется и при падении: код выхода pytest
+    # сохраняем и отдаём ПОСЛЕ сводки.
+    - name: tests
+      shell: bash
+      run: |
+        rc=0
+        python -m pytest -q --junitxml=test-results/junit.xml || rc=$?
+        python "${{ github.action_path }}/junit_summary.py" test-results/junit.xml >> "$GITHUB_STEP_SUMMARY" || true
+        exit $rc
+    # Конфиг Prometheus из monitoring/ -- готовым шагом проекта ci. Версия
+    # ЗАКРЕПЛЕНА (@v1.1.0, не @v1): неудачный релиз ci не должен
+    # останавливать выкладку инструмента поисковой операции; обновляемся
+    # по своему решению. Образ -- тот же, что в monitoring/docker-compose.yml.
+    - uses: Dmitry-Fedotov-Dev/ci/actions/promtool@v1.1.0
+      with:
+        dir: monitoring/prometheus
+        image: prom/prometheus:v3.1.0

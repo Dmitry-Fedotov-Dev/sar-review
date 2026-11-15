@@ -29,21 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # tests, lint, build checks go here — the server builds the release itself
-      # SAR Review: весь набор тестов. Красный -- на сервер не уходит ничего.
-      # status/logs/rollback код не трогают -- им тесты не нужны.
-      - uses: actions/setup-python@v5
-        if: ${{ (inputs.action || 'deploy') == 'deploy' }}
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements*.txt
-      - name: ffmpeg
-        if: ${{ (inputs.action || 'deploy') == 'deploy' }}
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # SAR Review: тесты (+ сводка JUnit) и promtool -- .github/actions/checks,
+      # общие с ci.yml. Красное -- на сервер не уходит ничего. status/logs/
+      # rollback код не трогают -- им проверки не нужны.
       - if: ${{ (inputs.action || 'deploy') == 'deploy' }}
-        run: pip install -r requirements-dev.txt
-      - if: ${{ (inputs.action || 'deploy') == 'deploy' }}
-        run: python -m pytest -q
+        uses: ./.github/actions/checks
       - uses: Dmitry-Fedotov-Dev/cd@v1
         with:
           server: ${{ vars.CD_SERVER }}
