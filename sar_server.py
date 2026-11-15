@@ -9487,7 +9487,10 @@ h1 {{ font-size:17px; margin:6px 0 4px; }}
              vector-effect:non-scaling-stroke; }}
 .box rect.under {{ stroke:rgba(0,0,0,.75); stroke-width:3; }}
 .hint {{ font-size:12px; color:#78838c; margin:9px 0 0; }}
-.cols {{ display:grid; grid-template-columns:1fr 330px; gap:18px; align-items:start; }}
+/* minmax(0,1fr), а не 1fr: у 1fr минимум -- ширина содержимого, и крупный
+   кадр раздвигал колонку так, что обсуждение уезжало за правый край экрана
+   с горизонтальной прокруткой. */
+.cols {{ display:grid; grid-template-columns:minmax(0,1fr) 330px; gap:18px; align-items:start; }}
 @media (max-width:900px) {{ .cols {{ grid-template-columns:1fr; }} }}
 .side {{ display:flex; flex-direction:column; gap:16px; }}
 .fld label {{ display:block; font-size:11px; letter-spacing:.08em;

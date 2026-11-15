@@ -245,7 +245,10 @@ FINDING_PREVIEW_FULL_QUALITY = 88
 def _generate_finding_preview(abs_path, seconds, bbox, out_path, out_full_path=None):
     try:
         import cv2
-    except ImportError:
+    except ImportError as e:
+        # Без OpenCV не будет ни одного кадра находки -- молчать нельзя.
+        print(f"[находки] OpenCV недоступен ({e}) -- кадры находок не вырезаются",
+              flush=True)
         return False
     cap = cv2.VideoCapture(abs_path)
     try:
@@ -821,6 +824,27 @@ def _start_prefetch(cloud_jobs, busy_name):
         return
 
 
+def proxy_loop():
+    """Сборка лёгких копий -- отдельно от прохода наблюдения.
+
+    Кодирование -- единственная по-настоящему долгая работа воркера
+    (минуты на файл). В общем цикле оно задерживало ВСЁ остальное; здесь
+    оно занимает только свой поток. По одной копии за раз, как и раньше
+    (PROXIES_PER_PASS): процессор нужен и детектору, и отдаче видео.
+    """
+    while True:
+        made = 0
+        try:
+            made = ensure_video_proxies(get_db()) or 0
+        except Exception as e:                          # noqa: BLE001
+            # Сбой одной сборки не должен останавливать поток навсегда --
+            # пишем причину и пробуем на следующем круге.
+            print(f"[копия] проход не удался: {e}", flush=True)
+        # Собрали -- сразу берёмся за следующую; нечего было -- ждём, как
+        # проход наблюдения, чтобы не опрашивать базу вхолостую.
+        time.sleep(1 if made else CFG["poll_interval_sec"])
+
+
 def ensure_video_proxies(conn):
     """Догенерировать недостающие лёгкие копии."""
     if not CFG.get("proxy_video", True):
@@ -982,13 +1006,18 @@ def ensure_finding_previews(conn):
         #
         # Это ЧЕТВЁРТЫЙ случай одной и той же ошибки: вопрос «где файл»
         # задаётся диску, а облако на него не отвечает. См. CLAUDE.md.
-        abs_path = sar_common.find_material_file(
-            WATCH_DIR, DATA_DIR, row["rel_path"])
-        if not abs_path:
-            proxy = sar_common.proxy_video_path(DATA_DIR, row["rel_path"])
-            abs_path = proxy if os.path.exists(proxy) else None
-        if not abs_path:
+        sources = []
+        original = sar_common.find_material_file(WATCH_DIR, DATA_DIR, row["rel_path"])
+        if original:
+            sources.append(original)
+        proxy = sar_common.proxy_video_path(DATA_DIR, row["rel_path"])
+        if os.path.exists(proxy):
+            sources.append(proxy)
+        if not sources:
             continue        # резать пока нечего -- это не ошибка, а «рано»
+        key = f"находка #{row['id']}"
+        if not _may_try(key):
+            continue        # не выходило уже несколько раз -- ждём паузу
         try:
             bbox = json.loads(row["bbox"]) if row["bbox"] else None
         except (ValueError, TypeError):
@@ -997,9 +1026,22 @@ def ensure_finding_previews(conn):
         if row["kind"] == "photo":
             # у фото таймкода нет -- кадр это сам снимок
             seconds = 0
-        if _generate_finding_preview(abs_path, seconds, bbox, out_path, out_full):
+        # Сначала оригинал, при неудаче -- лёгкая копия: тот же материал с
+        # теми же таймкодами, но в H.264, который читается всегда. Оригинал
+        # с телефона бывает в формате, который не открылся, и находка
+        # оставалась пустым квадратом, хотя копия лежала рядом.
+        if any(_generate_finding_preview(src, seconds, bbox, out_path, out_full)
+               for src in sources):
+            _note_success(key)
             made += 1
-            print(f"[находки] превью пометки #{row['id']} готово")
+            print(f"[находки] превью пометки #{row['id']} готово", flush=True)
+        else:
+            # Раньше неудача молчала и повторялась каждые 15 секунд, вечно.
+            n = _note_failure(key, "находки")
+            if n == 1:
+                print(f"[находки] {key}: кадр не вырезался из "
+                      f"{', '.join(os.path.basename(x) for x in sources)} "
+                      f"на {seconds:.1f} с -- повторю позже", flush=True)
     return made
 
 
@@ -1479,13 +1521,12 @@ def watcher_loop():
         except Exception as e:                          # noqa: BLE001
             print(f"[превью] не запустились: {e}", flush=True)
 
-        # Лёгкие копии -- последними в проходе и по одной за раз: это самая
-        # долгая из фоновых работ, и она не должна задерживать ни постановку
-        # новых файлов в очередь, ни отметку "воркер жив".
-        try:
-            ensure_video_proxies(get_db())
-        except Exception as e:
-            print(f"[копия] проход не удался: {e}")
+        # Лёгкие копии -- НЕ здесь, а в своём потоке (proxy_loop). Раньше
+        # они собирались в конце этого прохода, и следующий проход ждал, пока
+        # ffmpeg докодирует видео: на двух ядрах VPS ролик с телефона в 4K
+        # -- это десять минут и больше. Всё это время стояли кадры находок
+        # («Кадр готовится…» на только что отмеченной находке), превью и
+        # регистрация облачного материала (15.11.2026).
 
         # Отметка "жив" -- ставится ПОСЛЕ обработки ошибки, а не вместо неё:
         # воркер, у которого падает сканирование, всё равно живой процесс,
@@ -1845,6 +1886,7 @@ def main():
     print(f"[worker] воркеров обработки: {max(1, CFG['workers'])}")
 
     threading.Thread(target=watcher_loop, daemon=True).start()
+    threading.Thread(target=proxy_loop, name="proxies", daemon=True).start()
     threads = [threading.Thread(target=worker_loop, args=(i,), daemon=True)
                for i in range(max(1, CFG["workers"]))]
     for t in threads:

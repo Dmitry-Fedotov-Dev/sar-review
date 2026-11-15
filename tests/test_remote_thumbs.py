@@ -305,9 +305,12 @@ def test_previews_run_beside_proxy_building():
     import pathlib
     src = (pathlib.Path(__file__).resolve().parent.parent / "sar_worker.py"
            ).read_text(encoding="utf-8")
-    i = src.index("_start_remote_thumbs()")
-    j = src.index("ensure_video_proxies(get_db())")
-    assert i < j, "превью запускаются после сборки копий -- значит ждут её"
+    # С 15.11.2026 копии собираются в СВОЁМ потоке (proxy_loop) и проход
+    # наблюдения не ждут вовсе -- проверяем именно это, а не порядок строк.
+    start = src.index("def watcher_loop")
+    body = src[start:src.index("\ndef ", start + 10)]
+    assert "_start_remote_thumbs()" in body
+    assert "ensure_video_proxies(" not in body, "сборка копий снова в общем проходе"
 
 
 # --- пропускная способность фонового потока -------------------------------
